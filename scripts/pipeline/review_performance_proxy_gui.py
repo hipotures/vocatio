@@ -1,0 +1,1519 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import shutil
+import sys
+from collections import OrderedDict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Optional
+
+
+def ensure_venv_python() -> None:
+    if os.environ.get("SCRIPTOZA_VENV_BOOTSTRAPPED") == "1":
+        return
+    repo_root = Path(__file__).resolve().parent.parent
+    venv_python = repo_root / ".venv" / "bin" / "python"
+    if not venv_python.exists():
+        return
+    if Path(sys.executable).resolve() == venv_python.resolve():
+        return
+    env = os.environ.copy()
+    env["SCRIPTOZA_VENV_BOOTSTRAPPED"] = "1"
+    os.execve(str(venv_python), [str(venv_python), *sys.argv], env)
+
+
+ensure_venv_python()
+
+
+def configure_qt_logging() -> None:
+    rule = "qt.qpa.wayland.textinput.warning=false"
+    current = os.environ.get("QT_LOGGING_RULES", "").strip()
+    if not current:
+        os.environ["QT_LOGGING_RULES"] = rule
+        return
+    rules = [entry.strip() for entry in current.split(";") if entry.strip()]
+    if rule not in rules:
+        rules.append(rule)
+        os.environ["QT_LOGGING_RULES"] = ";".join(rules)
+
+
+configure_qt_logging()
+
+from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImageReader, QKeySequence, QPixmap
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QDockWidget,
+    QFormLayout,
+    QHeaderView,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QScrollArea,
+    QSplitter,
+    QStatusBar,
+    QToolTip,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+THUMB_SIZE = 160
+TREE_ICON_SIZE_MINI = 24
+TREE_ICON_SIZE_FULL_MINI = 96
+PREVIEW_CACHE_LIMIT = 4096
+LONG_SET_THRESHOLD_SECONDS = 360
+PHOTO_GAP_THRESHOLD_SECONDS = 600
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Review assigned proxy JPG files per performance in a simple PySide6 tree viewer."
+    )
+    parser.add_argument("day_dir", help="Path to a single day directory like /data/20260323")
+    parser.add_argument(
+        "--workspace-dir",
+        help="Override the workspace directory. Default: DAY/_workspace",
+    )
+    parser.add_argument(
+        "--index",
+        default="performance_proxy_index.json",
+        help="Index filename inside workspace or absolute path. Default: performance_proxy_index.json",
+    )
+    parser.add_argument(
+        "--state",
+        default="review_state.json",
+        help="State filename inside workspace or absolute path. Default: review_state.json",
+    )
+    parser.add_argument(
+        "--ui-scale",
+        default="auto",
+        help='UI scale factor like "1.25" or "auto". Default: auto',
+    )
+    return parser.parse_args()
+
+
+class ImageLoaderSignals(QObject):
+    loaded = Signal(str, QPixmap, str)
+
+
+class ImageLoader(QRunnable):
+    def __init__(self, path: str, kind: str, max_size: Optional[int] = None) -> None:
+        super().__init__()
+        self.path = path
+        self.kind = kind
+        self.max_size = max_size
+        self.signals = ImageLoaderSignals()
+
+    def run(self) -> None:
+        reader = QImageReader(self.path)
+        reader.setAutoTransform(True)
+        image = reader.read()
+        if image.isNull():
+            return
+        pixmap = QPixmap.fromImage(image)
+        if self.max_size is not None:
+            pixmap = pixmap.scaled(
+                QSize(self.max_size, self.max_size),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        self.signals.loaded.emit(self.path, pixmap, self.kind)
+
+
+class PerformanceTree(QTreeWidget):
+    previousPerformanceRequested = Signal()
+    nextPerformanceRequested = Signal()
+    togglePerformanceRequested = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMouseTracking(True)
+        self.hover_item: Optional[QTreeWidgetItem] = None
+        self.hover_tooltip_pos = None
+        self.hover_timer = QTimer(self)
+        self.hover_timer.setSingleShot(True)
+        self.hover_timer.setInterval(3000)
+        self.hover_timer.timeout.connect(self.show_hover_tooltip)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Space:
+            self.togglePerformanceRequested.emit()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Right:
+            self.nextPerformanceRequested.emit()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Left:
+            self.previousPerformanceRequested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        point = event.position().toPoint()
+        item = self.itemAt(point)
+        if item is not self.hover_item:
+            self.hover_item = item
+            self.hover_timer.stop()
+            QToolTip.hideText()
+            if item is not None:
+                self.hover_tooltip_pos = self.viewport().mapToGlobal(point)
+                self.hover_timer.start()
+        else:
+            self.hover_tooltip_pos = self.viewport().mapToGlobal(point)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.hover_item = None
+        self.hover_timer.stop()
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
+    def show_hover_tooltip(self) -> None:
+        item = self.hover_item
+        if item is None or self.hover_tooltip_pos is None:
+            return
+        tooltip = item.data(0, Qt.ToolTipRole)
+        if tooltip:
+            QToolTip.showText(self.hover_tooltip_pos, tooltip, self.viewport())
+
+
+class SplitSetDialog(QDialog):
+    def __init__(self, filename: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Split Set")
+        self.setModal(True)
+
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("Ceremony or 123")
+        self.set_checkbox = QCheckBox("Set")
+        self.set_checkbox.setStyleSheet(
+            "QCheckBox { spacing: 8px; }"
+            "QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #555; background: #fff; }"
+            "QCheckBox::indicator:checked { background: #2d6cdf; border: 1px solid #2d6cdf; }"
+        )
+
+        form_layout = QFormLayout()
+        form_layout.addRow("From file", QLabel(filename))
+        form_layout.addRow("Name", self.name_input)
+        form_layout.addRow("", self.set_checkbox)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+
+        layout = QVBoxLayout()
+        layout.addLayout(form_layout)
+        layout.addWidget(button_box)
+        self.setLayout(layout)
+
+    def split_name(self) -> str:
+        return self.name_input.text().strip()
+
+    def is_set_split(self) -> bool:
+        return self.set_checkbox.isChecked()
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, index_path: Path, state_path: Path, payload: Dict, initial_ui_scale: float) -> None:
+        super().__init__()
+        self.index_path = index_path
+        self.state_path = state_path
+        self.state_backup_path = state_path.with_suffix(f"{state_path.suffix}.old")
+        self.state_tmp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
+        self.payload = payload
+        self.raw_performances: List[Dict] = payload["performances"]
+        self.thread_pool = QThreadPool.globalInstance()
+        self.icon_cache: Dict[str, QPixmap] = {}
+        self.preview_cache: OrderedDict[str, QPixmap] = OrderedDict()
+        self.current_display_paths: List[str] = []
+        self.display_sets: List[Dict] = []
+        self.item_by_set_id: Dict[str, QTreeWidgetItem] = {}
+        self.display_items: List[QTreeWidgetItem] = []
+        self.selection_order_ids: List[str] = []
+        self.view_mode = 1
+        self.tree_icon_mode = "mini"
+        self.base_font = QFont(QApplication.font())
+        self.ui_scale = initial_ui_scale
+        self.review_state = self.load_review_state()
+        self.state_dirty = False
+        self.state_save_disabled = False
+
+        self.apply_ui_scale(self.ui_scale)
+
+        self.setWindowTitle(f"Performance Proxy Review - {payload['day']}")
+        self.resize(1600, 1000)
+
+        self.tree = PerformanceTree()
+        self.tree.setColumnCount(6)
+        self.tree.setHeaderLabels(["", "Set", "Photos", "Review", "First", "Len"])
+        self.tree.setUniformRowHeights(True)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.apply_tree_icon_mode()
+        tree_header = self.tree.header()
+        tree_header.setStretchLastSection(False)
+        tree_header.setSectionResizeMode(0, QHeaderView.Interactive)
+        tree_header.setSectionResizeMode(1, QHeaderView.Interactive)
+        tree_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        tree_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        tree_header.setSectionResizeMode(4, QHeaderView.Stretch)
+        tree_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.tree.setColumnWidth(0, self.minimum_preview_column_width())
+        self.tree.setColumnWidth(1, 120)
+        self.tree.itemSelectionChanged.connect(self.on_selection_changed)
+        self.tree.itemExpanded.connect(self.on_item_expanded)
+        self.tree.previousPerformanceRequested.connect(self.select_previous_set)
+        self.tree.nextPerformanceRequested.connect(self.select_next_set)
+        self.tree.togglePerformanceRequested.connect(self.toggle_current_set)
+
+        self.left_title = QLabel("Preview")
+        self.left_title.setAlignment(Qt.AlignCenter)
+        self.left_title.setStyleSheet("padding: 4px; font-weight: 600;")
+        self.left_image_label = QLabel("Select a set or photo.")
+        self.left_image_label.setAlignment(Qt.AlignCenter)
+        self.left_image_label.setMinimumSize(400, 300)
+        self.left_image_label.setStyleSheet("background: #111; color: #ddd;")
+        self.left_image_scroll = QScrollArea()
+        self.left_image_scroll.setWidgetResizable(True)
+        self.left_image_scroll.setWidget(self.left_image_label)
+
+        self.right_title = QLabel("Last")
+        self.right_title.setAlignment(Qt.AlignCenter)
+        self.right_title.setStyleSheet("padding: 4px; font-weight: 600;")
+        self.right_image_label = QLabel("")
+        self.right_image_label.setAlignment(Qt.AlignCenter)
+        self.right_image_label.setMinimumSize(400, 300)
+        self.right_image_label.setStyleSheet("background: #111; color: #ddd;")
+        self.right_image_scroll = QScrollArea()
+        self.right_image_scroll.setWidgetResizable(True)
+        self.right_image_scroll.setWidget(self.right_image_label)
+
+        self.left_image_panel = QWidget()
+        left_image_layout = QVBoxLayout()
+        left_image_layout.setContentsMargins(0, 0, 0, 0)
+        left_image_layout.addWidget(self.left_title)
+        left_image_layout.addWidget(self.left_image_scroll)
+        self.left_image_panel.setLayout(left_image_layout)
+
+        self.right_image_panel = QWidget()
+        right_image_layout = QVBoxLayout()
+        right_image_layout.setContentsMargins(0, 0, 0, 0)
+        right_image_layout.addWidget(self.right_title)
+        right_image_layout.addWidget(self.right_image_scroll)
+        self.right_image_panel.setLayout(right_image_layout)
+
+        self.image_pair_widget = QWidget()
+        image_pair_layout = QHBoxLayout()
+        image_pair_layout.setContentsMargins(0, 0, 0, 0)
+        image_pair_layout.addWidget(self.left_image_panel, 1)
+        image_pair_layout.addWidget(self.right_image_panel, 1)
+        self.image_pair_widget.setLayout(image_pair_layout)
+
+        self.meta_label = QLabel("")
+        self.meta_label.setWordWrap(True)
+        self.meta_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.meta_label.setStyleSheet("padding: 8px;")
+
+        splitter = QSplitter()
+        splitter.addWidget(self.tree)
+        splitter.addWidget(self.image_pair_widget)
+        splitter.setSizes([420, 1180])
+        self.setCentralWidget(splitter)
+
+        self.info_dock = QDockWidget("Info", self)
+        self.info_dock.setWidget(self.meta_label)
+        self.info_dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.info_dock)
+        self.info_dock.hide()
+
+        self.setStatusBar(QStatusBar())
+        self.migrate_split_state_keys()
+        self.rebuild_display_sets()
+        self.migrate_review_state_keys()
+        self.build_tree()
+        self.install_actions()
+        self.preload_set_images()
+        self.apply_view_mode()
+
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setInterval(10000)
+        self.autosave_timer.timeout.connect(self.autosave_state)
+        self.autosave_timer.start()
+
+        if self.display_items:
+            self.tree.setCurrentItem(self.display_items[0])
+
+    def install_actions(self) -> None:
+        fullscreen_action = QAction(self)
+        fullscreen_action.setShortcut(QKeySequence("F"))
+        fullscreen_action.triggered.connect(self.toggle_fullscreen)
+        self.addAction(fullscreen_action)
+
+        single_view_action = QAction(self)
+        single_view_action.setShortcut(QKeySequence("1"))
+        single_view_action.triggered.connect(lambda: self.set_view_mode(1))
+        self.addAction(single_view_action)
+
+        dual_view_action = QAction(self)
+        dual_view_action.setShortcut(QKeySequence("2"))
+        dual_view_action.triggered.connect(lambda: self.set_view_mode(2))
+        self.addAction(dual_view_action)
+
+        info_action = QAction(self)
+        info_action.setShortcut(QKeySequence("I"))
+        info_action.triggered.connect(self.toggle_info_panel)
+        self.addAction(info_action)
+
+        help_action = QAction(self)
+        help_action.setShortcut(QKeySequence("H"))
+        help_action.triggered.connect(self.show_help_dialog)
+        self.addAction(help_action)
+
+        reset_action = QAction(self)
+        reset_action.setShortcut(QKeySequence("R"))
+        reset_action.triggered.connect(self.confirm_reset_review_state)
+        self.addAction(reset_action)
+
+        split_action = QAction(self)
+        split_action.setShortcut(QKeySequence("S"))
+        split_action.triggered.connect(self.confirm_split_current_photo)
+        self.addAction(split_action)
+
+        merge_action = QAction(self)
+        merge_action.setShortcut(QKeySequence("M"))
+        merge_action.triggered.connect(self.confirm_merge_selected_sets)
+        self.addAction(merge_action)
+
+        no_photos_action = QAction(self)
+        no_photos_action.setShortcut(QKeySequence("X"))
+        no_photos_action.triggered.connect(self.toggle_no_photos_confirmed_current_set)
+        self.addAction(no_photos_action)
+
+        icon_mode_action = QAction(self)
+        icon_mode_action.setShortcut(QKeySequence("T"))
+        icon_mode_action.triggered.connect(self.toggle_tree_icon_mode)
+        self.addAction(icon_mode_action)
+
+        increase_scale_action = QAction(self)
+        increase_scale_action.setShortcut(QKeySequence("Ctrl+="))
+        increase_scale_action.triggered.connect(self.increase_ui_scale)
+        self.addAction(increase_scale_action)
+
+        increase_scale_alt_action = QAction(self)
+        increase_scale_alt_action.setShortcut(QKeySequence("Ctrl++"))
+        increase_scale_alt_action.triggered.connect(self.increase_ui_scale)
+        self.addAction(increase_scale_alt_action)
+
+        decrease_scale_action = QAction(self)
+        decrease_scale_action.setShortcut(QKeySequence("Ctrl+-"))
+        decrease_scale_action.triggered.connect(self.decrease_ui_scale)
+        self.addAction(decrease_scale_action)
+
+        reset_scale_action = QAction(self)
+        reset_scale_action.setShortcut(QKeySequence("Ctrl+0"))
+        reset_scale_action.triggered.connect(self.reset_ui_scale)
+        self.addAction(reset_scale_action)
+
+    def current_timestamp(self) -> str:
+        return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+    def apply_ui_scale(self, scale: float) -> None:
+        self.ui_scale = max(0.75, min(scale, 3.0))
+        scaled_font = QFont(self.base_font)
+        if scaled_font.pointSizeF() > 0:
+            scaled_font.setPointSizeF(self.base_font.pointSizeF() * self.ui_scale)
+        elif scaled_font.pointSize() > 0:
+            scaled_font.setPointSizeF(float(self.base_font.pointSize()) * self.ui_scale)
+        QApplication.setFont(scaled_font)
+
+    def change_ui_scale(self, delta: float) -> None:
+        self.apply_ui_scale(round(self.ui_scale + delta, 2))
+        self.statusBar().showMessage(f"UI scale: {self.ui_scale:.2f}")
+
+    def increase_ui_scale(self) -> None:
+        self.change_ui_scale(0.1)
+
+    def decrease_ui_scale(self) -> None:
+        self.change_ui_scale(-0.1)
+
+    def reset_ui_scale(self) -> None:
+        scale = detect_ui_scale(QApplication.instance(), "auto")
+        self.apply_ui_scale(scale)
+        self.statusBar().showMessage(f"UI scale: {self.ui_scale:.2f} (auto)")
+
+    def tree_icon_size(self) -> int:
+        if self.tree_icon_mode == "mini":
+            return TREE_ICON_SIZE_MINI
+        return TREE_ICON_SIZE_FULL_MINI
+
+    def minimum_preview_column_width(self) -> int:
+        return max(44, self.tree_icon_size() + 12)
+
+    def apply_tree_icon_mode(self) -> None:
+        icon_size = self.tree_icon_size()
+        self.tree.setIconSize(QSize(icon_size, icon_size))
+        if self.tree.columnWidth(0) < self.minimum_preview_column_width():
+            self.tree.setColumnWidth(0, self.minimum_preview_column_width())
+        self.tree.viewport().update()
+
+    def toggle_tree_icon_mode(self) -> None:
+        if self.tree_icon_mode == "mini":
+            self.tree_icon_mode = "full-mini"
+        else:
+            self.tree_icon_mode = "mini"
+        self.apply_tree_icon_mode()
+        self.statusBar().showMessage(f"Tree icon mode: {self.tree_icon_mode}")
+
+    def display_time(self, value: str) -> str:
+        if not value:
+            return ""
+        return value.split(".", 1)[0]
+
+    def duration_seconds(self, first_value: str, last_value: str) -> int:
+        if not first_value or not last_value:
+            return 0
+        start = datetime.fromisoformat(first_value)
+        end = datetime.fromisoformat(last_value)
+        return max(0, int((end - start).total_seconds()))
+
+    def max_internal_photo_gap_info(self, photos: List[Dict]) -> tuple[int, List[str]]:
+        if len(photos) < 2:
+            return 0, []
+        max_gap = 0.0
+        boundary_filenames: List[str] = []
+        previous_dt: Optional[datetime] = None
+        previous_filename = ""
+        for photo in photos:
+            current_dt = datetime.fromisoformat(photo["adjusted_start_local"])
+            if previous_dt is not None:
+                gap_seconds = (current_dt - previous_dt).total_seconds()
+                if gap_seconds > max_gap:
+                    max_gap = gap_seconds
+                    boundary_filenames = [previous_filename, photo["filename"]]
+            previous_dt = current_dt
+            previous_filename = photo["filename"]
+        return max(0, int(max_gap)), boundary_filenames
+
+    def default_review_state(self) -> Dict:
+        return {
+            "version": 2,
+            "day": self.payload["day"],
+            "updated_at": "",
+            "performances": {},
+            "splits": {},
+            "merges": [],
+        }
+
+    def load_review_state(self) -> Dict:
+        if not self.state_path.exists():
+            return self.default_review_state()
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return self.default_review_state()
+        if not isinstance(payload, dict):
+            return self.default_review_state()
+        payload.setdefault("version", 1)
+        payload.setdefault("day", self.payload["day"])
+        payload.setdefault("updated_at", "")
+        payload.setdefault("performances", {})
+        payload.setdefault("splits", {})
+        payload.setdefault("merges", [])
+        if not isinstance(payload["performances"], dict):
+            payload["performances"] = {}
+        if not isinstance(payload["splits"], dict):
+            payload["splits"] = {}
+        if not isinstance(payload["merges"], list):
+            payload["merges"] = []
+        return payload
+
+    def load_state_file(self, path: Path) -> Dict:
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def base_set_sort_key(self, item: Dict) -> tuple[str, str]:
+        return (item.get("performance_start_local", ""), item.get("set_id", ""))
+
+    def base_set_candidates_for_number(self, performance_number: str) -> List[Dict]:
+        candidates = [item for item in self.raw_performances if item.get("performance_number", "") == performance_number]
+        return sorted(candidates, key=self.base_set_sort_key)
+
+    def migrate_split_state_keys(self) -> None:
+        splits = self.review_state.setdefault("splits", {})
+        if not isinstance(splits, dict):
+            self.review_state["splits"] = {}
+            self.state_dirty = True
+            return
+        valid_base_ids = {item.get("set_id", "") for item in self.raw_performances}
+        migrated: Dict[str, List[Dict]] = {}
+        changed = False
+        for key, value in splits.items():
+            mapped_key = key
+            if mapped_key not in valid_base_ids:
+                candidates = self.base_set_candidates_for_number(key)
+                if candidates:
+                    mapped_key = candidates[0].get("set_id", key)
+            if mapped_key != key:
+                changed = True
+            target = migrated.setdefault(mapped_key, [])
+            if isinstance(value, list):
+                target.extend(spec for spec in value if isinstance(spec, dict))
+        if changed:
+            self.review_state["splits"] = migrated
+            self.review_state["version"] = 2
+            self.state_dirty = True
+
+    def map_legacy_review_key(self, key: str) -> str:
+        if any(item.get("set_id", "") == key for item in self.display_sets):
+            return key
+        if "::" in key:
+            base_key, filename = key.split("::", 1)
+            for display_set in self.display_sets:
+                if display_set["set_id"].endswith(f"::{filename}") and display_set["original_performance_number"] == base_key:
+                    return display_set["set_id"]
+        candidates = [item for item in self.display_sets if item["original_performance_number"] == key]
+        if candidates:
+            return candidates[0]["set_id"]
+        return ""
+
+    def merge_review_entries(self, target: Dict, source: Dict) -> Dict:
+        target["viewed"] = bool(target.get("viewed")) or bool(source.get("viewed"))
+        target["view_count"] = max(int(target.get("view_count") or 0), int(source.get("view_count") or 0))
+        target["no_photos_confirmed"] = bool(target.get("no_photos_confirmed")) or bool(source.get("no_photos_confirmed"))
+        first_values = [value for value in [target.get("first_viewed_at", ""), source.get("first_viewed_at", "")] if value]
+        last_values = [value for value in [target.get("last_viewed_at", ""), source.get("last_viewed_at", "")] if value]
+        target["first_viewed_at"] = min(first_values) if first_values else ""
+        target["last_viewed_at"] = max(last_values) if last_values else ""
+        return target
+
+    def migrate_review_state_keys(self) -> None:
+        performances = self.review_state.setdefault("performances", {})
+        if not isinstance(performances, dict):
+            self.review_state["performances"] = {}
+            self.state_dirty = True
+            return
+        migrated: Dict[str, Dict] = {}
+        changed = False
+        for key, value in performances.items():
+            if not isinstance(value, dict):
+                changed = True
+                continue
+            mapped_key = self.map_legacy_review_key(key)
+            if not mapped_key:
+                changed = True
+                continue
+            if mapped_key != key:
+                changed = True
+            target = migrated.setdefault(
+                mapped_key,
+                {
+                    "viewed": False,
+                    "first_viewed_at": "",
+                    "last_viewed_at": "",
+                    "view_count": 0,
+                    "no_photos_confirmed": False,
+                },
+            )
+            migrated[mapped_key] = self.merge_review_entries(target, value)
+        if changed:
+            self.review_state["performances"] = migrated
+            self.review_state["version"] = 2
+            self.state_dirty = True
+
+    def review_entry(self, set_id: str) -> Dict:
+        performances = self.review_state.setdefault("performances", {})
+        entry = performances.get(set_id)
+        if not isinstance(entry, dict):
+            entry = {
+                "viewed": False,
+                "first_viewed_at": "",
+                "last_viewed_at": "",
+                "view_count": 0,
+                "no_photos_confirmed": False,
+            }
+            performances[set_id] = entry
+        entry.setdefault("no_photos_confirmed", False)
+        return entry
+
+    def split_specs_for_original(self, original_set_id: str) -> List[Dict]:
+        splits = self.review_state.setdefault("splits", {})
+        specs = splits.get(original_set_id)
+        if not isinstance(specs, list):
+            specs = []
+            splits[original_set_id] = specs
+        return specs
+
+    def merge_specs(self) -> List[Dict]:
+        merges = self.review_state.setdefault("merges", [])
+        if not isinstance(merges, list):
+            merges = []
+            self.review_state["merges"] = merges
+        return merges
+
+    def selected_top_level_items(self) -> List[QTreeWidgetItem]:
+        selected_by_id: Dict[str, QTreeWidgetItem] = {}
+        for item in self.tree.selectedItems():
+            while item.parent() is not None:
+                item = item.parent()
+            display_set = item.data(0, Qt.UserRole)
+            if not display_set:
+                continue
+            selected_by_id[display_set["set_id"]] = item
+        ordered_items: List[QTreeWidgetItem] = []
+        for set_id in self.selection_order_ids:
+            item = selected_by_id.pop(set_id, None)
+            if item is not None:
+                ordered_items.append(item)
+        remaining = sorted(
+            selected_by_id.values(),
+            key=lambda item: self.display_items.index(item) if item in self.display_items else 10**9,
+        )
+        ordered_items.extend(remaining)
+        return ordered_items
+
+    def update_selection_order(self) -> None:
+        selected_items = []
+        selected_ids = set()
+        for item in self.tree.selectedItems():
+            while item.parent() is not None:
+                item = item.parent()
+            display_set = item.data(0, Qt.UserRole)
+            if not display_set:
+                continue
+            set_id = display_set["set_id"]
+            if set_id in selected_ids:
+                continue
+            selected_ids.add(set_id)
+            selected_items.append(item)
+        self.selection_order_ids = [set_id for set_id in self.selection_order_ids if set_id in selected_ids]
+        current = self.current_top_level_item()
+        if current is not None:
+            current_display_set = current.data(0, Qt.UserRole)
+            if current_display_set:
+                current_set_id = current_display_set["set_id"]
+                if current_set_id in selected_ids and current_set_id not in self.selection_order_ids:
+                    self.selection_order_ids.append(current_set_id)
+        for item in selected_items:
+            display_set = item.data(0, Qt.UserRole)
+            if not display_set:
+                continue
+            set_id = display_set["set_id"]
+            if set_id not in self.selection_order_ids:
+                self.selection_order_ids.append(set_id)
+
+    def apply_review_font(self, item: QTreeWidgetItem, set_id: str) -> None:
+        entry = self.review_entry(set_id)
+        display_set = item.data(0, Qt.UserRole) or {}
+        display_name = display_set.get("display_name", item.text(1))
+        is_viewed = bool(entry.get("viewed"))
+        item.setText(1, display_name)
+        font = QFont(QApplication.font())
+        font.setBold(not is_viewed)
+        font.setWeight(QFont.Normal if is_viewed else QFont.Bold)
+        font.setItalic(False)
+        foreground = QColor("#777777") if bool(entry.get("no_photos_confirmed")) else QColor("#000000")
+        for column in range(self.tree.columnCount()):
+            item.setFont(column, font)
+            item.setForeground(column, foreground)
+        tooltip = "no_photos_confirmed" if bool(entry.get("no_photos_confirmed")) else ""
+        item.setData(0, Qt.ToolTipRole, tooltip)
+
+    def toggle_no_photos_confirmed_current_set(self) -> None:
+        item = self.current_top_level_item()
+        if item is None:
+            return
+        display_set = item.data(0, Qt.UserRole)
+        set_id = display_set["set_id"]
+        entry = self.review_entry(set_id)
+        entry["no_photos_confirmed"] = not bool(entry.get("no_photos_confirmed"))
+        self.review_state["updated_at"] = self.current_timestamp()
+        self.state_dirty = True
+        self.apply_review_font(item, set_id)
+        state_text = "enabled" if entry["no_photos_confirmed"] else "disabled"
+        if self.flush_review_state():
+            self.statusBar().showMessage(f"no_photos_confirmed {state_text} for set {display_set['display_name']}")
+        else:
+            self.statusBar().showMessage(
+                f"no_photos_confirmed {state_text} for set {display_set['display_name']} in memory, but save failed"
+            )
+
+    def reset_review_fonts(self) -> None:
+        for set_id, item in self.item_by_set_id.items():
+            self.apply_review_font(item, set_id)
+
+    def mark_set_viewed(self, set_id: str) -> None:
+        entry = self.review_entry(set_id)
+        if entry.get("viewed"):
+            entry["last_viewed_at"] = self.current_timestamp()
+        else:
+            timestamp = self.current_timestamp()
+            entry["viewed"] = True
+            entry["first_viewed_at"] = timestamp
+            entry["last_viewed_at"] = timestamp
+            entry["view_count"] = int(entry.get("view_count") or 0) + 1
+            item = self.item_by_set_id.get(set_id)
+            if item is not None:
+                self.apply_review_font(item, set_id)
+        self.review_state["updated_at"] = self.current_timestamp()
+        self.state_dirty = True
+
+    def rebuild_display_sets(self) -> None:
+        display_sets: List[Dict] = []
+        for original in self.raw_performances:
+            base_set_id = original.get("set_id") or original["performance_number"]
+            original_number = original["performance_number"]
+            photos = list(original["photos"])
+            if not photos:
+                display_sets.append(
+                    {
+                        "set_id": base_set_id,
+                        "base_set_id": base_set_id,
+                        "display_name": original_number,
+                        "original_performance_number": original_number,
+                        "occurrence_index": original.get("occurrence_index", ""),
+                        "duplicate_status": original.get("duplicate_status", "normal"),
+                        "timeline_status": original["timeline_status"],
+                        "performance_start_local": original["performance_start_local"],
+                        "performance_end_local": original["performance_end_local"],
+                        "photo_count": 0,
+                        "review_count": 0,
+                        "first_photo_local": "",
+                        "last_photo_local": "",
+                        "duration_seconds": 0,
+                        "max_internal_photo_gap_seconds": 0,
+                        "gap_boundary_filenames": [],
+                        "first_proxy_path": "",
+                        "last_proxy_path": "",
+                        "first_source_path": "",
+                        "last_source_path": "",
+                        "photos": [],
+                    }
+                )
+                continue
+
+            photo_index = {photo["filename"]: index for index, photo in enumerate(photos)}
+            valid_specs = []
+            for spec in self.split_specs_for_original(base_set_id):
+                start_filename = spec.get("start_filename", "")
+                if start_filename not in photo_index:
+                    continue
+                valid_specs.append(
+                    {
+                        "start_filename": start_filename,
+                        "start_index": photo_index[start_filename],
+                        "new_name": spec.get("new_name", "").strip(),
+                    }
+                )
+            valid_specs.sort(key=lambda spec: spec["start_index"])
+
+            segment_starts = [0] + [spec["start_index"] for spec in valid_specs]
+            segment_names = [original_number] + [spec["new_name"] or original_number for spec in valid_specs]
+            segment_ids = [base_set_id] + [f"{base_set_id}::{spec['start_filename']}" for spec in valid_specs]
+
+            for segment_number, start_index in enumerate(segment_starts):
+                end_index = segment_starts[segment_number + 1] if segment_number + 1 < len(segment_starts) else len(photos)
+                segment_photos = photos[start_index:end_index]
+                if not segment_photos:
+                    continue
+
+                normalized_photos = []
+                first_proxy_path = ""
+                last_proxy_path = ""
+                for photo in segment_photos:
+                    photo_entry = dict(photo)
+                    photo_entry["original_performance_number"] = original_number
+                    photo_entry["base_set_id"] = base_set_id
+                    photo_entry["display_set_id"] = segment_ids[segment_number]
+                    photo_entry["display_name"] = segment_names[segment_number]
+                    normalized_photos.append(photo_entry)
+                    if photo_entry["proxy_exists"] and not first_proxy_path:
+                        first_proxy_path = photo_entry["proxy_path"]
+                    if photo_entry["proxy_exists"]:
+                        last_proxy_path = photo_entry["proxy_path"]
+
+                max_gap_seconds, gap_boundary_filenames = self.max_internal_photo_gap_info(normalized_photos)
+                if max_gap_seconds <= PHOTO_GAP_THRESHOLD_SECONDS:
+                    gap_boundary_filenames = []
+
+                display_sets.append(
+                    {
+                        "set_id": segment_ids[segment_number],
+                        "base_set_id": base_set_id,
+                        "display_name": segment_names[segment_number],
+                        "original_performance_number": original_number,
+                        "occurrence_index": original.get("occurrence_index", ""),
+                        "duplicate_status": original.get("duplicate_status", "normal"),
+                        "timeline_status": original["timeline_status"],
+                        "performance_start_local": original["performance_start_local"],
+                        "performance_end_local": original["performance_end_local"],
+                        "photo_count": len(normalized_photos),
+                        "review_count": sum(1 for photo in normalized_photos if photo["assignment_status"] == "review"),
+                        "first_photo_local": normalized_photos[0]["adjusted_start_local"],
+                        "last_photo_local": normalized_photos[-1]["adjusted_start_local"],
+                        "duration_seconds": self.duration_seconds(
+                            normalized_photos[0]["adjusted_start_local"],
+                            normalized_photos[-1]["adjusted_start_local"],
+                        ),
+                        "max_internal_photo_gap_seconds": max_gap_seconds,
+                        "gap_boundary_filenames": gap_boundary_filenames,
+                        "merged_manually": False,
+                        "first_proxy_path": first_proxy_path,
+                        "last_proxy_path": last_proxy_path,
+                        "first_source_path": normalized_photos[0]["source_path"],
+                        "last_source_path": normalized_photos[-1]["source_path"],
+                        "photos": normalized_photos,
+                    }
+                )
+        self.display_sets = self.apply_display_set_merges(display_sets)
+
+    def apply_display_set_merges(self, display_sets: List[Dict]) -> List[Dict]:
+        merged_sets = [dict(display_set) for display_set in display_sets]
+        for display_set in merged_sets:
+            display_set["photos"] = [dict(photo) for photo in display_set["photos"]]
+        for spec in self.merge_specs():
+            if not isinstance(spec, dict):
+                continue
+            target_set_id = spec.get("target_set_id", "")
+            source_set_id = spec.get("source_set_id", "")
+            if not target_set_id or not source_set_id or target_set_id == source_set_id:
+                continue
+            index_by_set_id = {display_set["set_id"]: index for index, display_set in enumerate(merged_sets)}
+            if target_set_id not in index_by_set_id or source_set_id not in index_by_set_id:
+                continue
+            target_index = index_by_set_id[target_set_id]
+            source_index = index_by_set_id[source_set_id]
+            target_set = merged_sets[target_index]
+            source_set = merged_sets[source_index]
+            combined_photos = target_set["photos"] + source_set["photos"]
+            first_proxy_path = target_set.get("first_proxy_path", "") or source_set.get("first_proxy_path", "")
+            last_proxy_path = source_set.get("last_proxy_path", "") or target_set.get("last_proxy_path", "")
+            first_source_path = target_set.get("first_source_path", "") or source_set.get("first_source_path", "")
+            last_source_path = source_set.get("last_source_path", "") or target_set.get("last_source_path", "")
+            if combined_photos:
+                combined_photos.sort(key=lambda photo: (photo["adjusted_start_local"], photo["filename"]))
+                first_photo_local = combined_photos[0]["adjusted_start_local"]
+                last_photo_local = combined_photos[-1]["adjusted_start_local"]
+                duration_seconds = self.duration_seconds(first_photo_local, last_photo_local)
+                review_count = sum(1 for photo in combined_photos if photo["assignment_status"] == "review")
+                max_gap_seconds, gap_boundary_filenames = self.max_internal_photo_gap_info(combined_photos)
+                if max_gap_seconds <= PHOTO_GAP_THRESHOLD_SECONDS:
+                    gap_boundary_filenames = []
+            else:
+                first_photo_local = ""
+                last_photo_local = ""
+                duration_seconds = 0
+                review_count = 0
+                max_gap_seconds = 0
+                gap_boundary_filenames = []
+            target_set["photos"] = combined_photos
+            target_set["photo_count"] = len(combined_photos)
+            target_set["review_count"] = review_count
+            target_set["first_photo_local"] = first_photo_local
+            target_set["last_photo_local"] = last_photo_local
+            target_set["duration_seconds"] = duration_seconds
+            target_set["max_internal_photo_gap_seconds"] = max_gap_seconds
+            target_set["gap_boundary_filenames"] = gap_boundary_filenames
+            target_set["merged_manually"] = True
+            target_set["first_proxy_path"] = first_proxy_path
+            target_set["last_proxy_path"] = last_proxy_path
+            target_set["first_source_path"] = first_source_path
+            target_set["last_source_path"] = last_source_path
+            target_set["performance_start_local"] = min(
+                value for value in [target_set.get("performance_start_local", ""), source_set.get("performance_start_local", "")]
+                if value
+            )
+            target_set["performance_end_local"] = source_set.get("performance_end_local", target_set["performance_end_local"])
+            target_set["timeline_status"] = source_set.get("timeline_status", target_set["timeline_status"])
+            merged_sets.pop(source_index)
+        return merged_sets
+
+    def build_tree(self) -> None:
+        self.tree.clear()
+        self.item_by_set_id = {}
+        self.display_items = []
+        for display_set in self.display_sets:
+            first_display_time = display_set["first_photo_local"] or display_set["performance_start_local"]
+            item = QTreeWidgetItem(
+                [
+                    "",
+                    display_set["display_name"],
+                    str(display_set["photo_count"]),
+                    str(display_set["review_count"]),
+                    self.display_time(first_display_time),
+                    str(display_set["duration_seconds"]),
+                ]
+            )
+            item.setData(0, Qt.UserRole, display_set)
+            item.setChildIndicatorPolicy(
+                QTreeWidgetItem.ShowIndicator if display_set["photo_count"] > 0 else QTreeWidgetItem.DontShowIndicatorWhenChildless
+            )
+            self.tree.addTopLevelItem(item)
+            self.item_by_set_id[display_set["set_id"]] = item
+            self.display_items.append(item)
+            self.apply_review_font(item, display_set["set_id"])
+            is_original_numeric_set = display_set["set_id"] == display_set["base_set_id"] and str(display_set["display_name"]).isdigit()
+            highlight_candidate = is_original_numeric_set and not display_set.get("merged_manually", False)
+            if highlight_candidate and display_set["duplicate_status"] == "duplicate_far" and display_set["set_id"] == display_set["base_set_id"]:
+                muted_red = QColor("#6e2a2a")
+                for column in range(self.tree.columnCount()):
+                    item.setBackground(column, muted_red)
+            elif highlight_candidate and display_set["max_internal_photo_gap_seconds"] > PHOTO_GAP_THRESHOLD_SECONDS:
+                muted_red = QColor("#6e2a2a")
+                for column in range(self.tree.columnCount()):
+                    item.setBackground(column, muted_red)
+            elif highlight_candidate and display_set["duration_seconds"] > LONG_SET_THRESHOLD_SECONDS:
+                muted_red = QColor("#6e2a2a")
+                for column in range(self.tree.columnCount()):
+                    item.setBackground(column, muted_red)
+        self.tree.resizeColumnToContents(2)
+        self.tree.resizeColumnToContents(3)
+        self.tree.resizeColumnToContents(5)
+        if self.tree.columnWidth(0) < self.minimum_preview_column_width():
+            self.tree.setColumnWidth(0, self.minimum_preview_column_width())
+        if self.tree.columnWidth(1) < 120:
+            self.tree.setColumnWidth(1, 120)
+
+    def flush_review_state(self) -> bool:
+        payload = dict(self.review_state)
+        payload["updated_at"] = self.current_timestamp()
+        encoded = json.dumps(payload, indent=2, ensure_ascii=True).encode("utf-8")
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            if self.state_path.exists():
+                shutil.copy2(self.state_path, self.state_backup_path)
+            with self.state_tmp_path.open("wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if not self.state_tmp_path.exists() or self.state_tmp_path.stat().st_size <= 0:
+                raise RuntimeError("Temporary state file is empty")
+            os.replace(self.state_tmp_path, self.state_path)
+            if not self.state_path.exists() or self.state_path.stat().st_size <= 0:
+                raise RuntimeError("State file is empty after save")
+        except Exception as error:
+            self.state_save_disabled = True
+            self.statusBar().showMessage(f"State save failed. Autosave disabled: {error}")
+            return False
+        self.review_state["updated_at"] = payload["updated_at"]
+        self.state_dirty = False
+        return True
+
+    def autosave_state(self) -> None:
+        if self.state_save_disabled or not self.state_dirty:
+            return
+        if self.flush_review_state():
+            self.statusBar().showMessage("Review state saved")
+
+    def preload_set_images(self) -> None:
+        for display_set in self.display_sets:
+            first_path = display_set.get("first_proxy_path") or ""
+            last_path = display_set.get("last_proxy_path") or ""
+            if first_path:
+                self.queue_image_load(first_path, "icon", THUMB_SIZE)
+                self.queue_image_load(first_path, "preview", None)
+            if last_path and last_path != first_path:
+                self.queue_image_load(last_path, "preview", None)
+
+    def queue_image_load(self, path: str, kind: str, max_size: Optional[int]) -> None:
+        loader = ImageLoader(path, kind, max_size=max_size)
+        loader.signals.loaded.connect(self.on_image_loaded)
+        self.thread_pool.start(loader)
+
+    def on_image_loaded(self, path: str, pixmap: QPixmap, kind: str) -> None:
+        if kind == "icon":
+            self.icon_cache[path] = pixmap
+            for display_set in self.display_sets:
+                if display_set.get("first_proxy_path") != path:
+                    continue
+                item = self.item_by_set_id.get(display_set["set_id"])
+                if item is not None:
+                    item.setIcon(0, QIcon(pixmap))
+                    if self.tree.columnWidth(0) < self.minimum_preview_column_width():
+                        self.tree.setColumnWidth(0, self.minimum_preview_column_width())
+        else:
+            self.store_preview(path, pixmap)
+            if path in self.current_display_paths:
+                self.refresh_preview_labels()
+
+    def store_preview(self, path: str, pixmap: QPixmap) -> None:
+        self.preview_cache[path] = pixmap
+        self.preview_cache.move_to_end(path)
+        while len(self.preview_cache) > PREVIEW_CACHE_LIMIT:
+            self.preview_cache.popitem(last=False)
+
+    def populate_children(self, item: QTreeWidgetItem) -> None:
+        if item.childCount() > 0:
+            return
+        display_set = item.data(0, Qt.UserRole)
+        is_original_numeric_set = display_set["set_id"] == display_set["base_set_id"] and str(display_set["display_name"]).isdigit()
+        show_gap_boundary = is_original_numeric_set and not display_set.get("merged_manually", False)
+        gap_boundary_filenames = set(display_set.get("gap_boundary_filenames", [])) if show_gap_boundary else set()
+        gap_highlight = QColor("#6e2a2a")
+        for photo in display_set["photos"]:
+            child = QTreeWidgetItem(
+                [
+                    "",
+                    photo["filename"],
+                    photo["assignment_status"],
+                    photo["stream_id"],
+                    self.display_time(photo["adjusted_start_local"]),
+                    "",
+                ]
+            )
+            child.setData(0, Qt.UserRole, photo)
+            if photo["filename"] in gap_boundary_filenames:
+                for column in range(self.tree.columnCount()):
+                    child.setBackground(column, gap_highlight)
+            item.addChild(child)
+
+    def on_item_expanded(self, item: QTreeWidgetItem) -> None:
+        self.populate_children(item)
+
+    def current_top_level_item(self) -> Optional[QTreeWidgetItem]:
+        item = self.tree.currentItem()
+        if item is None:
+            return None
+        while item.parent() is not None:
+            item = item.parent()
+        return item
+
+    def toggle_current_set(self) -> None:
+        item = self.current_top_level_item()
+        if item is None:
+            return
+        if item.isExpanded():
+            item.setExpanded(False)
+        else:
+            self.populate_children(item)
+            item.setExpanded(True)
+
+    def select_previous_set(self) -> None:
+        current = self.current_top_level_item()
+        if current is None:
+            return
+        index = self.display_items.index(current)
+        if index > 0:
+            self.tree.setCurrentItem(self.display_items[index - 1])
+
+    def select_next_set(self) -> None:
+        current = self.current_top_level_item()
+        if current is None:
+            return
+        index = self.display_items.index(current)
+        if index + 1 < len(self.display_items):
+            self.tree.setCurrentItem(self.display_items[index + 1])
+
+    def on_selection_changed(self) -> None:
+        item = self.tree.currentItem()
+        if item is None:
+            return
+        self.update_selection_order()
+        top_level_item = self.current_top_level_item()
+        if top_level_item is not None:
+            display_set = top_level_item.data(0, Qt.UserRole)
+            self.mark_set_viewed(display_set["set_id"])
+        if item.parent() is None:
+            display_set = item.data(0, Qt.UserRole)
+            first_photo_text = self.display_time(display_set["first_photo_local"]) if display_set["first_photo_local"] else "-"
+            last_photo_text = self.display_time(display_set["last_photo_local"]) if display_set["last_photo_local"] else "-"
+            self.meta_label.setText(
+                "\n".join(
+                    [
+                        f"Set: {display_set['display_name']}",
+                        f"Original performance: {display_set['original_performance_number']}",
+                    f"Set ID: {display_set['set_id']}",
+                    f"Duplicate: {display_set['duplicate_status']}",
+                    f"Photos: {display_set['photo_count']}",
+                    f"Review: {display_set['review_count']}",
+                    f"Duration: {display_set['duration_seconds']} s",
+                    f"Max photo gap: {display_set['max_internal_photo_gap_seconds']} s",
+                    f"No photos confirmed: {'yes' if self.review_entry(display_set['set_id']).get('no_photos_confirmed') else 'no'}",
+                    f"Timeline: {display_set['timeline_status']}",
+                    f"Start: {display_set['performance_start_local']}",
+                    f"End: {display_set['performance_end_local']}",
+                    f"First photo: {first_photo_text}",
+                    f"Last photo: {last_photo_text}",
+                    ]
+                )
+            )
+            self.statusBar().showMessage(
+                f"Set {display_set['display_name']} - {display_set['photo_count']} photos - view {self.view_mode}"
+            )
+            self.show_display_set(display_set)
+            return
+        photo = item.data(0, Qt.UserRole)
+        self.meta_label.setText(
+            "\n".join(
+                [
+                    f"Set: {photo['display_name']}",
+                    f"Original performance: {photo['original_performance_number']}",
+                    f"Base set: {photo['base_set_id']}",
+                    f"File: {photo['filename']}",
+                    f"Time: {photo['adjusted_start_local']}",
+                    f"Status: {photo['assignment_status']}",
+                    f"Reason: {photo['assignment_reason']}",
+                    f"Nearest boundary: {photo['seconds_to_nearest_boundary']} s",
+                    f"Proxy exists: {'yes' if photo['proxy_exists'] else 'no'}",
+                ]
+            )
+        )
+        self.statusBar().showMessage(
+            f"Set {photo['display_name']} - {photo['filename']} - {photo['assignment_status']}"
+        )
+        self.show_single_preview(photo["proxy_path"], "Selected")
+
+    def set_view_mode(self, mode: int) -> None:
+        if self.view_mode == mode:
+            return
+        self.view_mode = mode
+        self.apply_view_mode()
+        self.on_selection_changed()
+
+    def apply_view_mode(self) -> None:
+        dual = self.view_mode == 2
+        self.right_image_panel.setVisible(dual)
+        self.statusBar().showMessage(f"View mode {self.view_mode} | I toggles info panel")
+
+    def toggle_info_panel(self) -> None:
+        self.info_dock.setVisible(not self.info_dock.isVisible())
+
+    def show_help_dialog(self) -> None:
+        QMessageBox.information(
+            self,
+            "Keyboard Help",
+            "\n".join(
+                [
+                    "Space: expand or collapse the current set",
+                    "Left: previous set",
+                    "Right: next set",
+                    "1: single-preview mode",
+                    "2: dual-preview mode",
+                    "I: toggle info panel",
+                    "M: merge selected sets into the first selected set",
+                    "T: toggle tree icon size",
+                    "Ctrl-click: add or remove sets from the selection",
+                    "Shift-click: select a range of sets",
+                    "Ctrl+=: increase UI scale",
+                    "Ctrl+-: decrease UI scale",
+                    "Ctrl+0: reset UI scale to auto",
+                    "F: toggle fullscreen",
+                    "H: show this help",
+                    "R: reset review state",
+                    "S: split the current set from the selected photo into a new named set",
+                    "X: toggle no_photos_confirmed for the current set",
+                ]
+            ),
+        )
+
+    def confirm_reset_review_state(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Reset Review State",
+            f"Reset review state for {self.payload['day']}?\n\nThis will mark every set as unreviewed and remove all splits.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.review_state = self.default_review_state()
+        self.state_dirty = True
+        self.state_save_disabled = False
+        self.rebuild_tree_after_state_change()
+        if self.flush_review_state():
+            self.statusBar().showMessage("Review state reset")
+        else:
+            self.statusBar().showMessage("Review state reset in memory, but save failed")
+
+    def confirm_split_current_photo(self) -> None:
+        item = self.tree.currentItem()
+        if item is None or item.parent() is None:
+            QMessageBox.information(self, "Split Set", "Select a photo inside a set before splitting.")
+            return
+        photo = item.data(0, Qt.UserRole)
+        dialog = SplitSetDialog(photo["filename"], self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        new_name = dialog.split_name()
+        is_set_split = dialog.is_set_split()
+        if not new_name:
+            QMessageBox.warning(self, "Split Set", "Set name cannot be empty.")
+            return
+        if is_set_split and not new_name.isdigit():
+            QMessageBox.warning(self, "Split Set", 'When "Set" is enabled, name must contain only digits.')
+            return
+        if not is_set_split and new_name.isdigit():
+            QMessageBox.warning(self, "Split Set", 'When "Set" is disabled, name cannot contain only digits.')
+            return
+        original_number = photo["original_performance_number"]
+        base_set_id = photo["base_set_id"]
+        start_filename = photo["filename"]
+        split_specs = self.split_specs_for_original(base_set_id)
+        for spec in split_specs:
+            if spec.get("start_filename") == start_filename:
+                QMessageBox.warning(
+                    self,
+                    "Split Set",
+                    f"A split starting at {start_filename} already exists for original performance {original_number}.",
+                )
+                return
+        split_specs.append(
+            {
+                "start_filename": start_filename,
+                "new_name": new_name,
+                "is_set_split": is_set_split,
+                "created_at": self.current_timestamp(),
+            }
+        )
+        self.review_state["updated_at"] = self.current_timestamp()
+        self.state_dirty = True
+        preferred_set_id = f"{base_set_id}::{start_filename}"
+        self.rebuild_tree_after_state_change(preferred_set_id=preferred_set_id, preferred_filename=start_filename)
+        if self.flush_review_state():
+            self.statusBar().showMessage(f"Split created: {new_name}")
+        else:
+            self.statusBar().showMessage(f"Split created: {new_name} in memory, but save failed")
+
+    def confirm_merge_selected_sets(self) -> None:
+        selected_items = self.selected_top_level_items()
+        if not selected_items:
+            QMessageBox.information(self, "Merge Sets", "Select a set before merging.")
+            return
+        if len(selected_items) == 1:
+            target_item = selected_items[0]
+            if target_item not in self.display_items:
+                QMessageBox.information(self, "Merge Sets", "Select a valid set before merging.")
+                return
+            current_index = self.display_items.index(target_item)
+            if current_index + 1 >= len(self.display_items):
+                QMessageBox.information(self, "Merge Sets", "The current set has no next set to merge.")
+                return
+            source_items = [self.display_items[current_index + 1]]
+        else:
+            target_item = selected_items[0]
+            source_items = selected_items[1:]
+        target_set = target_item.data(0, Qt.UserRole)
+        source_sets = [source_item.data(0, Qt.UserRole) for source_item in source_items]
+        source_sets = [source_set for source_set in source_sets if source_set and source_set["set_id"] != target_set["set_id"]]
+        if not source_sets:
+            QMessageBox.information(self, "Merge Sets", "No source set selected for merge.")
+            return
+        message_box = QMessageBox(self)
+        message_box.setWindowTitle("Merge Sets")
+        message_box.setTextFormat(Qt.RichText)
+        if len(source_sets) == 1:
+            message_box.setText(
+                f"Add set <b>{source_sets[0]['display_name']}</b> to set <b>{target_set['display_name']}</b>?"
+            )
+        else:
+            source_lines = "<br>".join(
+                f"{source_set['display_name']} | {self.display_time(source_set.get('performance_start_local', ''))}"
+                for source_set in source_sets
+            )
+            message_box.setText(
+                f"Add <b>{len(source_sets)}</b> selected sets to set <b>{target_set['display_name']}</b>?<br><br>{source_lines}"
+            )
+        message_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        message_box.setDefaultButton(QMessageBox.No)
+        if message_box.exec() != QMessageBox.Yes:
+            return
+        target_entry = self.review_entry(target_set["set_id"])
+        existing_pairs = {
+            (spec.get("target_set_id", ""), spec.get("source_set_id", ""))
+            for spec in self.merge_specs()
+            if isinstance(spec, dict)
+        }
+        merged_names: List[str] = []
+        for source_set in source_sets:
+            pair = (target_set["set_id"], source_set["set_id"])
+            if pair in existing_pairs:
+                continue
+            self.merge_specs().append(
+                {
+                    "target_set_id": target_set["set_id"],
+                    "source_set_id": source_set["set_id"],
+                    "created_at": self.current_timestamp(),
+                }
+            )
+            source_entry = self.review_entry(source_set["set_id"])
+            self.review_state["performances"][target_set["set_id"]] = self.merge_review_entries(target_entry, source_entry)
+            if source_set["set_id"] in self.review_state.get("performances", {}):
+                self.review_state["performances"].pop(source_set["set_id"], None)
+            merged_names.append(source_set["display_name"])
+        self.review_state["updated_at"] = self.current_timestamp()
+        self.state_dirty = True
+        self.rebuild_tree_after_state_change(preferred_set_id=target_set["set_id"])
+        if self.flush_review_state():
+            merged_label = ", ".join(merged_names) if merged_names else "selected sets"
+            self.statusBar().showMessage(f"Merged {merged_label} into {target_set['display_name']}")
+        else:
+            self.statusBar().showMessage(
+                f"Merged selected sets into {target_set['display_name']} in memory, but save failed"
+            )
+
+    def show_display_set(self, display_set: Dict) -> None:
+        first_path = display_set.get("first_proxy_path") or ""
+        last_path = display_set.get("last_proxy_path") or ""
+        if self.view_mode == 2 and last_path:
+            self.show_dual_preview(first_path, last_path, "First", "Last")
+            return
+        self.show_single_preview(first_path, "First")
+
+    def show_single_preview(self, path: str, title: str) -> None:
+        self.left_title.setText(title)
+        self.right_title.setText("")
+        self.current_display_paths = [path] if path else []
+        self.render_label_for_path(self.left_image_label, self.left_image_scroll, path, f"{title} preview")
+        self.right_image_label.setPixmap(QPixmap())
+        self.right_image_label.setText("")
+
+    def show_dual_preview(self, left_path: str, right_path: str, left_title: str, right_title: str) -> None:
+        self.left_title.setText(left_title)
+        self.right_title.setText(right_title)
+        self.current_display_paths = [path for path in [left_path, right_path] if path]
+        self.render_label_for_path(self.left_image_label, self.left_image_scroll, left_path, f"{left_title} preview")
+        self.render_label_for_path(self.right_image_label, self.right_image_scroll, right_path, f"{right_title} preview")
+
+    def render_label_for_path(self, label: QLabel, scroll_area: QScrollArea, path: str, description: str) -> None:
+        if not path:
+            label.setPixmap(QPixmap())
+            label.setText("")
+            self.statusBar().showMessage("No preview available for the current selection")
+            return
+        if not Path(path).exists():
+            label.setPixmap(QPixmap())
+            label.setText("")
+            self.statusBar().showMessage(f"Preview not generated yet: {Path(path).name}")
+            return
+        cached = self.preview_cache.get(path)
+        if cached is not None:
+            self.preview_cache.move_to_end(path)
+            viewport_size = scroll_area.viewport().size()
+            scaled = cached.scaled(viewport_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            label.setText("")
+            label.setPixmap(scaled)
+            return
+        self.statusBar().showMessage(f"Loading {description}: {Path(path).name}")
+        self.queue_image_load(path, "preview", None)
+
+    def refresh_preview_labels(self) -> None:
+        current_item = self.tree.currentItem()
+        if current_item is None:
+            return
+        if current_item.parent() is None:
+            display_set = current_item.data(0, Qt.UserRole)
+            self.show_display_set(display_set)
+            return
+        photo = current_item.data(0, Qt.UserRole)
+        self.show_single_preview(photo["proxy_path"], "Selected")
+
+    def rebuild_tree_after_state_change(self, preferred_set_id: str = "", preferred_filename: str = "") -> None:
+        self.migrate_split_state_keys()
+        self.rebuild_display_sets()
+        self.migrate_review_state_keys()
+        self.build_tree()
+        self.preload_set_images()
+        self.apply_view_mode()
+        if preferred_set_id:
+            item = self.item_by_set_id.get(preferred_set_id)
+            if item is not None:
+                self.tree.setCurrentItem(item)
+                if preferred_filename:
+                    self.populate_children(item)
+                    for index in range(item.childCount()):
+                        child = item.child(index)
+                        photo = child.data(0, Qt.UserRole)
+                        if photo["filename"] == preferred_filename:
+                            item.setExpanded(True)
+                            self.tree.setCurrentItem(child)
+                            break
+                return
+        if self.display_items:
+            self.tree.setCurrentItem(self.display_items[0])
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self.current_display_paths:
+            self.refresh_preview_labels()
+
+    def toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    def closeEvent(self, event) -> None:
+        if self.state_dirty and not self.state_save_disabled:
+            self.flush_review_state()
+        super().closeEvent(event)
+
+
+def detect_ui_scale(app: QApplication, requested_scale: str) -> float:
+    if requested_scale != "auto":
+        try:
+            return max(0.75, min(float(requested_scale), 3.0))
+        except ValueError:
+            print(f"Error: invalid --ui-scale value: {requested_scale}")
+            raise SystemExit(1)
+    screen = app.primaryScreen()
+    if screen is None:
+        return 1.0
+    physical_dpi = screen.physicalDotsPerInch()
+    geometry = screen.availableGeometry()
+    dpi_scale = physical_dpi / 96.0 if physical_dpi > 0 else 1.0
+    resolution_scale = max(geometry.width() / 1920.0, geometry.height() / 1080.0)
+    if geometry.width() >= 3840 or geometry.height() >= 2160:
+        return max(1.4, min(max(dpi_scale, 1.5), 2.0))
+    if geometry.width() >= 2560 or geometry.height() >= 1440:
+        return max(1.15, min(max(dpi_scale, 1.25), 1.6))
+    return max(1.0, min(dpi_scale, 1.25))
+
+
+def main() -> int:
+    args = parse_args()
+
+    day_dir = Path(args.day_dir).resolve()
+    if not day_dir.exists() or not day_dir.is_dir():
+        print(f"Error: {args.day_dir} is not a directory.")
+        return 1
+
+    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+
+    index_path = Path(args.index)
+    if not index_path.is_absolute():
+        index_path = workspace_dir / index_path
+    if not index_path.exists():
+        print(f"Error: index not found: {index_path}")
+        return 1
+
+    state_path = Path(args.state)
+    if not state_path.is_absolute():
+        state_path = workspace_dir / state_path
+
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+
+    app = QApplication(sys.argv)
+    window = MainWindow(index_path, state_path, payload, detect_ui_scale(app, args.ui_scale))
+    window.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

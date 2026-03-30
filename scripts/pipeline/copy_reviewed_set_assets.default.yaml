@@ -1,0 +1,24 @@
+photo:
+  mode: convert
+  output_extension: .jpg
+  max_long_edge: 3200
+  quality: 90
+  auto_orient: true
+  strip_metadata: true
+  extra_args: []
+
+video:
+  mode: convert
+  output_extension: .mp4
+  video_codec: libx264
+  crf: 20
+  preset: slow
+  pixel_format: yuv420p
+  movflags: +faststart
+  audio_codec: aac
+  audio_bitrate: 160k
+  scale:
+    max_width: 1920
+    max_height: 1080
+    flags: lanczos
+  extra_args: []
