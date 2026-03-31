@@ -37,9 +37,24 @@ Included files:
 - `build_performance_proxy_index.py`
 - `review_performance_proxy_gui.py`
 - `copy_reviewed_set_assets.py`
-- `copy_reviewed_set_assets.default.yaml`
-- `copy_reviewed_set_assets.raw.yaml`
+- `test_segment_speech_music.py`
 - `demo_semantic_announcement_classifier.py`
+- `test_diarize_clip.py`
 - `build_semantic_announcement_demo.py`
 - `benchmark_semantic_announcement_models.py`
 - `generate_mv_commands_from_timeline.py`
+
+Configuration files:
+
+- `../../conf/copy_reviewed_set_assets.default.yaml`
+- `../../conf/copy_reviewed_set_assets.raw.yaml`
+
+Video export behavior in `copy_reviewed_set_assets.py`:
+
+- uses the reviewed set interval as the trim source
+- prefers `performance_start_local` and `performance_end_local`
+- falls back to first/last photo timestamps when needed
+- reads video trim settings from the YAML profile:
+  - `start_trim_seconds`
+  - `end_padding_seconds`
+- writes `video_markers.csv` next to exported set videos

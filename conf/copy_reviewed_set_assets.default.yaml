@@ -10,6 +10,8 @@ photo:
 video:
   mode: convert
   output_extension: .mp4
+  start_trim_seconds: 0
+  end_padding_seconds: 10
   video_codec: libx264
   crf: 20
   preset: slow

@@ -1,0 +1,7 @@
+photo:
+  mode: raw
+
+video:
+  mode: raw
+  start_trim_seconds: 0
+  end_padding_seconds: 10

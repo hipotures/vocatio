@@ -6,7 +6,7 @@ import json
 import shutil
 import subprocess
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -27,7 +27,9 @@ from rich.table import Table
 console = Console()
 PHOTO_GAP_THRESHOLD_SECONDS = 600
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_CONFIG_PATH = SCRIPT_DIR / "copy_reviewed_set_assets.default.yaml"
+REPO_ROOT = SCRIPT_DIR.parent.parent
+CONF_DIR = REPO_ROOT / "conf"
+DEFAULT_CONFIG_PATH = CONF_DIR / "copy_reviewed_set_assets.default.yaml"
 
 
 def parse_args() -> argparse.Namespace:
@@ -139,6 +141,9 @@ def resolve_profile_path(value: Optional[str]) -> Path:
     script_candidate = SCRIPT_DIR / value
     if script_candidate.exists():
         return script_candidate
+    conf_candidate = CONF_DIR / value
+    if conf_candidate.exists():
+        return conf_candidate
     return candidate.resolve()
 
 
@@ -180,6 +185,8 @@ def load_export_config(path: Path) -> Dict:
     video_config = {
         "mode": video_mode,
         "output_extension": normalize_extension(video.get("output_extension", ".mp4" if video_mode == "convert" else "")),
+        "start_trim_seconds": float(video.get("start_trim_seconds", 0)),
+        "end_padding_seconds": float(video.get("end_padding_seconds", 10)),
         "video_codec": str(video.get("video_codec", "libx264")),
         "crf": int(video.get("crf", 20)),
         "preset": str(video.get("preset", "slow")),
@@ -229,6 +236,7 @@ def rebuild_display_sets(raw_performances: Sequence[Dict], review_state: Dict) -
                 {
                     "set_id": base_set_id,
                     "base_set_id": base_set_id,
+                    "merged_base_set_ids": [base_set_id],
                     "display_name": original_number,
                     "original_performance_number": original_number,
                     "performance_start_local": original.get("performance_start_local", ""),
@@ -297,6 +305,7 @@ def rebuild_display_sets(raw_performances: Sequence[Dict], review_state: Dict) -
                 {
                     "set_id": segment_ids[segment_number],
                     "base_set_id": base_set_id,
+                    "merged_base_set_ids": [base_set_id],
                     "display_name": segment_names[segment_number],
                     "original_performance_number": original_number,
                     "performance_start_local": segment_start_local,
@@ -369,6 +378,13 @@ def apply_display_set_merges(display_sets: List[Dict], review_state: Dict) -> Li
         target_set["performance_start_local"] = min(start_candidates) if start_candidates else ""
         target_set["performance_end_local"] = max(end_candidates) if end_candidates else ""
         target_set["timeline_status"] = source_set.get("timeline_status", target_set["timeline_status"])
+        target_base_ids = list(target_set.get("merged_base_set_ids", [target_set["base_set_id"]]))
+        source_base_ids = list(source_set.get("merged_base_set_ids", [source_set["base_set_id"]]))
+        combined_base_ids: List[str] = []
+        for base_id in target_base_ids + source_base_ids:
+            if base_id not in combined_base_ids:
+                combined_base_ids.append(base_id)
+        target_set["merged_base_set_ids"] = combined_base_ids
         merged_sets.pop(source_index)
     return merged_sets
 
@@ -422,11 +438,13 @@ def intervals_overlap(start_a: datetime, end_a: datetime, start_b: datetime, end
     return start_a <= end_b and start_b <= end_a
 
 
-def collect_video_rows(merged_csv: Path, display_set: Dict, stream_filter: Optional[Dict[str, bool]]) -> List[Dict[str, str]]:
-    interval_start_text = display_set.get("first_photo_local") or display_set.get("performance_start_local", "")
-    interval_end_text = display_set.get("last_photo_local") or display_set.get("performance_end_local", "")
-    interval_start = parse_local_datetime(interval_start_text)
-    interval_end = parse_local_datetime(interval_end_text)
+def collect_video_rows(
+    merged_csv: Path,
+    display_set: Dict,
+    original_intervals: Dict[str, Dict[str, str]],
+    stream_filter: Optional[Dict[str, bool]],
+) -> List[Dict[str, str]]:
+    interval_start, interval_end, _, _, _ = get_video_interval(display_set, original_intervals)
     if interval_start is None or interval_end is None:
         return []
     rows = []
@@ -448,6 +466,85 @@ def dedupe_paths(paths: Iterable[Path]) -> List[Path]:
     for path in paths:
         seen[path] = None
     return list(seen.keys())
+
+
+def build_original_interval_map(raw_performances: Sequence[Dict]) -> Dict[str, Dict[str, str]]:
+    interval_map: Dict[str, Dict[str, str]] = {}
+    for performance in raw_performances:
+        base_set_id = performance.get("set_id") or performance.get("performance_number")
+        if not base_set_id:
+            continue
+        interval_map[base_set_id] = {
+            "start_local": performance.get("performance_start_local", ""),
+            "end_local": performance.get("performance_end_local", ""),
+            "performance_number": performance.get("performance_number", ""),
+        }
+    return interval_map
+
+
+def get_set_interval(display_set: Dict) -> Tuple[Optional[datetime], Optional[datetime], str, str]:
+    start_text = display_set.get("performance_start_local") or display_set.get("first_photo_local", "")
+    end_text = display_set.get("performance_end_local") or display_set.get("last_photo_local", "")
+    return parse_local_datetime(start_text), parse_local_datetime(end_text), start_text, end_text
+
+
+def get_video_interval(display_set: Dict, original_intervals: Dict[str, Dict[str, str]]) -> Tuple[Optional[datetime], Optional[datetime], str, str, str]:
+    display_name = str(display_set.get("display_name", ""))
+    original_name = str(display_set.get("original_performance_number", ""))
+    base_ids = display_set.get("merged_base_set_ids", [display_set.get("base_set_id", "")])
+    interval_candidates = []
+    if display_name == original_name:
+        for base_id in base_ids:
+            interval = original_intervals.get(base_id)
+            if not interval:
+                continue
+            start_text = interval.get("start_local", "")
+            end_text = interval.get("end_local", "")
+            start_dt = parse_local_datetime(start_text)
+            end_dt = parse_local_datetime(end_text)
+            if start_dt is None or end_dt is None:
+                continue
+            interval_candidates.append((start_dt, end_dt, start_text, end_text))
+    if interval_candidates:
+        start_dt = min(item[0] for item in interval_candidates)
+        end_dt = max(item[1] for item in interval_candidates)
+        start_text = min((item[2] for item in interval_candidates), default="")
+        end_text = max((item[3] for item in interval_candidates), default="")
+        return start_dt, end_dt, start_text, end_text, "timeline"
+    start_dt, end_dt, start_text, end_text = get_set_interval(display_set)
+    return start_dt, end_dt, start_text, end_text, "reviewed"
+
+
+def build_video_marker(
+    row: Dict[str, str],
+    display_set: Dict,
+    original_intervals: Dict[str, Dict[str, str]],
+    start_trim_seconds: float,
+    end_padding_seconds: float,
+) -> Optional[Dict[str, object]]:
+    set_start, set_end, set_start_text, set_end_text, interval_source = get_video_interval(display_set, original_intervals)
+    clip_start = parse_local_datetime(row.get("start_synced", ""))
+    clip_end = parse_local_datetime(row.get("end_synced", ""))
+    if set_start is None or set_end is None or clip_start is None or clip_end is None:
+        return None
+    effective_start = max(set_start + timedelta(seconds=start_trim_seconds), clip_start)
+    effective_end = min(set_end + timedelta(seconds=end_padding_seconds), clip_end)
+    if effective_end <= effective_start:
+        return None
+    return {
+        "stream_id": row["stream_id"],
+        "filename": row["filename"],
+        "path": row["path"],
+        "clip_start_local": row.get("start_synced", ""),
+        "clip_end_local": row.get("end_synced", ""),
+        "interval_source": interval_source,
+        "set_start_local": set_start_text,
+        "set_end_local": set_end_text,
+        "export_start_local": effective_start.isoformat(timespec="milliseconds"),
+        "export_end_local": effective_end.isoformat(timespec="milliseconds"),
+        "ss_seconds": round((effective_start - clip_start).total_seconds(), 3),
+        "duration_seconds": round((effective_end - effective_start).total_seconds(), 3),
+    }
 
 
 def build_destination_path(source_path: Path, target_dir: Path, kind: str, config: Dict) -> Path:
@@ -498,7 +595,7 @@ def build_video_filter(profile: Dict) -> str:
     )
 
 
-def export_video(source_path: Path, destination: Path, config: Dict) -> None:
+def export_video(source_path: Path, destination: Path, config: Dict, marker: Optional[Dict[str, object]] = None) -> None:
     profile = config["video"]
     if profile["mode"] == "raw":
         shutil.copy2(source_path, destination)
@@ -509,37 +606,90 @@ def export_video(source_path: Path, destination: Path, config: Dict) -> None:
         "-loglevel",
         "error",
         "-y",
-        "-i",
-        str(source_path),
-        "-vf",
-        build_video_filter(profile),
-        "-c:v",
-        profile["video_codec"],
-        "-crf",
-        str(profile["crf"]),
-        "-preset",
-        profile["preset"],
-        "-pix_fmt",
-        profile["pixel_format"],
-        "-movflags",
-        profile["movflags"],
-        "-c:a",
-        profile["audio_codec"],
-        "-b:a",
-        profile["audio_bitrate"],
     ]
+    if marker is not None:
+        command.extend(["-ss", f"{marker['ss_seconds']:.3f}"])
+    command.extend(
+        [
+            "-i",
+            str(source_path),
+        ]
+    )
+    if marker is not None:
+        command.extend(["-t", f"{marker['duration_seconds']:.3f}"])
+    command.extend(
+        [
+            "-vf",
+            build_video_filter(profile),
+            "-c:v",
+            profile["video_codec"],
+            "-crf",
+            str(profile["crf"]),
+            "-preset",
+            profile["preset"],
+            "-pix_fmt",
+            profile["pixel_format"],
+            "-movflags",
+            profile["movflags"],
+            "-c:a",
+            profile["audio_codec"],
+            "-b:a",
+            profile["audio_bitrate"],
+        ]
+    )
     command.extend(profile["extra_args"])
     command.append(str(destination))
     run_command(command)
 
 
-def process_assets(photo_paths: Sequence[Path], video_paths: Sequence[Path], target_dir: Path, overwrite: bool, config: Dict) -> Tuple[int, int, int]:
+def write_video_markers_csv(target_dir: Path, markers: Sequence[Dict[str, object]]) -> None:
+    if not markers:
+        return
+    path = target_dir / "video_markers.csv"
+    fieldnames = [
+        "stream_id",
+        "filename",
+        "path",
+        "clip_start_local",
+        "clip_end_local",
+        "interval_source",
+        "set_start_local",
+        "set_end_local",
+        "export_start_local",
+        "export_end_local",
+        "ss_seconds",
+        "duration_seconds",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for marker in markers:
+            writer.writerow(marker)
+
+
+def process_assets(
+    photo_paths: Sequence[Path],
+    video_rows: Sequence[Dict[str, str]],
+    display_set: Dict,
+    original_intervals: Dict[str, Dict[str, str]],
+    target_dir: Path,
+    overwrite: bool,
+    config: Dict,
+    video_start_trim_seconds: float,
+    video_end_padding_seconds: float,
+) -> Tuple[int, int, int, int]:
     written = 0
     skipped = 0
     failed = 0
     target_dir.mkdir(parents=True, exist_ok=True)
     items = [{"kind": "photo", "path": path} for path in photo_paths]
-    items.extend({"kind": "video", "path": path} for path in video_paths)
+    video_markers: List[Dict[str, object]] = []
+    for row in video_rows:
+        marker = build_video_marker(row, display_set, original_intervals, video_start_trim_seconds, video_end_padding_seconds)
+        if marker is None:
+            continue
+        video_markers.append(marker)
+        items.append({"kind": "video", "path": Path(row["path"]), "marker": marker})
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -561,16 +711,29 @@ def process_assets(photo_paths: Sequence[Path], video_paths: Sequence[Path], tar
                     if item["kind"] == "photo":
                         export_photo(source_path, destination, config)
                     else:
-                        export_video(source_path, destination, config)
+                        export_video(source_path, destination, config, item.get("marker"))
                     written += 1
                 except Exception as exc:
                     failed += 1
                     console.print(f"[red]Failed: {source_path.name} -> {destination.name}: {exc}[/red]")
             progress.advance(task)
-    return written, skipped, failed
+    write_video_markers_csv(target_dir, video_markers)
+    return written, skipped, failed, len(video_markers)
 
 
-def build_summary_table(display_set: Dict, photo_count: int, video_count: int, written: int, skipped: int, failed: int, target_dir: Path, config_path: Path) -> Table:
+def build_summary_table(
+    display_set: Dict,
+    photo_count: int,
+    video_count: int,
+    trimmed_video_count: int,
+    written: int,
+    skipped: int,
+    failed: int,
+    target_dir: Path,
+    config_path: Path,
+    video_start_trim_seconds: float,
+    video_end_padding_seconds: float,
+) -> Table:
     table = Table(title="Reviewed Set Copy Summary", expand=False)
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="green")
@@ -578,6 +741,9 @@ def build_summary_table(display_set: Dict, photo_count: int, video_count: int, w
     table.add_row("Set ID", display_set["set_id"])
     table.add_row("Photos selected", str(photo_count))
     table.add_row("Videos selected", str(video_count))
+    table.add_row("Video segments", str(trimmed_video_count))
+    table.add_row("Video start trim", f"{video_start_trim_seconds:.3f}s")
+    table.add_row("Video end padding", f"{video_end_padding_seconds:.3f}s")
     table.add_row("Files written", str(written))
     table.add_row("Files skipped", str(skipped))
     table.add_row("Files failed", str(failed))
@@ -636,6 +802,7 @@ def main() -> int:
         return 1
     review_state = load_review_state(state_json)
     display_sets = rebuild_display_sets(raw_performances, review_state)
+    original_intervals = build_original_interval_map(raw_performances)
 
     try:
         display_set = select_display_set(display_sets, args.set_name)
@@ -647,16 +814,39 @@ def main() -> int:
     photo_paths = dedupe_paths(
         Path(photo["source_path"]) for photo in display_set["photos"] if include_photo(photo, stream_filter)
     )
-    video_rows = collect_video_rows(merged_csv, display_set, stream_filter)
-    video_paths = dedupe_paths(Path(row["path"]) for row in video_rows)
+    video_rows = collect_video_rows(merged_csv, display_set, original_intervals, stream_filter)
     target_dir = target_root / normalized_output_dir_name(display_set["display_name"])
 
-    if not photo_paths and not video_paths:
+    if not photo_paths and not video_rows:
         console.print("[yellow]No files matched the requested set and stream filter.[/yellow]")
         return 0
 
-    written, skipped, failed = process_assets(photo_paths, video_paths, target_dir, args.overwrite, export_config)
-    console.print(build_summary_table(display_set, len(photo_paths), len(video_paths), written, skipped, failed, target_dir, config_path))
+    written, skipped, failed, trimmed_video_count = process_assets(
+        photo_paths,
+        video_rows,
+        display_set,
+        original_intervals,
+        target_dir,
+        args.overwrite,
+        export_config,
+        export_config["video"]["start_trim_seconds"],
+        export_config["video"]["end_padding_seconds"],
+    )
+    console.print(
+        build_summary_table(
+            display_set,
+            len(photo_paths),
+            len(video_rows),
+            trimmed_video_count,
+            written,
+            skipped,
+            failed,
+            target_dir,
+            config_path,
+            export_config["video"]["start_trim_seconds"],
+            export_config["video"]["end_padding_seconds"],
+        )
+    )
     return 1 if failed else 0
 
 
