@@ -47,6 +47,28 @@ OFFICIAL_CATEGORY_GUIDANCE = (
     "taniec narodowy i ludowy, taniec liryczny, taniec wspolczesny, wystep wokalno-taneczny, "
     "taniec uliczny, taniec komercyjny."
 )
+ANNOUNCEMENT_WINDOW_GUIDANCE = (
+    "A valid announcement is often one short spoken line that is immediately followed by song lyrics, "
+    "music-related text, soundtrack speech, mistranscribed English lyrics rendered as Polish, greetings, "
+    "or generic ASR noise from the performance itself. Detect the announcement line itself and do not reject "
+    "a valid announcement just because later lines in the same window are unrelated or clearly belong to the performance."
+)
+POLISH_NUMBER_GUIDANCE = (
+    "Convert Polish number words to digits when they clearly refer to a competitor number. "
+    "Examples: 'numer siedem' means start_number=7, 'numer sto dwa' means start_number=102, "
+    "'numer sto osiemdziesiat' means start_number=180, and 'numer czterysta jedenascie' means start_number=411."
+)
+BENCHMARK_STYLE_EXAMPLES = (
+    "Examples:\n"
+    '- Transcript: "Numer 182, kategoria Junior Solo Contemporary One, Silent Tide."\n'
+    '  Correct JSON detection: {"event_type":"performance_announcement","start_number":182,"category_ordinal":null,"title":null,"evidence":"Numer 182","notes":null,"confidence":0.95}\n'
+    '- Transcript: "Numer siedem, kategoria Mini Jazz, Bright Lights. I got rhythm, I got music..."\n'
+    '  Correct JSON detection: {"event_type":"performance_announcement","start_number":7,"category_ordinal":null,"title":null,"evidence":"Numer siedem","notes":"Ignore the later song lyrics.","confidence":0.9}\n'
+    '- Transcript: "Numer sto osiemdziesiat, kategoria Junior Solo Ballet Repertoire II, Aurora."\n'
+    '  Correct JSON detection: {"event_type":"performance_announcement","start_number":180,"category_ordinal":null,"title":null,"evidence":"Numer sto osiemdziesiat","notes":null,"confidence":0.9}\n'
+    '- Transcript: "Pierwszy w kategorii numer z karty 412, Liam Frost."\n'
+    '  Correct JSON detection: {"event_type":"performance_announcement","start_number":412,"category_ordinal":1,"title":null,"evidence":"numer z karty 412","notes":null,"confidence":0.9}\n'
+)
 
 KEYWORD_TERMS = {
     "numer",
@@ -69,6 +91,7 @@ CATEGORY_TERMS = {
     "formation",
     "formacja",
 }
+ALWAYS_KEEP_TERMS = set(KEYWORD_TERMS) | set(CATEGORY_TERMS)
 JUNK_EVIDENCE_PATTERNS = (
     re.compile(r"\bdziekuj[ea]\b", re.IGNORECASE),
     re.compile(r"\bdzieki za ogladanie\b", re.IGNORECASE),
@@ -78,6 +101,18 @@ JUNK_EVIDENCE_PATTERNS = (
     re.compile(r"\bbardzo prosimy o cisze\b", re.IGNORECASE),
 )
 EXPLICIT_NUMBER_PATTERN = re.compile(r"\b(?:numer(?:\s+startowy)?|nr)\s+(\d{1,3})\b", re.IGNORECASE)
+POLISH_NUMBER_WORD_PATTERN = re.compile(
+    r"^(?:zero|jeden|jedna|jedno|pierwsz(?:y|a|e)|dwa|dwie|drug(?:i|a|ie)|trzy|trzec(?:i|ia|ie)|"
+    r"cztery|czwart(?:y|a|e)|piec|piat(?:y|a|e)|szesc|szost(?:y|a|e)|siedem|siodm(?:y|a|e)|"
+    r"osiem|osm(?:y|a|e)|dziewiec|dziewiat(?:y|a|e)|dziesiec|dziesiat(?:y|a|e)|jedenascie|jedenast(?:y|a|e)|"
+    r"dwanascie|dwunast(?:y|a|e)|trzynascie|trzynast(?:y|a|e)|czternascie|czternast(?:y|a|e)|"
+    r"pietnascie|pietnast(?:y|a|e)|szesnascie|szesnast(?:y|a|e)|siedemnascie|siedemnast(?:y|a|e)|"
+    r"osiemnascie|osiemnast(?:y|a|e)|dziewietnascie|dziewietnast(?:y|a|e)|dwadziescia|dwudziest(?:y|a|e)|"
+    r"trzydziesci|trzydziest(?:y|a|e)|czterdziesci|czterdziest(?:y|a|e)|piecdziesiat|piecdziesiat(?:y|a|e)|"
+    r"szescdziesiat|szescdziesiat(?:y|a|e)|siedemdziesiat|siedemdziesiat(?:y|a|e)|osiemdziesiat|osiemdziesiat(?:y|a|e)|"
+    r"dziewiecdziesiat|dziewiecdziesiat(?:y|a|e)|sto|dwiescie|trzysta|czterysta|piecset|szescset|"
+    r"siedemset|osiemset|dziewiecset|setn(?:y|a|e))$"
+)
 
 PREPARE_HEADERS = [
     "day",
@@ -160,6 +195,12 @@ def parse_args() -> argparse.Namespace:
         "--max-files",
         type=int,
         help="Optional limit for the number of transcript JSON files to parse after filtering",
+    )
+    prepare_parser.add_argument(
+        "--min-word-score",
+        type=float,
+        default=0.0,
+        help="If greater than 0, drop low-confidence transcript words below this threshold when word scores are available. Default: 0 (disabled)",
     )
     prepare_parser.add_argument(
         "--keyword-window-before",
@@ -380,6 +421,46 @@ def normalize_text(value: str) -> str:
     return " ".join(tokens)
 
 
+def keep_word_by_score(word_text: str, score: Optional[float], min_word_score: float) -> bool:
+    normalized = normalize_text(word_text)
+    if any(character.isdigit() for character in normalized):
+        return True
+    if normalized in ALWAYS_KEEP_TERMS:
+        return True
+    if POLISH_NUMBER_WORD_PATTERN.match(normalized):
+        return True
+    if score is None:
+        return True
+    return score >= min_word_score
+
+
+def select_segment_text(segment: Dict, min_word_score: float) -> str:
+    fallback = str(segment.get("text", "")).strip()
+    if min_word_score <= 0:
+        return fallback
+    words = segment.get("words")
+    if not isinstance(words, list) or not words:
+        return fallback
+    kept: List[str] = []
+    for item in words:
+        if not isinstance(item, dict):
+            continue
+        token = str(item.get("word", "")).strip()
+        if not token:
+            continue
+        raw_score = item.get("score")
+        score_value: Optional[float]
+        if isinstance(raw_score, (int, float)):
+            score_value = float(raw_score)
+        else:
+            score_value = None
+        if keep_word_by_score(token, score_value, min_word_score):
+            kept.append(token)
+    if not kept:
+        return fallback
+    return " ".join(kept).strip()
+
+
 def detect_stream_ids(transcripts_root: Path) -> List[str]:
     if not transcripts_root.exists():
         return []
@@ -467,6 +548,7 @@ def build_prompt(window: Dict) -> str:
         "  ]\n"
         "}\n"
         "Rules:\n"
+        f"- {ANNOUNCEMENT_WINDOW_GUIDANCE}\n"
         "- Ignore song lyrics, background singing, subtitle-like noise, and watermark-like text.\n"
         "- Ignore generic phrases such as 'dziekuje', 'dzieki za ogladanie', 'muzyka', and organizational speech such as 'prosmy o cisze'.\n"
         "- Prefer explicit phrases like 'numer startowy 279' or 'numer 279' over category ordinals like 'szosty w tej kategorii'.\n"
@@ -474,10 +556,14 @@ def build_prompt(window: Dict) -> str:
         "- A word like 'piaty' or a phrase like 'numeru piatego w tej samej kategorii' means category_ordinal=5 and does not mean start_number=5.\n"
         "- If the transcript contains both an ordinal and an explicit competitor number, use the ordinal only for category_ordinal and use the explicit competitor number for start_number.\n"
         f"- {OFFICIAL_CATEGORY_GUIDANCE}\n"
+        f"- {POLISH_NUMBER_GUIDANCE}\n"
         "- Only use category_ordinal for explicit ordering phrases such as pierwszy, drugi, trzeci, czwarty, piaty, szosty, first, second, third, fourth, fifth, or sixth.\n"
         "- Do not infer category_ordinal from class labels, genre names, age labels, roman numerals, or words like One or Two inside category titles.\n"
         "- Roman numerals or words like One, Two, I, II, III inside class names such as 'Junior Solo Contemporary I' or 'Children's Solo Acro One' are part of the class name and must not become category_ordinal.\n"
         "- If the local transcript contains a pattern like 'numer startowy N', 'start number N', or even a mistranscribed '* startowy N', treat N as the explicit competitor start_number.\n"
+        "- A short line such as 'Numer 221' is already a valid explicit announcement if it appears as an announcement line.\n"
+        "- A phrase like 'numer z karty 383' contains an explicit competitor number and must set start_number=383.\n"
+        "- If the local transcript says 'Numer 152. Przepraszam. Numer 151.', prefer the corrected later number.\n"
         "- Ceremony result reading is not a performance announcement.\n"
         "- If there is no explicit announcement, return an empty detections list.\n"
         "- If the window contains more than one useful announcement, return one detection per announcement in chronological order.\n"
@@ -491,11 +577,7 @@ def build_prompt(window: Dict) -> str:
         '- "Dzieki za ogladanie!"\n'
         '- "Bardzo prosimy juz o cisze."\n'
         '- "Popular, you\'re gonna be popular."\n\n'
-        "Examples:\n"
-        '- Transcript: "Przechodzimy do kolejnego numeru, numeru piatego w tej samej kategorii. Numer startowy 278."\n'
-        '  Correct JSON detection: {"event_type":"performance_announcement","start_number":278,"category_ordinal":5,"title":null,"evidence":"Numer startowy 278.","notes":null,"confidence":0.95}\n'
-        '- Transcript: "szosty w tej kategorii"\n'
-        '  Correct JSON detection: {"event_type":"performance_announcement","start_number":null,"category_ordinal":6,"title":null,"evidence":"szosty w tej kategorii","notes":"No explicit competitor number.","confidence":0.6}\n\n'
+        f"{BENCHMARK_STYLE_EXAMPLES}\n"
         f"Window ID: {window['window_id']}\n"
         f"Stream: {window['stream_id']}\n"
         f"Filename: {window['filename']}\n"
@@ -551,6 +633,7 @@ def build_batch_prompt(windows: Sequence[Dict]) -> str:
         "}\n"
         "Rules:\n"
         "- Return exactly one result object per provided window_id.\n"
+        f"- {ANNOUNCEMENT_WINDOW_GUIDANCE}\n"
         "- Ignore song lyrics, background singing, subtitle-like noise, and watermark-like text.\n"
         "- Ignore generic phrases such as 'dziekuje', 'dzieki za ogladanie', 'muzyka', and organizational speech such as 'prosmy o cisze'.\n"
         "- Prefer explicit phrases like 'numer startowy 279' or 'numer 279' over category ordinals like 'szosty w tej kategorii'.\n"
@@ -558,10 +641,14 @@ def build_batch_prompt(windows: Sequence[Dict]) -> str:
         "- A word like 'piaty' or a phrase like 'numeru piatego w tej samej kategorii' means category_ordinal=5 and does not mean start_number=5.\n"
         "- If a window contains both an ordinal and an explicit competitor number, use the ordinal only for category_ordinal and use the explicit competitor number for start_number.\n"
         f"- {OFFICIAL_CATEGORY_GUIDANCE}\n"
+        f"- {POLISH_NUMBER_GUIDANCE}\n"
         "- Only use category_ordinal for explicit ordering phrases such as pierwszy, drugi, trzeci, czwarty, piaty, szosty, first, second, third, fourth, fifth, or sixth.\n"
         "- Do not infer category_ordinal from class labels, genre names, age labels, roman numerals, or words like One or Two inside category titles.\n"
         "- Roman numerals or words like One, Two, I, II, III inside class names such as 'Junior Solo Contemporary I' or 'Children's Solo Acro One' are part of the class name and must not become category_ordinal.\n"
         "- If the local transcript contains a pattern like 'numer startowy N', 'start number N', or even a mistranscribed '* startowy N', treat N as the explicit competitor start_number.\n"
+        "- A short line such as 'Numer 221' is already a valid explicit announcement if it appears as an announcement line.\n"
+        "- A phrase like 'numer z karty 383' contains an explicit competitor number and must set start_number to that number.\n"
+        "- If the local transcript says 'Numer 152. Przepraszam. Numer 151.', prefer the corrected later number.\n"
         "- Ceremony result reading is not a performance announcement, but a ceremony detection is allowed if the window clearly contains ceremony-only speech.\n"
         "- If there is no explicit announcement in a window, return that window with an empty detections list.\n"
         "- If a window contains more than one useful announcement, return one detection per announcement in chronological order.\n"
@@ -569,6 +656,7 @@ def build_batch_prompt(windows: Sequence[Dict]) -> str:
         "- Never use timestamps, segment numbers, line numbers, or window ids as start_number.\n"
         "- Only set title if the title is explicitly present in the transcript.\n"
         "- Evidence must be a short direct quote from the transcript.\n\n"
+        f"{BENCHMARK_STYLE_EXAMPLES}\n"
         "Windows:\n"
         f"{joined_blocks}\n"
     )
@@ -1031,7 +1119,7 @@ def prepare_windows(args: argparse.Namespace) -> int:
                 for segment_index, segment in enumerate(segments, 1):
                     if not isinstance(segment, dict):
                         continue
-                    text = str(segment.get("text", "")).strip()
+                    text = select_segment_text(segment, args.min_word_score)
                     if not text:
                         continue
                     try:

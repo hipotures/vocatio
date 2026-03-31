@@ -37,6 +37,34 @@ DEFAULT_RESULTS_CSV = "/tmp/semantic_announcement_benchmark_results.csv"
 DEFAULT_RESULTS_JSONL = "/tmp/semantic_announcement_benchmark_results.jsonl"
 PROMPT_PROFILES = ("compact", "standard", "full")
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
+OFFICIAL_CATEGORY_GUIDANCE = (
+    "Official DWC class and genre names may appear in Polish or English, including Ballet, Repertoire, "
+    "National and Folklore, Lyrical, Showstopper, Jazz, Contemporary, Acro, Tap, Step, Song and Dance, "
+    "Street Dance, Commercial, balet, balet repertuarowy, taniec narodowy i ludowy, taniec liryczny, "
+    "taniec wspolczesny, wystep wokalno-taneczny, taniec uliczny, and taniec komercyjny."
+)
+ANNOUNCEMENT_WINDOW_GUIDANCE = (
+    "A valid announcement is often one short spoken line that is immediately followed by song lyrics, "
+    "music-related text, soundtrack speech, mistranscribed English lyrics rendered as Polish, greetings, "
+    "or generic ASR noise from the performance itself. Detect the announcement line itself and do not reject "
+    "a valid announcement just because later lines in the same window are unrelated or clearly belong to the performance."
+)
+POLISH_NUMBER_GUIDANCE = (
+    "Convert Polish number words to digits when they clearly refer to a competitor number. "
+    "Examples: 'numer siedem' means start_number=7, 'numer sto dwa' means start_number=102, "
+    "'numer sto osiemdziesiat' means start_number=180, and 'numer czterysta jedenascie' means start_number=411."
+)
+PROMPT_EXAMPLES = (
+    "Examples:\n"
+    '- Transcript: "Numer 182, kategoria Junior Solo Contemporary One, Silent Tide."\n'
+    '  Correct JSON detection: {"event_type":"performance_announcement","start_number":182,"category_ordinal":null}\n'
+    '- Transcript: "Numer siedem, kategoria Mini Jazz, Bright Lights. I got rhythm, I got music..."\n'
+    '  Correct JSON detection: {"event_type":"performance_announcement","start_number":7,"category_ordinal":null}\n'
+    '- Transcript: "Numer sto osiemdziesiat, kategoria Junior Solo Ballet Repertoire II, Aurora."\n'
+    '  Correct JSON detection: {"event_type":"performance_announcement","start_number":180,"category_ordinal":null}\n'
+    '- Transcript: "Pierwszy w kategorii numer z karty 412, Liam Frost."\n'
+    '  Correct JSON detection: {"event_type":"performance_announcement","start_number":412,"category_ordinal":1}\n'
+)
 
 ORDINAL_TERMS = {
     "pierwszy": 1,
@@ -154,13 +182,17 @@ def parse_args() -> argparse.Namespace:
     )
     prepare_parser.add_argument(
         "--sampling",
-        choices=("hardest", "random", "range", "stratified"),
+        choices=("hardest", "random", "range", "stratified", "list"),
         default="hardest",
         help="Benchmark case selection mode. Default: hardest",
     )
     prepare_parser.add_argument(
         "--set-range",
         help='Inclusive numeric set range for sampling=range, for example "100-110".',
+    )
+    prepare_parser.add_argument(
+        "--set-list",
+        help='Comma-separated set numbers for sampling=list, for example "160,152,235".',
     )
     prepare_parser.add_argument(
         "--random-seed",
@@ -191,6 +223,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=300.0,
         help="Maximum allowed time delta between a reviewed set start and the matched announcement candidate. Default: 300",
+    )
+    prepare_parser.add_argument(
+        "--min-word-score",
+        type=float,
+        default=0.0,
+        help="If greater than 0, drop low-confidence transcript words below this threshold when word scores are available. Default: 0 (disabled)",
     )
     prepare_parser.add_argument(
         "--min-photo-count",
@@ -407,6 +445,7 @@ def read_candidate_rows(path: Path, stream_filter: Optional[Sequence[str]]) -> L
 def build_clip_segments(
     merged_csv: Path,
     candidate_rows: Sequence[Dict[str, str]],
+    min_word_score: float,
 ) -> Tuple[Dict[Tuple[str, str], List[Dict]], Dict[Tuple[str, str], Dict[str, str]]]:
     merged_rows = demo.read_csv_rows(merged_csv)
     video_index = demo.load_video_index(merged_rows)
@@ -454,7 +493,7 @@ def build_clip_segments(
         for segment_index, segment in enumerate(segments, 1):
             if not isinstance(segment, dict):
                 continue
-            text = str(segment.get("text", "")).strip()
+            text = demo.select_segment_text(segment, min_word_score)
             if not text:
                 continue
             try:
@@ -631,13 +670,18 @@ def build_benchmark_prompt(case: Dict, prompt_profile: str) -> str:
         rules = (
             "Return exactly one JSON object and nothing else.\n"
             "Keep the response short.\n"
+            f"{ANNOUNCEMENT_WINDOW_GUIDANCE}\n"
             "Use start_number only for the explicit competitor number.\n"
             "Use category_ordinal only for order phrases such as pierwszy, drugi, trzeci, piaty, or szosty.\n"
             "Never use the ordinal as start_number.\n"
-            "Official DWC class and genre names may appear in Polish or English, including Ballet, Repertoire, National and Folklore, Lyrical, Showstopper, Jazz, Contemporary, Acro, Tap, Step, Song and Dance, Street Dance, Commercial, balet, balet repertuarowy, taniec narodowy i ludowy, taniec liryczny, taniec wspolczesny, wystep wokalno-taneczny, taniec uliczny, and taniec komercyjny.\n"
+            f"{OFFICIAL_CATEGORY_GUIDANCE}\n"
+            f"{POLISH_NUMBER_GUIDANCE}\n"
             "Do not infer category_ordinal from class labels, genre names, age labels, roman numerals, or words like One or Two inside category titles.\n"
             "Roman numerals or words like One, Two, I, II, III inside class names such as 'Junior Solo Contemporary I' or 'Children's Solo Acro One' are part of the class name and must not become category_ordinal.\n"
             "If the transcript contains a pattern like 'numer startowy N', 'start number N', or even a mistranscribed '* startowy N', treat N as the explicit competitor start_number.\n"
+            "A short line such as 'Numer 221' is already a valid explicit announcement if it appears as an announcement line.\n"
+            "A phrase like 'numer z karty 383' contains an explicit competitor number and must set start_number to that number.\n"
+            "If the local transcript says 'Numer 152. Przepraszam. Numer 151.', prefer the corrected later number.\n"
             "If there is no real competition announcement, return an empty detections list.\n"
         )
     elif prompt_profile == "standard":
@@ -656,13 +700,18 @@ def build_benchmark_prompt(case: Dict, prompt_profile: str) -> str:
         )
         rules = (
             "Return exactly one JSON object and nothing else.\n"
+            f"{ANNOUNCEMENT_WINDOW_GUIDANCE}\n"
             "Use start_number only for the explicit competitor number.\n"
             "Use category_ordinal only for order phrases such as pierwszy, drugi, trzeci, piaty, or szosty.\n"
             "Never use the ordinal as start_number.\n"
-            "Official DWC class and genre names may appear in Polish or English, including Ballet, Repertoire, National and Folklore, Lyrical, Showstopper, Jazz, Contemporary, Acro, Tap, Step, Song and Dance, Street Dance, Commercial, balet, balet repertuarowy, taniec narodowy i ludowy, taniec liryczny, taniec wspolczesny, wystep wokalno-taneczny, taniec uliczny, and taniec komercyjny.\n"
+            f"{OFFICIAL_CATEGORY_GUIDANCE}\n"
+            f"{POLISH_NUMBER_GUIDANCE}\n"
             "Do not infer category_ordinal from class labels, genre names, age labels, roman numerals, or words like One or Two inside category titles.\n"
             "Roman numerals or words like One, Two, I, II, III inside class names such as 'Junior Solo Contemporary I' or 'Children's Solo Acro One' are part of the class name and must not become category_ordinal.\n"
             "If the transcript contains a pattern like 'numer startowy N', 'start number N', or even a mistranscribed '* startowy N', treat N as the explicit competitor start_number.\n"
+            "A short line such as 'Numer 221' is already a valid explicit announcement if it appears as an announcement line.\n"
+            "A phrase like 'numer z karty 383' contains an explicit competitor number and must set start_number to that number.\n"
+            "If the local transcript says 'Numer 152. Przepraszam. Numer 151.', prefer the corrected later number.\n"
             "If there is no real competition announcement, return an empty detections list.\n"
             "Evidence must be a short direct quote from the transcript.\n"
         )
@@ -685,13 +734,18 @@ def build_benchmark_prompt(case: Dict, prompt_profile: str) -> str:
         )
         rules = (
             "Return exactly one JSON object and nothing else.\n"
+            f"{ANNOUNCEMENT_WINDOW_GUIDANCE}\n"
             "Use start_number only for the explicit competitor number.\n"
             "Use category_ordinal only for order phrases such as pierwszy, drugi, trzeci, piaty, or szosty.\n"
             "Never use the ordinal as start_number.\n"
-            "Official DWC class and genre names may appear in Polish or English, including Ballet, Repertoire, National and Folklore, Lyrical, Showstopper, Jazz, Contemporary, Acro, Tap, Step, Song and Dance, Street Dance, Commercial, balet, balet repertuarowy, taniec narodowy i ludowy, taniec liryczny, taniec wspolczesny, wystep wokalno-taneczny, taniec uliczny, and taniec komercyjny.\n"
+            f"{OFFICIAL_CATEGORY_GUIDANCE}\n"
+            f"{POLISH_NUMBER_GUIDANCE}\n"
             "Do not infer category_ordinal from class labels, genre names, age labels, roman numerals, or words like One or Two inside category titles.\n"
             "Roman numerals or words like One, Two, I, II, III inside class names such as 'Junior Solo Contemporary I' or 'Children's Solo Acro One' are part of the class name and must not become category_ordinal.\n"
             "If the transcript contains a pattern like 'numer startowy N', 'start number N', or even a mistranscribed '* startowy N', treat N as the explicit competitor start_number.\n"
+            "A short line such as 'Numer 221' is already a valid explicit announcement if it appears as an announcement line.\n"
+            "A phrase like 'numer z karty 383' contains an explicit competitor number and must set start_number to that number.\n"
+            "If the local transcript says 'Numer 152. Przepraszam. Numer 151.', prefer the corrected later number.\n"
             "If there is no real competition announcement, return an empty detections list.\n"
             "Title may be null if absent.\n"
             "Evidence must be a short direct quote from the transcript.\n"
@@ -704,6 +758,7 @@ def build_benchmark_prompt(case: Dict, prompt_profile: str) -> str:
         f"{schema_text}\n"
         "Rules:\n"
         f"{rules}\n"
+        f"{PROMPT_EXAMPLES}\n"
         f"Window ID: {case['window_id']}\n"
         f"Stream: {case['stream_id']}\n"
         f"Filename: {case['filename']}\n"
@@ -956,6 +1011,25 @@ def parse_set_range(value: str) -> Tuple[int, int]:
     return start_value, end_value
 
 
+def parse_set_list(value: str) -> List[int]:
+    raw_items = value.replace(",", " ").split()
+    if not raw_items:
+        raise ValueError('invalid set list: expected comma-separated numbers, for example "160,152,235"')
+    parsed: List[int] = []
+    for item in raw_items:
+        if not item.isdigit():
+            raise ValueError(f'invalid set number "{item}" in set list')
+        parsed.append(int(item))
+    seen = set()
+    ordered_unique: List[int] = []
+    for number in parsed:
+        if number in seen:
+            continue
+        seen.add(number)
+        ordered_unique.append(number)
+    return ordered_unique
+
+
 def sort_cases_by_difficulty(cases: Sequence[Dict]) -> List[Dict]:
     return sorted(
         cases,
@@ -1004,6 +1078,7 @@ def select_cases(
     sampling: str,
     random_seed: int,
     set_range: Optional[str],
+    set_list: Optional[str],
 ) -> List[Dict]:
     if max_cases <= 0:
         return []
@@ -1017,10 +1092,22 @@ def select_cases(
             for case in filtered_cases
             if start_value <= int(case["expected_start_number"]) <= end_value
         ]
+    elif sampling == "list":
+        if not set_list:
+            raise ValueError("--set-list is required when --sampling list is used")
+        requested = parse_set_list(set_list)
+        allowed = set(requested)
+        filtered_cases = [
+            case
+            for case in filtered_cases
+            if int(case["expected_start_number"]) in allowed
+        ]
     by_day: Dict[str, List[Dict]] = defaultdict(list)
     for case in filtered_cases:
         by_day[case["day"]].append(case)
     effective_per_day_limit = per_day_limit
+    if sampling == "list":
+        effective_per_day_limit = None
     if effective_per_day_limit is None and len(by_day) > 1:
         effective_per_day_limit = max(1, math.ceil(max_cases / len(by_day)))
     rng = random.Random(random_seed)
@@ -1037,6 +1124,8 @@ def select_cases(
         elif sampling == "stratified":
             local_limit = effective_per_day_limit if effective_per_day_limit is not None else len(day_cases)
             day_selected = stratified_pick(day_cases, local_limit, rng)
+        elif sampling == "list":
+            day_selected = list(day_cases)
         else:
             raise ValueError(f"unsupported sampling mode: {sampling}")
         if effective_per_day_limit is not None and sampling != "stratified":
@@ -1050,6 +1139,18 @@ def select_cases(
         selected = sorted(selected, key=lambda item: (item["day"], int(item["expected_start_number"]), item["window_start_local"], item["case_id"]))
     elif sampling == "stratified":
         selected = sorted(selected, key=lambda item: (-int(item["difficulty_score"]), item["day"], item["window_start_local"], item["case_id"]))
+    elif sampling == "list":
+        requested = parse_set_list(set_list or "")
+        order = {number: index for index, number in enumerate(requested)}
+        selected = sorted(
+            selected,
+            key=lambda item: (
+                order.get(int(item["expected_start_number"]), 10**9),
+                item["day"],
+                item["window_start_local"],
+                item["case_id"],
+            ),
+        )
     return selected[:max_cases]
 
 
@@ -1103,7 +1204,7 @@ def prepare_cases(args: argparse.Namespace) -> int:
         review_state = reviewed_sets.load_review_state(state_json)
         display_sets = reviewed_sets.rebuild_display_sets(raw_performances, review_state)
         candidate_rows = read_candidate_rows(announcements_csv, args.streams)
-        clip_segments, clip_meta = build_clip_segments(merged_csv, candidate_rows)
+        clip_segments, clip_meta = build_clip_segments(merged_csv, candidate_rows, args.min_word_score)
 
         total_numeric_sets = 0
         matched_sets = 0
@@ -1178,6 +1279,7 @@ def prepare_cases(args: argparse.Namespace) -> int:
             args.sampling,
             args.random_seed,
             args.set_range,
+            args.set_list,
         )
     except ValueError as exc:
         console.print(f"[red]Error: {exc}[/red]")

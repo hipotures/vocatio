@@ -93,6 +93,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional limit for the number of transcript JSON files to parse after filtering",
     )
     parser.add_argument(
+        "--min-word-score",
+        type=float,
+        default=0.0,
+        help="If greater than 0, drop low-confidence transcript words below this threshold when word scores are available. Default: 0 (disabled)",
+    )
+    parser.add_argument(
         "--max-windows",
         type=int,
         help="Optional limit for total semantic windows after de-duplication",
@@ -451,7 +457,7 @@ def main() -> int:
                 for segment_index, segment in enumerate(segments_raw, 1):
                     if not isinstance(segment, dict):
                         continue
-                    text = str(segment.get("text", "")).strip()
+                    text = demo.select_segment_text(segment, args.min_word_score)
                     if not text:
                         continue
                     try:
