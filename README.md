@@ -48,6 +48,25 @@ DAY/_workspace
 
 You can override this with `--workspace-dir`.
 
+## Expected Day Directory Structure
+
+Example under `/data/DAY/`:
+
+- `/data/20260323/p-a7r5/`
+- `/data/20260323/v-a7r5/`
+- `/data/20260323/v-gh7/`
+- `/data/20260323/v-pocket3/`
+- `/data/20260323/_workspace/`
+
+Prefix meaning:
+
+- `v-...` = video stream
+- `p-...` = photo stream
+- `_workspace/` = generated pipeline artifacts (CSV, JSON, transcripts, proxies, review state)
+
+The pipeline discovers stream directories using these prefixes.
+
+
 ## Pipeline Outputs (Default Filenames)
 
 Main workspace artifacts:
