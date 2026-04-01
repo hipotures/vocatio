@@ -17,7 +17,7 @@ The pipeline covers:
 
 - `scripts/pipeline/` - all operational pipeline scripts
 - `conf/` - export profiles for reviewed set delivery
-- `PROJECT_INTENT.md` - product direction
+- `docs/PROJECT_INTENT.md` - product direction
 
 ## Requirements
 

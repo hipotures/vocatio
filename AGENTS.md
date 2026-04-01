@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`vocatio` is currently a migration-stage Python repository. Top-level docs live in `README.md` and `PROJECT_INTENT.md`. Operational code is under `scripts/pipeline/`, which contains standalone CLI scripts for media export, sync estimation, transcription, announcement extraction, timeline building, proxy generation, review tooling, and delivery prep. Runtime configuration lives in `conf/`, for example `conf/copy_reviewed_set_assets.default.yaml`.
+`vocatio` is currently a migration-stage Python repository. Top-level documentation starts in `README.md`. Operational code is under `scripts/pipeline/`, which contains standalone CLI scripts for media export, sync estimation, transcription, announcement extraction, timeline building, proxy generation, review tooling, and delivery prep. Runtime configuration lives in `conf/`, for example `conf/copy_reviewed_set_assets.default.yaml`.
 
 Treat `scripts/pipeline/` as the active code surface. Keep new helpers close to the workflow they support, and prefer descriptive script names such as `build_*`, `extract_*`, or `generate_*`.
 
