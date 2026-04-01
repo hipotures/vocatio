@@ -29,6 +29,22 @@ Several scripts depend on external tools or libraries such as `ffmpeg`, `ffprobe
 
 Follow existing Python style: 4-space indentation, module-level constants in `UPPER_SNAKE_CASE`, functions and variables in `snake_case`, and explicit type hints where practical. Keep scripts CLI-first with a `parse_args()` and `main()` entrypoint. Prefer `pathlib.Path` over string paths and keep console output readable with `rich` when extending existing scripts.
 
+## Python Script UX and Rich Progress
+
+- Keep scripts self-contained and easy to run.
+- Use English only for code, comments, CLI help, logs, and all user-facing text.
+- Do not add code comments unless explicitly requested by the user.
+- Use `rich.progress` for any script that processes more than one file.
+- Use a left-justified, non-expanding progress layout (`expand=False`).
+- Use this standard progress column set:
+  - `SpinnerColumn()`
+  - `TextColumn("[progress.description]{task.description}")`
+  - `BarColumn(bar_width=40)`
+  - `MofNCompleteColumn()`
+  - `TaskProgressColumn()`
+  - `TimeElapsedColumn()`
+- Keep task descriptions at a fixed width (for example, `.ljust(25)`) so the progress bar does not shift horizontally.
+
 ## Testing Guidelines
 
 This repo does not use a centralized test runner yet. Validation is script-based and focused on real workflow data. Name exploratory or verification scripts `test_*.py` inside `scripts/pipeline/`, keep them safe to run locally, and document required input files in the script defaults or help text. When changing pipeline behavior, run the nearest affected script with `--help` and at least one representative invocation.
