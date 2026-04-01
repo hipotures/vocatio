@@ -142,7 +142,7 @@ def parse_args() -> argparse.Namespace:
     prepare_parser.add_argument(
         "day_dirs",
         nargs="+",
-        help="One or more day directories such as /arch03/V/DWC2026/20260323",
+        help="One or more day directories such as /data/20260323",
     )
     prepare_parser.add_argument(
         "--workspace-dir",

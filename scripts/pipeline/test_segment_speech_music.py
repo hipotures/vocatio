@@ -9,7 +9,7 @@ from rich.console import Console
 
 
 console = Console()
-DEFAULT_INPUT = Path("/arch03/V/DWC2026/20260323/v-pocket3/20260323_160955_3840x2160_60fps_14654072014.mp4")
+DEFAULT_INPUT = Path("V-POCKET3/20260323_160955_3840x2160_60fps_14654072014.mp4")
 DEFAULT_OUTPUT_DIR = Path("/tmp/vocatio_segment_146")
 
 
