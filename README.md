@@ -1,6 +1,6 @@
 # Vocatio
 
-`vocatio` is a CLI-driven event media pipeline for processing one event day directory (for example `/data/20260323`) into reviewed performance sets.
+`vocatio` is a CLI event media workflow focused on stream synchronization and set detection: it aligns photo and video streams in time, transcribes audio from video, extracts announcements, and builds performance/set timelines for review and final export.
 
 The pipeline covers:
 
@@ -32,7 +32,9 @@ Install Python dependencies in your preferred environment, then run scripts dire
 
 ## Data Model (Per Day)
 
-All scripts operate on a single `day_dir`, for example:
+The pipeline runs per `day_dir` (one event day at a time), for example:
+
+If you process multiple days, run the same sequence for each directory.
 
 ```bash
 /data/20260323
