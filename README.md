@@ -175,6 +175,12 @@ python3 scripts/pipeline/review_performance_proxy_gui.py DAY
 
 This step creates or updates `review_state.json`.
 
+Example GUI views:
+
+![Single preview mode](assets/gui-review-single-view.png)
+
+![First/Last comparison mode](assets/gui-review-first-last-compare.png)
+
 ### 12. Export one reviewed set
 
 ```bash
