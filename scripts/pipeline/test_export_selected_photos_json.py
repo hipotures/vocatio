@@ -22,6 +22,13 @@ copy_assets = load_module("copy_reviewed_set_assets_test", "scripts/pipeline/cop
 
 
 class ReviewSelectionExportTests(unittest.TestCase):
+    def test_keyboard_help_sections_include_export_shortcut(self):
+        sections = review_gui.keyboard_help_sections()
+        section_titles = [title for title, _rows in sections]
+        shortcuts = [shortcut for _title, rows in sections for shortcut, _description in rows]
+        self.assertIn("Selection And Export", section_titles)
+        self.assertIn("Ctrl+E", shortcuts)
+
     def test_resolve_selection_output_path_uses_workspace_for_relative_name(self):
         workspace_dir = Path("/tmp/day_workspace")
         output_path = review_gui.resolve_selection_output_path(workspace_dir, "moja_selekcja")

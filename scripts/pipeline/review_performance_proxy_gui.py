@@ -139,6 +139,50 @@ def build_photo_selection_payload(
     }
 
 
+def keyboard_help_sections() -> List[tuple[str, List[tuple[str, str]]]]:
+    return [
+        (
+            "Navigation",
+            [
+                ("Space", "Expand or collapse the current set"),
+                ("Left", "Select the previous set"),
+                ("Right", "Select the next set"),
+                ("1", "Switch to single-preview mode"),
+                ("2", "Switch to dual-preview mode"),
+                ("I", "Toggle the info panel"),
+                ("F", "Toggle fullscreen"),
+                ("H", "Open this help dialog"),
+            ],
+        ),
+        (
+            "Review",
+            [
+                ("S", "Split the current set from the selected photo into a new named set"),
+                ("M", "Merge selected sets into the first selected set"),
+                ("X", "Toggle no_photos_confirmed for the current set"),
+                ("R", "Reset review state"),
+            ],
+        ),
+        (
+            "Selection And Export",
+            [
+                ("Ctrl-click", "Add or remove sets from the selection"),
+                ("Shift-click", "Select a range of sets"),
+                ("Ctrl+E", "Export selected photo rows to JSON"),
+            ],
+        ),
+        (
+            "Display",
+            [
+                ("T", "Toggle tree icon size"),
+                ("Ctrl+=", "Increase UI scale"),
+                ("Ctrl+-", "Decrease UI scale"),
+                ("Ctrl+0", "Reset UI scale to auto"),
+            ],
+        ),
+    ]
+
+
 class ImageLoaderSignals(QObject):
     loaded = Signal(str, QPixmap, str)
 
@@ -260,6 +304,86 @@ class SplitSetDialog(QDialog):
 
     def is_set_split(self) -> bool:
         return self.set_checkbox.isChecked()
+
+
+class KeyboardHelpDialog(QDialog):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Keyboard Help")
+        self.setModal(True)
+        self.resize(760, 760)
+        self.setStyleSheet(
+            "QDialog { background: #f3efe7; }"
+            "QWidget#helpCard { background: #fffdf8; border: 1px solid #d8cfbf; border-radius: 12px; }"
+        )
+
+        title = QLabel("Keyboard Shortcuts")
+        title.setStyleSheet("font-size: 20px; font-weight: 700; color: #1f1b16;")
+        subtitle = QLabel("Keep review actions in one place: navigate, split, merge, and export without leaving the tree.")
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: #5f5648; padding-bottom: 4px;")
+
+        content = QWidget()
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(12)
+
+        for section_title, rows in keyboard_help_sections():
+            card = QWidget()
+            card.setObjectName("helpCard")
+            card_layout = QVBoxLayout()
+            card_layout.setContentsMargins(14, 14, 14, 14)
+            card_layout.setSpacing(10)
+
+            section_label = QLabel(section_title)
+            section_label.setStyleSheet("font-size: 13px; font-weight: 700; letter-spacing: 0.3px; color: #6c4f2b;")
+            card_layout.addWidget(section_label)
+
+            for shortcut, description in rows:
+                row_widget = QWidget()
+                row_layout = QHBoxLayout()
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(12)
+
+                shortcut_label = QLabel(shortcut)
+                shortcut_label.setMinimumWidth(132)
+                shortcut_label.setAlignment(Qt.AlignCenter)
+                shortcut_label.setStyleSheet(
+                    "background: #1f2933; color: #f7f3eb; border-radius: 7px; "
+                    "padding: 5px 8px; font-weight: 700;"
+                )
+
+                description_label = QLabel(description)
+                description_label.setWordWrap(True)
+                description_label.setStyleSheet("color: #201a13;")
+
+                row_layout.addWidget(shortcut_label, 0, Qt.AlignTop)
+                row_layout.addWidget(description_label, 1)
+                row_widget.setLayout(row_layout)
+                card_layout.addWidget(row_widget)
+
+            card.setLayout(card_layout)
+            content_layout.addWidget(card)
+
+        content_layout.addStretch(1)
+        content.setLayout(content_layout)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll_area.setWidget(content)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        button_box.accepted.connect(self.accept)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addWidget(scroll_area, 1)
+        layout.addWidget(button_box)
+        self.setLayout(layout)
 
 
 class MainWindow(QMainWindow):
@@ -1306,33 +1430,8 @@ class MainWindow(QMainWindow):
         self.info_dock.setVisible(not self.info_dock.isVisible())
 
     def show_help_dialog(self) -> None:
-        QMessageBox.information(
-            self,
-            "Keyboard Help",
-            "\n".join(
-                [
-                    "Space: expand or collapse the current set",
-                    "Left: previous set",
-                    "Right: next set",
-                    "1: single-preview mode",
-                    "2: dual-preview mode",
-                    "I: toggle info panel",
-                    "M: merge selected sets into the first selected set",
-                    "T: toggle tree icon size",
-                    "Ctrl-click: add or remove sets from the selection",
-                    "Shift-click: select a range of sets",
-                    "Ctrl+=: increase UI scale",
-                    "Ctrl+-: decrease UI scale",
-                    "Ctrl+0: reset UI scale to auto",
-                    "Ctrl+E: export selected photo rows to JSON",
-                    "F: toggle fullscreen",
-                    "H: show this help",
-                    "R: reset review state",
-                    "S: split the current set from the selected photo into a new named set",
-                    "X: toggle no_photos_confirmed for the current set",
-                ]
-            ),
-        )
+        dialog = KeyboardHelpDialog(self)
+        dialog.exec()
 
     def confirm_reset_review_state(self) -> None:
         answer = QMessageBox.question(
