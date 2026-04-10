@@ -58,3 +58,10 @@ Video export behavior in `copy_reviewed_set_assets.py`:
   - `start_trim_seconds`
   - `end_padding_seconds`
 - writes `video_markers.csv` next to exported set videos
+
+Photo selection export behavior:
+
+- `review_performance_proxy_gui.py` supports `Ctrl+E` to save the currently selected photo rows to a JSON file
+- relative JSON names are written to `DAY/_workspace`
+- `copy_reviewed_set_assets.py` accepts that JSON path as the third positional argument
+- in JSON selection mode it exports only the listed photos and skips video selection

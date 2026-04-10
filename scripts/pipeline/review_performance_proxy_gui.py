@@ -8,7 +8,7 @@ import sys
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 
 def ensure_venv_python() -> None:
@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHeaderView,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -102,6 +103,40 @@ def parse_args() -> argparse.Namespace:
         help='UI scale factor like "1.25" or "auto". Default: auto',
     )
     return parser.parse_args()
+
+
+def resolve_selection_output_path(workspace_dir: Path, value: str) -> Path:
+    candidate = Path(value.strip())
+    if not candidate.is_absolute():
+        candidate = workspace_dir / candidate
+    if candidate.suffix.lower() != ".json":
+        candidate = candidate.with_suffix(".json")
+    return candidate
+
+
+def build_photo_selection_payload(
+    day: str,
+    source_index_json: Path,
+    generated_at: str,
+    photos: Sequence[Dict],
+) -> Dict:
+    return {
+        "kind": "photo_selection_v1",
+        "day": day,
+        "generated_at": generated_at,
+        "source_index_json": str(source_index_json),
+        "photos": [
+            {
+                "filename": str(photo.get("filename", "")),
+                "stream_id": str(photo.get("stream_id", "")),
+                "source_path": str(photo.get("source_path", "")),
+                "adjusted_start_local": str(photo.get("adjusted_start_local", "")),
+                "display_set_id": str(photo.get("display_set_id", "")),
+                "display_name": str(photo.get("display_name", "")),
+            }
+            for photo in photos
+        ],
+    }
 
 
 class ImageLoaderSignals(QObject):
@@ -235,6 +270,14 @@ class MainWindow(QMainWindow):
         self.state_backup_path = state_path.with_suffix(f"{state_path.suffix}.old")
         self.state_tmp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
         self.payload = payload
+        workspace_value = str(payload.get("workspace_dir", "")).strip()
+        if workspace_value:
+            workspace_path = Path(workspace_value)
+            if not workspace_path.is_absolute():
+                workspace_path = (index_path.parent / workspace_path).resolve()
+            self.workspace_dir = workspace_path
+        else:
+            self.workspace_dir = index_path.parent
         self.raw_performances: List[Dict] = payload["performances"]
         self.thread_pool = QThreadPool.globalInstance()
         self.icon_cache: Dict[str, QPixmap] = {}
@@ -426,6 +469,11 @@ class MainWindow(QMainWindow):
         reset_scale_action.setShortcut(QKeySequence("Ctrl+0"))
         reset_scale_action.triggered.connect(self.reset_ui_scale)
         self.addAction(reset_scale_action)
+
+        export_selection_action = QAction(self)
+        export_selection_action.setShortcut(QKeySequence("Ctrl+E"))
+        export_selection_action.triggered.connect(self.export_selected_photos_json)
+        self.addAction(export_selection_action)
 
     def current_timestamp(self) -> str:
         return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -718,6 +766,68 @@ class MainWindow(QMainWindow):
             set_id = display_set["set_id"]
             if set_id not in self.selection_order_ids:
                 self.selection_order_ids.append(set_id)
+
+    def selected_photo_entries(self) -> List[Dict]:
+        selected: "OrderedDict[str, Dict]" = OrderedDict()
+        for item in self.tree.selectedItems():
+            if item.parent() is None:
+                continue
+            photo = item.data(0, Qt.UserRole)
+            if not isinstance(photo, dict):
+                continue
+            filename = str(photo.get("filename", "")).strip()
+            if not filename:
+                continue
+            source_path = str(photo.get("source_path", "")).strip()
+            fallback_key = f"{photo.get('stream_id', '')}::{filename}"
+            key = source_path or fallback_key
+            if key in selected:
+                continue
+            selected[key] = photo
+        photos = list(selected.values())
+        photos.sort(
+            key=lambda photo: (
+                str(photo.get("adjusted_start_local", "")),
+                str(photo.get("stream_id", "")),
+                str(photo.get("filename", "")),
+            )
+        )
+        return photos
+
+    def export_selected_photos_json(self) -> None:
+        photos = self.selected_photo_entries()
+        if not photos:
+            QMessageBox.information(self, "Export Selection", "Select one or more photo rows before exporting.")
+            return
+        default_name = f"selected_photos_{self.payload.get('day', '')}.json"
+        filename, accepted = QInputDialog.getText(
+            self,
+            "Export Selection",
+            "JSON filename or absolute path:",
+            QLineEdit.Normal,
+            default_name,
+        )
+        if not accepted:
+            return
+        filename = filename.strip()
+        if not filename:
+            QMessageBox.warning(self, "Export Selection", "Filename cannot be empty.")
+            return
+        output_path = resolve_selection_output_path(self.workspace_dir, filename)
+        payload = build_photo_selection_payload(
+            day=str(self.payload.get("day", "")),
+            source_index_json=self.index_path,
+            generated_at=self.current_timestamp(),
+            photos=photos,
+        )
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Selection", f"Failed to write JSON: {exc}")
+            self.statusBar().showMessage(f"Selection export failed: {output_path}")
+            return
+        self.statusBar().showMessage(f"Saved {len(photos)} photos to {output_path}")
 
     def apply_review_font(self, item: QTreeWidgetItem, set_id: str) -> None:
         entry = self.review_entry(set_id)
@@ -1214,6 +1324,7 @@ class MainWindow(QMainWindow):
                     "Ctrl+=: increase UI scale",
                     "Ctrl+-: decrease UI scale",
                     "Ctrl+0: reset UI scale to auto",
+                    "Ctrl+E: export selected photo rows to JSON",
                     "F: toggle fullscreen",
                     "H: show this help",
                     "R: reset review state",

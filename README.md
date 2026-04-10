@@ -85,6 +85,7 @@ Main workspace artifacts:
 - `photo_proxy_manifest.csv`
 - `performance_proxy_index.json`
 - `review_state.json`
+- `selected_photos_*.json` optional GUI photo selection exports
 
 Directories:
 
@@ -175,6 +176,15 @@ python3 scripts/pipeline/review_performance_proxy_gui.py DAY
 
 This step creates or updates `review_state.json`.
 
+The GUI also supports exporting an ad-hoc photo selection:
+
+- select one or more photo rows inside a set
+- press `Ctrl+E`
+- enter a JSON filename such as `selected_photos_a.json`
+- the file is written to `DAY/_workspace` unless you enter an absolute path
+
+The selection JSON can later be passed directly to the export script.
+
 Example GUI views:
 
 ![Single preview mode](assets/gui-review-single-view.png)
@@ -191,6 +201,19 @@ Where:
 
 - `out` is the target root directory
 - `158` is the final set name (number or text label)
+
+You can also export only explicitly selected photos from a GUI selection JSON:
+
+```bash
+python3 scripts/pipeline/copy_reviewed_set_assets.py DAY out selected_photos_a.json --streams photo
+```
+
+In this mode:
+
+- the third argument is a selection JSON saved from the GUI
+- the export goes to `out/selected_photos_a/`
+- only the listed photos are exported
+- `--index-json` still works as usual when you need a non-default index
 
 ## Export Profiles
 

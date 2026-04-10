@@ -38,7 +38,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("day_dir", help="Path to a single day directory like /data/20260323")
     parser.add_argument("target_dir", help="Output root directory for copied files")
-    parser.add_argument("set_name", help="Final set display name, for example 86, 158, or Ceremonia")
+    parser.add_argument(
+        "set_name",
+        help="Final set display name, for example 86, 158, or Ceremonia; or a selection JSON path saved from the review GUI.",
+    )
     parser.add_argument(
         "--workspace-dir",
         help="Override the workspace directory. Default: DAY/_workspace",
@@ -116,6 +119,28 @@ def max_internal_photo_gap_info(photos: Sequence[Dict]) -> Tuple[int, List[str]]
 
 def load_json(path: Path) -> Dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def is_selection_payload(payload: Dict) -> bool:
+    return isinstance(payload, dict) and payload.get("kind") == "photo_selection_v1" and isinstance(payload.get("photos"), list)
+
+
+def looks_like_index_payload(payload: Dict) -> bool:
+    return isinstance(payload, dict) and isinstance(payload.get("performances"), list)
+
+
+def resolve_selection_input(workspace_dir: Path, set_name: str) -> Tuple[Optional[Path], Optional[Dict]]:
+    candidate = Path(set_name)
+    if not candidate.is_absolute():
+        candidate = workspace_dir / candidate
+    if not candidate.exists() or candidate.suffix.lower() != ".json":
+        return None, None
+    payload = load_json(candidate)
+    if is_selection_payload(payload):
+        return candidate, payload
+    if looks_like_index_payload(payload):
+        raise ValueError(f"{candidate} looks like an index JSON. Pass it with --index-json instead.")
+    raise ValueError(f"{candidate} is not a supported photo selection JSON.")
 
 
 def load_review_state(path: Path) -> Dict:
@@ -468,6 +493,46 @@ def dedupe_paths(paths: Iterable[Path]) -> List[Path]:
     return list(seen.keys())
 
 
+def collect_selection_photo_paths(
+    selection_payload: Dict,
+    available_photos: Sequence[Dict],
+    stream_filter: Optional[Dict[str, bool]],
+) -> Tuple[List[Path], List[Dict]]:
+    photos_by_source_path: Dict[str, Dict] = {}
+    photos_by_stream_and_name: Dict[Tuple[str, str], Dict] = {}
+    for photo in available_photos:
+        source_path = str(photo.get("source_path", "")).strip()
+        stream_id = str(photo.get("stream_id", "")).strip()
+        filename = str(photo.get("filename", "")).strip()
+        if source_path:
+            photos_by_source_path[source_path] = photo
+        if stream_id and filename:
+            photos_by_stream_and_name[(stream_id, filename)] = photo
+
+    matched_paths: "OrderedDict[Path, None]" = OrderedDict()
+    missing_entries: List[Dict] = []
+    for entry in selection_payload.get("photos", []):
+        if not isinstance(entry, dict):
+            continue
+        source_path = str(entry.get("source_path", "")).strip()
+        stream_id = str(entry.get("stream_id", "")).strip()
+        filename = str(entry.get("filename", "")).strip()
+        photo = None
+        if source_path:
+            photo = photos_by_source_path.get(source_path)
+        if photo is None and stream_id and filename:
+            photo = photos_by_stream_and_name.get((stream_id, filename))
+        if photo is None:
+            missing_entries.append(entry)
+            continue
+        if not include_photo(photo, stream_filter):
+            continue
+        photo_source_path = str(photo.get("source_path", "")).strip()
+        if photo_source_path:
+            matched_paths[Path(photo_source_path)] = None
+    return list(matched_paths.keys()), missing_entries
+
+
 def build_original_interval_map(raw_performances: Sequence[Dict]) -> Dict[str, Dict[str, str]]:
     interval_map: Dict[str, Dict[str, str]] = {}
     for performance in raw_performances:
@@ -783,12 +848,6 @@ def main() -> int:
     if not index_json.exists():
         console.print(f"[red]Error: index JSON not found: {index_json}[/red]")
         return 1
-    if not state_json.exists():
-        console.print(f"[red]Error: review state JSON not found: {state_json}[/red]")
-        return 1
-    if not merged_csv.exists():
-        console.print(f"[red]Error: merged synced video CSV not found: {merged_csv}[/red]")
-        return 1
     try:
         export_config = load_export_config(config_path)
     except Exception as exc:
@@ -800,22 +859,45 @@ def main() -> int:
     if not isinstance(raw_performances, list):
         console.print(f"[red]Error: invalid performances payload in {index_json}[/red]")
         return 1
-    review_state = load_review_state(state_json)
-    display_sets = rebuild_display_sets(raw_performances, review_state)
-    original_intervals = build_original_interval_map(raw_performances)
 
     try:
-        display_set = select_display_set(display_sets, args.set_name)
+        selection_json, selection_payload = resolve_selection_input(workspace_dir, args.set_name)
     except ValueError as exc:
         console.print(f"[red]Error: {exc}[/red]")
         return 1
 
     stream_filter = normalize_stream_filter(args.streams)
-    photo_paths = dedupe_paths(
-        Path(photo["source_path"]) for photo in display_set["photos"] if include_photo(photo, stream_filter)
-    )
-    video_rows = collect_video_rows(merged_csv, display_set, original_intervals, stream_filter)
-    target_dir = target_root / normalized_output_dir_name(display_set["display_name"])
+    if selection_json is not None and selection_payload is not None:
+        available_photos = [photo for performance in raw_performances for photo in performance.get("photos", [])]
+        photo_paths, missing_entries = collect_selection_photo_paths(selection_payload, available_photos, stream_filter)
+        if missing_entries:
+            console.print(f"[yellow]Warning: {len(missing_entries)} selected photos were not found in the current index.[/yellow]")
+        display_set = {"display_name": selection_json.stem, "set_id": selection_json.stem}
+        original_intervals = {}
+        video_rows: List[Dict[str, str]] = []
+        target_dir = target_root / selection_json.stem
+    else:
+        if not state_json.exists():
+            console.print(f"[red]Error: review state JSON not found: {state_json}[/red]")
+            return 1
+        if not merged_csv.exists():
+            console.print(f"[red]Error: merged synced video CSV not found: {merged_csv}[/red]")
+            return 1
+        review_state = load_review_state(state_json)
+        display_sets = rebuild_display_sets(raw_performances, review_state)
+        original_intervals = build_original_interval_map(raw_performances)
+
+        try:
+            display_set = select_display_set(display_sets, args.set_name)
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+            return 1
+
+        photo_paths = dedupe_paths(
+            Path(photo["source_path"]) for photo in display_set["photos"] if include_photo(photo, stream_filter)
+        )
+        video_rows = collect_video_rows(merged_csv, display_set, original_intervals, stream_filter)
+        target_dir = target_root / normalized_output_dir_name(display_set["display_name"])
 
     if not photo_paths and not video_rows:
         console.print("[yellow]No files matched the requested set and stream filter.[/yellow]")
