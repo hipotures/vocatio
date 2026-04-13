@@ -162,3 +162,9 @@ result = whisperx.align(
 2. Pin aligner `jonatasgrosman/wav2vec2-large-xlsr-53-polish`.
 3. Use explicit numerals strategy (`suppress_numerals`) by output goal.
 4. Tune VAD before changing model size.
+
+## Cross-Pipeline Media Index
+
+- Design and implement a single canonical media indexing file that can serve both the legacy audio-first pipeline and the new image-only pipeline.
+- Keep media identity stable across both flows, with one shared contract for source paths, relative paths, timestamps, and logical ordering.
+- Ensure the shared index can be rebuilt without breaking legacy artifacts already stored under `_workspace`.
