@@ -54,6 +54,23 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
         self.assertEqual(extract_jpg.normalize_preview_source("JpgFromRaw"), "embedded_jpg_from_raw")
         self.assertEqual(extract_jpg.normalize_preview_source(None), "generated_from_source")
 
+    def test_ensure_thumb_jpg_handles_embedded_tuple_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "a.arw"
+            thumb_path = Path(tmp) / "thumb.jpg"
+            preview_path = Path(tmp) / "preview.jpg"
+            source_path.write_bytes(b"raw")
+
+            original_extract = extract_jpg.extract_first_embedded_jpeg
+            try:
+                extract_jpg.extract_first_embedded_jpeg = lambda _source, _tags: ("ThumbnailImage", MINIMAL_JPEG_BYTES)
+                dimensions = extract_jpg.ensure_thumb_jpg(source_path, thumb_path, preview_path, overwrite=True)
+            finally:
+                extract_jpg.extract_first_embedded_jpeg = original_extract
+
+            self.assertEqual(dimensions, (1, 1))
+            self.assertEqual(thumb_path.read_bytes(), MINIMAL_JPEG_BYTES)
+
     def test_load_photo_manifest_rows_preserves_manifest_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"

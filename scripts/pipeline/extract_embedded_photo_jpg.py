@@ -339,7 +339,7 @@ def ensure_thumb_jpg(
 ) -> Tuple[int, int]:
     if thumb_path.exists() and not overwrite:
         return read_jpeg_dimensions(thumb_path)
-    payload = extract_first_embedded_jpeg(source_path, THUMB_TAGS)
+    _tag_name, payload = extract_first_embedded_jpeg(source_path, THUMB_TAGS)
     if payload is not None:
         atomic_write_bytes(thumb_path, payload)
         return parse_jpeg_dimensions(payload)
