@@ -124,7 +124,7 @@ def build_manifest_rows(
     files = collect_source_files(day_dir)
     if not files:
         raise ValueError(f"No photo files found under {day_dir}")
-    rows: List[Dict[str, str]] = []
+    rows_with_sort: List[tuple[tuple[object, str, str], Dict[str, str]]] = []
     for path in files:
         metadata = metadata_by_path.get(str(path))
         if metadata is None:
@@ -163,8 +163,8 @@ def build_manifest_rows(
                 "file_create_date_raw": str(metadata.get("FileCreateDate") or ""),
             }
         )
-        rows.append(row)
-    rows.sort(key=lambda row: (row["capture_time_local"], row["capture_subsec"], row["relative_path"]))
+        rows_with_sort.append(((time_parts.sort_dt, row["capture_subsec"], row["relative_path"]), row))
+    rows = [row for _sort_key, row in sorted(rows_with_sort, key=lambda item: item[0])]
     for index, row in enumerate(rows):
         row["photo_order_index"] = str(index)
     return rows

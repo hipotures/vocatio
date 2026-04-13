@@ -100,6 +100,35 @@ class ExportRecursivePhotoCsvTests(unittest.TestCase):
             self.assertEqual(rows[0]["start_local"], "2026-03-23T10:00:00")
             self.assertEqual(rows[0]["start_epoch_ms"], "1774252800000")
 
+    def test_build_manifest_rows_orders_mixed_explicit_offsets_by_true_chronology(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            (day_dir / "hour10").mkdir(parents=True)
+            early_path = day_dir / "hour10" / "early.jpg"
+            late_path = day_dir / "hour10" / "late.jpg"
+            early_path.write_bytes(b"a")
+            late_path.write_bytes(b"b")
+
+            rows = export_csv.build_manifest_rows(
+                day_dir=day_dir,
+                stream_id="p-main",
+                device="",
+                metadata_by_path={
+                    str(early_path): {
+                        "DateTimeOriginal": "2026:03:23 10:00:00+02:00",
+                    },
+                    str(late_path): {
+                        "DateTimeOriginal": "2026:03:23 09:30:00+00:00",
+                    },
+                },
+            )
+
+            self.assertEqual(
+                [row["relative_path"] for row in rows],
+                ["hour10/early.jpg", "hour10/late.jpg"],
+            )
+            self.assertEqual([row["photo_order_index"] for row in rows], ["0", "1"])
+
 
 if __name__ == "__main__":
     unittest.main()

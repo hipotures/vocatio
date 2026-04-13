@@ -25,6 +25,7 @@ class CaptureTimeParts(NamedTuple):
     timestamp_source: str
     start_local: str
     start_epoch_ms: str
+    sort_dt: datetime
 
 
 class ParsedExifDatetime(NamedTuple):
@@ -80,6 +81,12 @@ def format_start_epoch_ms(value: datetime, aware_value: Optional[datetime]) -> s
     return str(int(timestamp_value.timestamp() * 1000))
 
 
+def normalize_sort_datetime(value: datetime, aware_value: Optional[datetime]) -> datetime:
+    if aware_value is None:
+        return value
+    return aware_value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def pick_capture_time_parts(item: Mapping[str, object]) -> CaptureTimeParts:
     for field_name, source_name in PHOTO_CAPTURE_TIME_FIELDS:
         parsed = parse_exif_datetime(item.get(field_name))
@@ -93,5 +100,6 @@ def pick_capture_time_parts(item: Mapping[str, object]) -> CaptureTimeParts:
             timestamp_source=source_name,
             start_local=format_start_local(dt),
             start_epoch_ms=format_start_epoch_ms(dt, parsed.aware_dt),
+            sort_dt=normalize_sort_datetime(dt, parsed.aware_dt),
         )
     raise ValueError("Could not determine capture time from photo metadata")
