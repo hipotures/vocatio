@@ -33,12 +33,15 @@ def atomic_write_csv(
     headers: Sequence[str],
     rows: Iterable[Mapping[str, object]],
 ) -> None:
+    fieldnames = list(headers)
+    if not fieldnames:
+        raise ValueError("CSV headers must not be empty")
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(headers))
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(rows)
             handle.flush()

@@ -1,3 +1,6 @@
+from typing import Iterable
+
+
 SOURCE_MODE_IMAGE_ONLY_V1 = "image_only_v1"
 
 PHOTO_MANIFEST_HEADERS = [
@@ -40,7 +43,13 @@ PHOTO_MANIFEST_REQUIRED_COLUMNS = frozenset(
 )
 
 
-def validate_required_columns(name: str, required: set[str], actual: set[str]) -> None:
-    missing = sorted(required - actual)
+def validate_required_columns(
+    name: str,
+    required: Iterable[str],
+    actual: Iterable[str] | None,
+) -> None:
+    required_names = set(required)
+    actual_names = set(actual or ())
+    missing = sorted(required_names - actual_names)
     if missing:
         raise ValueError(f"{name} missing required columns: {', '.join(missing)}")
