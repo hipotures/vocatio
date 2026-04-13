@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import shutil
 import subprocess
@@ -21,6 +22,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
+from lib.image_pipeline_contracts import PHOTO_MANIFEST_REQUIRED_COLUMNS, validate_required_columns
 from lib.pipeline_io import atomic_write_csv
 
 
@@ -29,6 +31,7 @@ console = Console()
 PHOTO_EXTENSIONS = {".arw", ".cr3", ".hif", ".heif", ".jpg", ".jpeg", ".nef"}
 MANIFEST_HEADERS = [
     "relative_path",
+    "path",
     "source_path",
     "photo_id",
     "filename",
@@ -47,6 +50,10 @@ PREVIEW_TAGS = ("PreviewImage", "JpgFromRaw")
 THUMB_TAGS = ("ThumbnailImage",)
 PREVIEW_MAX_EDGE = 1600
 THUMB_MAX_EDGE = 400
+PHOTO_MANIFEST_NAME = "photo_manifest.csv"
+PREVIEW_SOURCE_EMBEDDED = "embedded_preview"
+PREVIEW_SOURCE_EMBEDDED_RAW = "embedded_jpg_from_raw"
+PREVIEW_SOURCE_GENERATED = "generated_from_source"
 JPEG_SOI = b"\xff\xd8"
 SOF_MARKERS = {
     0xC0,
@@ -86,20 +93,6 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
-
-def collect_source_files(day_dir: Path) -> List[Path]:
-    files: List[Path] = []
-    for path in sorted(day_dir.rglob("*")):
-        if not path.is_file() or path.is_symlink():
-            continue
-        if "_workspace" in path.relative_to(day_dir).parts:
-            continue
-        if path.suffix.lower() not in PHOTO_EXTENSIONS:
-            continue
-        files.append(path)
-    return files
-
-
 def resolve_output_path(workspace_dir: Path, output_value: str) -> Path:
     candidate = Path(output_value)
     if candidate.is_absolute():
@@ -117,6 +110,27 @@ def build_output_paths(workspace_dir: Path, relative_path: str) -> Dict[str, Pat
 
 def serialize_workspace_path(workspace_dir: Path, path: Path) -> str:
     return path.relative_to(workspace_dir).as_posix()
+
+
+def load_photo_manifest_rows(workspace_dir: Path) -> List[Dict[str, str]]:
+    manifest_path = workspace_dir / PHOTO_MANIFEST_NAME
+    if not manifest_path.exists():
+        raise ValueError(f"Required manifest not found: {manifest_path}")
+    with manifest_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        validate_required_columns(PHOTO_MANIFEST_NAME, PHOTO_MANIFEST_REQUIRED_COLUMNS, reader.fieldnames)
+        rows = list(reader)
+    if not rows:
+        raise ValueError(f"No photo rows found in {manifest_path}")
+    return rows
+
+
+def normalize_preview_source(tag_name: Optional[str]) -> str:
+    if tag_name == "PreviewImage":
+        return PREVIEW_SOURCE_EMBEDDED
+    if tag_name == "JpgFromRaw":
+        return PREVIEW_SOURCE_EMBEDDED_RAW
+    return PREVIEW_SOURCE_GENERATED
 
 
 def build_manifest_row(
@@ -141,6 +155,7 @@ def build_manifest_row(
     row.update(
         {
             "relative_path": relative_path,
+            "path": relative_path,
             "source_path": relative_path,
             "photo_id": relative_path,
             "filename": source_path.name,
@@ -256,17 +271,17 @@ def generate_resized_jpeg(source_path: Path, output_path: Path, max_edge: int) -
     atomic_replace_from_command(output_path, command)
 
 
-def extract_first_embedded_jpeg(source_path: Path, tag_names: Sequence[str]) -> Optional[bytes]:
+def extract_first_embedded_jpeg(source_path: Path, tag_names: Sequence[str]) -> Tuple[Optional[str], Optional[bytes]]:
     for tag_name in tag_names:
         try:
             payload = extract_exiftool_jpeg(source_path, tag_name)
         except FileNotFoundError:
-            return None
+            return (None, None)
         except subprocess.CalledProcessError:
             continue
         if looks_like_jpeg(payload):
-            return payload
-    return None
+            return (tag_name, payload)
+    return (None, None)
 
 
 def parse_jpeg_dimensions(payload: bytes) -> Tuple[int, int]:
@@ -305,14 +320,15 @@ def read_jpeg_dimensions(path: Path) -> Tuple[int, int]:
 
 
 def ensure_preview_jpg(source_path: Path, preview_path: Path, overwrite: bool) -> Tuple[str, Tuple[int, int]]:
+    tag_name, payload = extract_first_embedded_jpeg(source_path, PREVIEW_TAGS)
+    preview_source = normalize_preview_source(tag_name)
     if preview_path.exists() and not overwrite:
-        return ("existing", read_jpeg_dimensions(preview_path))
-    payload = extract_first_embedded_jpeg(source_path, PREVIEW_TAGS)
+        return (preview_source, read_jpeg_dimensions(preview_path))
     if payload is not None:
         atomic_write_bytes(preview_path, payload)
-        return ("embedded_preview", parse_jpeg_dimensions(payload))
+        return (preview_source, parse_jpeg_dimensions(payload))
     generate_resized_jpeg(source_path, preview_path, PREVIEW_MAX_EDGE)
-    return ("generated_preview", read_jpeg_dimensions(preview_path))
+    return (PREVIEW_SOURCE_GENERATED, read_jpeg_dimensions(preview_path))
 
 
 def ensure_thumb_jpg(
@@ -336,9 +352,7 @@ def build_manifest_rows(
     workspace_dir: Path,
     overwrite: bool,
 ) -> List[Dict[str, str]]:
-    files = collect_source_files(day_dir)
-    if not files:
-        raise ValueError(f"No photo files found under {day_dir}")
+    photo_rows = load_photo_manifest_rows(workspace_dir)
     rows: List[Dict[str, str]] = []
     with Progress(
         SpinnerColumn(),
@@ -350,9 +364,19 @@ def build_manifest_rows(
         expand=False,
         console=console,
     ) as progress:
-        task_id = progress.add_task("Extract embedded JPG".ljust(25), total=len(files))
-        for source_path in files:
-            relative_path = source_path.relative_to(day_dir).as_posix()
+        task_id = progress.add_task("Extract embedded JPG".ljust(25), total=len(photo_rows))
+        for photo_row in photo_rows:
+            relative_path = photo_row["relative_path"]
+            source_value = photo_row.get("path", "").strip()
+            if not source_value:
+                raise ValueError(f"photo_manifest.csv row missing path for {relative_path}")
+            source_path = Path(source_value)
+            if not source_path.is_absolute():
+                source_path = day_dir / source_path
+            if not source_path.exists() or not source_path.is_file():
+                raise ValueError(f"Source photo listed in photo_manifest.csv does not exist: {source_path}")
+            if source_path.suffix.lower() not in PHOTO_EXTENSIONS:
+                raise ValueError(f"Unsupported photo extension for {source_path}")
             output_paths = build_output_paths(workspace_dir, relative_path)
             preview_source, preview_dimensions = ensure_preview_jpg(
                 source_path,
