@@ -27,21 +27,27 @@ console = Console()
 
 PHOTO_QUALITY_HEADERS = [
     "relative_path",
-    "photo_order_index",
-    "path",
-    "width_px",
-    "height_px",
+    "focus_score",
+    "blur_score",
+    "motion_blur_score",
     "brightness_mean",
-    "contrast_std",
-    "sharpness_laplacian_var",
-    "flag_dark",
-    "flag_low_contrast",
+    "brightness_p05",
+    "brightness_p95",
+    "contrast_score",
+    "highlight_clip_ratio",
+    "shadow_clip_ratio",
     "flag_blurry",
+    "flag_dark",
+    "flag_overexposed",
+    "flag_low_contrast",
 ]
 
 DARK_THRESHOLD = 0.20
 LOW_CONTRAST_THRESHOLD = 0.08
 BLURRY_THRESHOLD = 0.0005
+OVEREXPOSED_THRESHOLD = 0.98
+HIGHLIGHT_CLIP_THRESHOLD = 0.02
+SHADOW_CLIP_THRESHOLD = 0.02
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,6 +66,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         help="Output CSV filename or absolute path. Default: WORKSPACE/photo_quality.csv",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite an existing photo_quality.csv output",
     )
     return parser.parse_args()
 
@@ -124,32 +135,51 @@ def format_float(value: float) -> str:
     return f"{value:.6f}"
 
 
+def compute_motion_blur_score(image: np.ndarray) -> float:
+    normalized = image.astype(np.float32) / 255.0
+    gradient_x = np.abs(np.diff(normalized, axis=1))
+    gradient_y = np.abs(np.diff(normalized, axis=0))
+    gradient_x_mean = float(gradient_x.mean()) if gradient_x.size else 0.0
+    gradient_y_mean = float(gradient_y.mean()) if gradient_y.size else 0.0
+    dominant_gradient = max(gradient_x_mean, gradient_y_mean)
+    if dominant_gradient <= 0.0:
+        return 0.0
+    return float(min(gradient_x_mean, gradient_y_mean) / dominant_gradient)
+
+
 def compute_quality_row(
     relative_path: str,
     image: np.ndarray,
-    *,
-    photo_order_index: str = "",
-    source_path: str = "",
 ) -> Dict[str, str]:
     if image.ndim != 2:
         raise ValueError(f"Expected a 2D grayscale array for {relative_path}, got shape {image.shape}")
-    height, width = image.shape
     normalized = image.astype(np.float32) / 255.0
+    brightness_p05 = float(np.percentile(normalized, 5))
+    brightness_p95 = float(np.percentile(normalized, 95))
     brightness_mean = float(normalized.mean())
-    contrast_std = float(normalized.std())
-    sharpness_laplacian_var = compute_laplacian_variance(image)
+    contrast_score = float(normalized.std())
+    focus_score = compute_laplacian_variance(image)
+    blur_score = 1.0 / (1.0 + (focus_score * 1000.0))
+    motion_blur_score = compute_motion_blur_score(image)
+    highlight_clip_ratio = float((normalized >= OVEREXPOSED_THRESHOLD).mean())
+    shadow_clip_ratio = float((normalized <= SHADOW_CLIP_THRESHOLD).mean())
     return {
         "relative_path": relative_path,
-        "photo_order_index": photo_order_index,
-        "path": source_path,
-        "width_px": str(width),
-        "height_px": str(height),
+        "focus_score": format_float(focus_score),
+        "blur_score": format_float(blur_score),
+        "motion_blur_score": format_float(motion_blur_score),
         "brightness_mean": format_float(brightness_mean),
-        "contrast_std": format_float(contrast_std),
-        "sharpness_laplacian_var": format_float(sharpness_laplacian_var),
+        "brightness_p05": format_float(brightness_p05),
+        "brightness_p95": format_float(brightness_p95),
+        "contrast_score": format_float(contrast_score),
+        "highlight_clip_ratio": format_float(highlight_clip_ratio),
+        "shadow_clip_ratio": format_float(shadow_clip_ratio),
+        "flag_blurry": "1" if focus_score < BLURRY_THRESHOLD else "0",
         "flag_dark": "1" if brightness_mean < DARK_THRESHOLD else "0",
-        "flag_low_contrast": "1" if contrast_std < LOW_CONTRAST_THRESHOLD else "0",
-        "flag_blurry": "1" if sharpness_laplacian_var < BLURRY_THRESHOLD else "0",
+        "flag_overexposed": "1"
+        if brightness_p95 >= OVEREXPOSED_THRESHOLD or highlight_clip_ratio >= HIGHLIGHT_CLIP_THRESHOLD
+        else "0",
+        "flag_low_contrast": "1" if contrast_score < LOW_CONTRAST_THRESHOLD else "0",
     }
 
 
@@ -172,20 +202,12 @@ def build_quality_rows(
         for manifest_row in manifest_rows:
             relative_path = str(manifest_row.get("relative_path") or "").strip()
             source_path = str(manifest_row.get("path") or "").strip()
-            photo_order_index = str(manifest_row.get("photo_order_index") or "").strip()
             if not relative_path:
                 raise ValueError("photo_manifest.csv row missing relative_path")
             if not source_path:
                 raise ValueError(f"photo_manifest.csv row missing path for {relative_path}")
             image = image_loader(Path(source_path))
-            rows.append(
-                compute_quality_row(
-                    relative_path,
-                    image,
-                    photo_order_index=photo_order_index,
-                    source_path=source_path,
-                )
-            )
+            rows.append(compute_quality_row(relative_path, image))
             progress.advance(task)
     return rows
 
@@ -207,6 +229,8 @@ def main() -> int:
     output_path = resolve_output_path(workspace_dir, args.output)
     if not manifest_csv.exists():
         raise SystemExit(f"Manifest CSV does not exist: {manifest_csv}")
+    if output_path.exists() and not args.overwrite:
+        raise SystemExit(f"Output CSV already exists: {output_path}. Use --overwrite to replace it.")
     row_count = build_photo_quality_annotations(manifest_csv, output_path)
     console.print(f"Wrote {row_count} photo quality rows to {output_path}")
     return 0
