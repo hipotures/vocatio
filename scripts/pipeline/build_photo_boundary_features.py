@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Mapping, Optional, Sequence
@@ -67,6 +68,8 @@ DINO_INDEX_REQUIRED_COLUMNS = frozenset(
         "row_index",
     }
 )
+
+LOCAL_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3}|\.\d{6})?$")
 
 
 def positive_int_arg(value: str) -> int:
@@ -178,9 +181,13 @@ def normalize_day_relative_path(relative_path: str, column_name: str) -> str:
 
 
 def parse_local_datetime(value: str, column_name: str) -> datetime:
-    text = value.strip()
+    text = str(value)
     if not text:
         raise ValueError(f"{column_name} is empty")
+    if text != text.strip():
+        raise ValueError(f"{column_name} must be a valid ISO local datetime: {value}")
+    if not LOCAL_DATETIME_RE.match(text):
+        raise ValueError(f"{column_name} must be a valid ISO local datetime: {value}")
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError as exc:
