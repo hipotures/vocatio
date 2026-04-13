@@ -73,6 +73,13 @@ SOF_MARKERS = {
 }
 
 
+def positive_int_arg(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extract embedded preview and thumb JPG files into the day workspace."
@@ -89,13 +96,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--thumb-long-edge",
-        type=int,
+        type=positive_int_arg,
         default=DEFAULT_THUMB_LONG_EDGE,
         help="Resize thumbs so the longer edge fits within this size. Default: 160",
     )
     parser.add_argument(
         "--preview-long-edge",
-        type=int,
+        type=positive_int_arg,
         default=DEFAULT_PREVIEW_LONG_EDGE,
         help="Resize previews so the longer edge fits within this size. Default: 1600",
     )
@@ -261,7 +268,11 @@ def atomic_replace_from_command(path: Path, command: Sequence[str]) -> None:
         raise
 
 
-def publish_processed_jpeg(path: Path, populate: Callable[[Path], None]) -> None:
+def publish_processed_jpeg(
+    path: Path,
+    populate: Callable[[Path], None],
+    post_process: Optional[Callable[[Path], None]] = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_suffix = path.suffix if path.suffix else ".tmp"
     fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=tmp_suffix, dir=path.parent)
@@ -271,9 +282,10 @@ def publish_processed_jpeg(path: Path, populate: Callable[[Path], None]) -> None
         populate(tmp_path)
         if tmp_path.stat().st_size <= 0:
             raise ValueError(f"Refusing to replace {path.name} with empty output")
-        auto_orient_jpeg(tmp_path)
-        if tmp_path.stat().st_size <= 0:
-            raise ValueError(f"Refusing to replace {path.name} with empty output")
+        if post_process is not None:
+            post_process(tmp_path)
+            if tmp_path.stat().st_size <= 0:
+                raise ValueError(f"Refusing to replace {path.name} with empty output")
         os.replace(tmp_path, path)
     except Exception:
         tmp_path.unlink(missing_ok=True)
@@ -370,7 +382,7 @@ def generate_resized_jpeg(source_path: Path, output_path: Path, max_edge: int) -
             "-q:v",
             "2",
         ]
-    publish_processed_jpeg(output_path, lambda tmp_path: atomic_replace_from_command(tmp_path, command))
+    publish_processed_jpeg(output_path, lambda tmp_path: atomic_replace_from_command(tmp_path, command), post_process=None)
 
 
 def extract_first_embedded_jpeg(source_path: Path, tag_names: Sequence[str]) -> Tuple[Optional[str], Optional[bytes]]:
@@ -454,7 +466,7 @@ def ensure_preview_jpg(
     tag_name, payload = extract_first_embedded_jpeg(source_path, PREVIEW_TAGS)
     preview_source = normalize_preview_source(tag_name)
     if payload is not None:
-        publish_processed_jpeg(preview_path, lambda tmp_path: atomic_write_bytes(tmp_path, payload))
+        publish_processed_jpeg(preview_path, lambda tmp_path: atomic_write_bytes(tmp_path, payload), post_process=auto_orient_jpeg)
         return (preview_source, read_jpeg_dimensions(preview_path))
     generate_resized_jpeg(source_path, preview_path, long_edge)
     return (PREVIEW_SOURCE_GENERATED, read_jpeg_dimensions(preview_path))
@@ -471,7 +483,7 @@ def ensure_thumb_jpg(
         return read_jpeg_dimensions(thumb_path)
     _tag_name, payload = extract_first_embedded_jpeg(source_path, THUMB_TAGS)
     if payload is not None:
-        publish_processed_jpeg(thumb_path, lambda tmp_path: atomic_write_bytes(tmp_path, payload))
+        publish_processed_jpeg(thumb_path, lambda tmp_path: atomic_write_bytes(tmp_path, payload), post_process=auto_orient_jpeg)
         return read_jpeg_dimensions(thumb_path)
     generate_resized_jpeg(preview_path if preview_path.exists() else source_path, thumb_path, long_edge)
     return read_jpeg_dimensions(thumb_path)

@@ -1,5 +1,7 @@
+import contextlib
 import csv
 import importlib.util
+import io
 import sys
 import tempfile
 import unittest
@@ -34,6 +36,16 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             args = extract_jpg.parse_args()
         self.assertEqual(args.thumb_long_edge, 160)
         self.assertEqual(args.preview_long_edge, 1600)
+
+    def test_parse_args_rejects_non_positive_long_edge_values(self):
+        for option, value in (("--thumb-long-edge", "0"), ("--preview-long-edge", "-1")):
+            with self.subTest(option=option, value=value):
+                stderr = io.StringIO()
+                with mock.patch.object(sys, "argv", ["extract_embedded_photo_jpg.py", "/tmp/day", option, value]):
+                    with contextlib.redirect_stderr(stderr):
+                        with self.assertRaises(SystemExit):
+                            extract_jpg.parse_args()
+                self.assertIn("positive integer", stderr.getvalue())
 
     def test_build_output_paths_mirror_relative_tree(self):
         workspace_dir = Path("/tmp/day/_workspace")
@@ -173,7 +185,23 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
                 "scale=if(gte(iw\\,ih)\\,min(iw\\,160)\\,-2):if(gte(ih\\,iw)\\,min(ih\\,160)\\,-2)",
             )
 
-    def test_generate_resized_jpeg_cleans_up_final_output_when_auto_orient_fails(self):
+    def test_generate_resized_jpeg_does_not_reencode_via_auto_orient(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "source.arw"
+            output_path = Path(tmp) / "preview.jpg"
+            source_path.write_bytes(b"raw")
+
+            def fake_replace(path_value, command):
+                path_value.write_bytes(MINIMAL_JPEG_BYTES)
+
+            with mock.patch.object(extract_jpg, "detect_generation_backend", return_value="ffmpeg"):
+                with mock.patch.object(extract_jpg, "atomic_replace_from_command", side_effect=fake_replace):
+                    with mock.patch.object(extract_jpg, "auto_orient_jpeg", side_effect=AssertionError("unexpected")):
+                        extract_jpg.generate_resized_jpeg(source_path, output_path, 160)
+
+            self.assertEqual(output_path.read_bytes(), MINIMAL_JPEG_BYTES)
+
+    def test_generate_resized_jpeg_cleans_up_final_output_when_generation_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             source_path = Path(tmp) / "source.arw"
             output_path = Path(tmp) / "preview.jpg"
@@ -182,12 +210,12 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             def fake_replace(path_value, command):
                 self.assertEqual(command[0], "magick")
                 path_value.write_bytes(MINIMAL_JPEG_BYTES)
+                raise RuntimeError("generate failed")
 
             with mock.patch.object(extract_jpg, "detect_generation_backend", return_value="magick"):
                 with mock.patch.object(extract_jpg, "atomic_replace_from_command", side_effect=fake_replace):
-                    with mock.patch.object(extract_jpg, "auto_orient_jpeg", side_effect=RuntimeError("orient failed")):
-                        with self.assertRaisesRegex(RuntimeError, "orient failed"):
-                            extract_jpg.generate_resized_jpeg(source_path, output_path, 160)
+                    with self.assertRaisesRegex(RuntimeError, "generate failed"):
+                        extract_jpg.generate_resized_jpeg(source_path, output_path, 160)
 
             self.assertFalse(output_path.exists())
 
