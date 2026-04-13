@@ -203,6 +203,18 @@ def read_embedded_manifest(path: Path) -> List[Dict[str, str]]:
     return rows
 
 
+def normalize_manifest_rows(manifest_rows: Sequence[Mapping[str, str]]) -> List[Dict[str, str]]:
+    normalized_rows: List[Dict[str, str]] = []
+    for row in manifest_rows:
+        normalized_row = dict(row)
+        normalized_row["relative_path"] = normalize_day_relative_path(
+            str(row.get("relative_path") or ""),
+            "photo_embedded_manifest.csv relative_path",
+        )
+        normalized_rows.append(normalized_row)
+    return normalized_rows
+
+
 def resolve_preview_paths(workspace_dir: Path, manifest_rows: Sequence[Mapping[str, str]]) -> List[Path]:
     preview_paths: List[Path] = []
     for row in manifest_rows:
@@ -419,7 +431,7 @@ def embed_photo_previews_dinov2(
     device: str = DEFAULT_DEVICE,
     image_size: int = DEFAULT_IMAGE_SIZE,
 ) -> int:
-    manifest_rows = read_embedded_manifest(manifest_csv)
+    manifest_rows = normalize_manifest_rows(read_embedded_manifest(manifest_csv))
     preview_paths = resolve_preview_paths(workspace_dir, manifest_rows)
     backend = require_backend(load_backend(model_name, device, image_size))
     embeddings = compute_embeddings(preview_paths, backend, batch_size).astype(np.float16, copy=False)

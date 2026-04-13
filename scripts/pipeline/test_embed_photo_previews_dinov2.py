@@ -165,8 +165,9 @@ class EmbedPhotoPreviewsDinov2Tests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            fake_backend = FakeBackend(embedding_dim=3)
-            with mock.patch.object(embed, "load_backend", return_value=fake_backend):
+            with mock.patch.object(embed, "load_backend") as load_backend_mock, mock.patch.object(
+                embed, "compute_embeddings"
+            ) as compute_embeddings_mock:
                 with self.assertRaisesRegex(ValueError, "relative_path"):
                     embed.embed_photo_previews_dinov2(
                         workspace_dir=workspace_dir,
@@ -177,6 +178,8 @@ class EmbedPhotoPreviewsDinov2Tests(unittest.TestCase):
                         device="cpu",
                         image_size=224,
                     )
+            load_backend_mock.assert_not_called()
+            compute_embeddings_mock.assert_not_called()
 
 
 if __name__ == "__main__":
