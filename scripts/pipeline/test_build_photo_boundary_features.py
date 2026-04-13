@@ -369,6 +369,136 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
             self.assertIn("relative_path mismatch", str(ctx.exception))
             self.assertIn("photo_quality.csv", str(ctx.exception))
 
+    def test_build_photo_boundary_features_rejects_offset_aware_start_local_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            manifest_csv, quality_csv, features_dir, output_csv = self.write_stage1_artifacts(
+                workspace_dir,
+                manifest_rows=[
+                    {
+                        "relative_path": "a.jpg",
+                        "path": str(day_dir / "a.jpg"),
+                        "photo_order_index": "0",
+                        "start_local": "2026-03-23T10:00:00",
+                    },
+                    {
+                        "relative_path": "b.jpg",
+                        "path": str(day_dir / "b.jpg"),
+                        "photo_order_index": "1",
+                        "start_local": "2026-03-23T10:00:01+00:00",
+                    },
+                ],
+                quality_rows=[
+                    {
+                        "relative_path": "a.jpg",
+                        "brightness_mean": "0.100000",
+                        "contrast_score": "0.200000",
+                        "flag_blurry": "0",
+                        "flag_dark": "0",
+                    },
+                    {
+                        "relative_path": "b.jpg",
+                        "brightness_mean": "0.300000",
+                        "contrast_score": "0.400000",
+                        "flag_blurry": "1",
+                        "flag_dark": "1",
+                    },
+                ],
+                index_rows=[
+                    {
+                        "relative_path": "a.jpg",
+                        "row_index": "0",
+                        "embedding_dim": "2",
+                        "model_name": "dinov2_vitb14",
+                    },
+                    {
+                        "relative_path": "b.jpg",
+                        "row_index": "1",
+                        "embedding_dim": "2",
+                        "model_name": "dinov2_vitb14",
+                    },
+                ],
+                embeddings=np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float16),
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                boundary.build_photo_boundary_features(
+                    workspace_dir=workspace_dir,
+                    manifest_csv=manifest_csv,
+                    quality_csv=quality_csv,
+                    features_dir=features_dir,
+                    output_path=output_csv,
+                )
+
+            self.assertIn("start_local", str(ctx.exception))
+
+    def test_build_photo_boundary_features_rejects_non_finite_embeddings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            manifest_csv, quality_csv, features_dir, output_csv = self.write_stage1_artifacts(
+                workspace_dir,
+                manifest_rows=[
+                    {
+                        "relative_path": "a.jpg",
+                        "path": str(day_dir / "a.jpg"),
+                        "photo_order_index": "0",
+                        "start_local": "2026-03-23T10:00:00",
+                    },
+                    {
+                        "relative_path": "b.jpg",
+                        "path": str(day_dir / "b.jpg"),
+                        "photo_order_index": "1",
+                        "start_local": "2026-03-23T10:00:01",
+                    },
+                ],
+                quality_rows=[
+                    {
+                        "relative_path": "a.jpg",
+                        "brightness_mean": "0.100000",
+                        "contrast_score": "0.200000",
+                        "flag_blurry": "0",
+                        "flag_dark": "0",
+                    },
+                    {
+                        "relative_path": "b.jpg",
+                        "brightness_mean": "0.300000",
+                        "contrast_score": "0.400000",
+                        "flag_blurry": "1",
+                        "flag_dark": "1",
+                    },
+                ],
+                index_rows=[
+                    {
+                        "relative_path": "a.jpg",
+                        "row_index": "0",
+                        "embedding_dim": "2",
+                        "model_name": "dinov2_vitb14",
+                    },
+                    {
+                        "relative_path": "b.jpg",
+                        "row_index": "1",
+                        "embedding_dim": "2",
+                        "model_name": "dinov2_vitb14",
+                    },
+                ],
+                embeddings=np.asarray([[1.0, np.nan], [0.0, 1.0]], dtype=np.float32),
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                boundary.build_photo_boundary_features(
+                    workspace_dir=workspace_dir,
+                    manifest_csv=manifest_csv,
+                    quality_csv=quality_csv,
+                    features_dir=features_dir,
+                    output_path=output_csv,
+                )
+
+            self.assertIn("non-finite", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

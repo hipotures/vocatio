@@ -182,9 +182,12 @@ def parse_local_datetime(value: str, column_name: str) -> datetime:
     if not text:
         raise ValueError(f"{column_name} is empty")
     try:
-        return datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)
     except ValueError as exc:
         raise ValueError(f"{column_name} must be a valid ISO local datetime: {value}") from exc
+    if parsed.tzinfo is not None:
+        raise ValueError(f"{column_name} must be a naive ISO local datetime without timezone offset: {value}")
+    return parsed
 
 
 def parse_non_negative_int(value: str, column_name: str) -> int:
@@ -205,9 +208,12 @@ def parse_float(value: str, column_name: str) -> float:
     if not text:
         raise ValueError(f"{column_name} is empty")
     try:
-        return float(text)
+        parsed = float(text)
     except ValueError as exc:
         raise ValueError(f"{column_name} must be a float: {value}") from exc
+    if not np.isfinite(parsed):
+        raise ValueError(f"{column_name} must be finite: {value}")
+    return parsed
 
 
 def parse_flag(value: str, column_name: str) -> str:
@@ -318,7 +324,10 @@ def load_embeddings(path: Path) -> np.ndarray:
         raise ValueError(f"{path.name} must be a 2D array, got shape {embeddings.shape}")
     if embeddings.shape[1] <= 0:
         raise ValueError(f"{path.name} must have a positive embedding width")
-    return embeddings.astype(np.float32, copy=False)
+    embeddings = embeddings.astype(np.float32, copy=False)
+    if not np.all(np.isfinite(embeddings)):
+        raise ValueError(f"{path.name} contains non-finite embedding values")
+    return embeddings
 
 
 def validate_row_counts(
