@@ -96,6 +96,35 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
         self.assertEqual(row["preview_path"], "embedded_jpg/preview/hour10/a.arw.jpg")
         self.assertEqual(row["thumb_path"], "embedded_jpg/thumb/hour10/a.arw.jpg")
 
+    def test_build_manifest_row_serializes_paths_when_workspace_is_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "day"
+            real_workspace_dir = Path(tmp) / "real-workspace"
+            workspace_dir = day_dir / "_workspace"
+            real_workspace_dir.mkdir(parents=True)
+            day_dir.mkdir(parents=True)
+            workspace_dir.symlink_to(real_workspace_dir, target_is_directory=True)
+
+            output_paths = extract_jpg.build_output_paths(workspace_dir, "hour10/a.arw")
+            output_paths["thumb_path"].parent.mkdir(parents=True, exist_ok=True)
+            output_paths["preview_path"].parent.mkdir(parents=True, exist_ok=True)
+            output_paths["thumb_path"].write_bytes(MINIMAL_JPEG_BYTES)
+            output_paths["preview_path"].write_bytes(MINIMAL_JPEG_BYTES)
+
+            row = extract_jpg.build_manifest_row(
+                workspace_dir=workspace_dir,
+                source_path=day_dir / "hour10" / "a.arw",
+                relative_path="hour10/a.arw",
+                thumb_path=output_paths["thumb_path"],
+                preview_path=output_paths["preview_path"],
+                preview_source="embedded_preview",
+                thumb_dimensions=(1, 1),
+                preview_dimensions=(1, 1),
+            )
+
+            self.assertEqual(row["preview_path"], "embedded_jpg/preview/hour10/a.arw.jpg")
+            self.assertEqual(row["thumb_path"], "embedded_jpg/thumb/hour10/a.arw.jpg")
+
     def test_normalize_preview_source_keeps_distinct_contract_values(self):
         self.assertEqual(extract_jpg.normalize_preview_source("PreviewImage"), "embedded_preview")
         self.assertEqual(extract_jpg.normalize_preview_source("JpgFromRaw"), "embedded_jpg_from_raw")

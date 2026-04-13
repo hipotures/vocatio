@@ -159,7 +159,7 @@ def build_output_paths(workspace_dir: Path, relative_path: str) -> Dict[str, Pat
 
 
 def serialize_workspace_path(workspace_dir: Path, path: Path) -> str:
-    return path.relative_to(workspace_dir).as_posix()
+    return path.resolve().relative_to(workspace_dir.resolve()).as_posix()
 
 
 def load_photo_manifest_rows(workspace_dir: Path) -> List[Dict[str, str]]:
