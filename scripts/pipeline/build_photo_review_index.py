@@ -564,7 +564,7 @@ def main() -> int:
     day_dir = Path(args.day_dir).resolve()
     if not day_dir.exists() or not day_dir.is_dir():
         raise SystemExit(f"Day directory does not exist: {day_dir}")
-    workspace_dir = Path(args.workspace_dir).expanduser() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = Path(args.workspace_dir).expanduser().resolve() if args.workspace_dir else day_dir / "_workspace"
     manifest_csv = resolve_manifest_path(workspace_dir, args.manifest_csv)
     segments_csv = resolve_segments_path(workspace_dir, args.segments_csv)
     embedded_manifest_csv = resolve_embedded_manifest_path(workspace_dir, args.embedded_manifest_csv)

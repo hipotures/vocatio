@@ -10,7 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
-from lib import review_index_loader
+try:
+    from lib import review_index_loader
+except ModuleNotFoundError:
+    from scripts.pipeline.lib import review_index_loader
 
 
 def ensure_venv_python() -> None:
