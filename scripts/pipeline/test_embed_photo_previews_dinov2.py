@@ -34,6 +34,19 @@ class FakeBackend:
 
 
 class EmbedPhotoPreviewsDinov2Tests(unittest.TestCase):
+    def test_normalize_output_accepts_dict_tensor_values_without_truthiness_checks(self):
+        backend = object.__new__(embed.Dinov2TorchHubBackend)
+        expected = np.ones((2, 3), dtype=np.float32)
+
+        actual = backend._normalize_output(
+            {
+                "x_norm_clstoken": expected,
+                "pooler_output": np.zeros((2, 3), dtype=np.float32),
+            }
+        )
+
+        self.assertIs(actual, expected)
+
     def test_build_embedding_index_preserves_manifest_order_with_task5_schema(self):
         rows = embed.build_embedding_index(
             manifest_rows=[
@@ -131,6 +144,39 @@ class EmbedPhotoPreviewsDinov2Tests(unittest.TestCase):
                     "a.jpg,1,3,dinov2_vitb14",
                 ],
             )
+
+    def test_embed_photo_previews_dinov2_rejects_non_normalized_day_relative_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            features_dir = workspace_dir / "features"
+            workspace_dir.mkdir(parents=True, exist_ok=True)
+            preview_dir = workspace_dir / "embedded_jpg" / "preview"
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            (preview_dir / "bad.jpg").write_bytes(b"jpeg")
+            manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            manifest_csv.write_text(
+                "\n".join(
+                    [
+                        "relative_path,photo_order_index,preview_path",
+                        "../bad.jpg,0,embedded_jpg/preview/bad.jpg",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            fake_backend = FakeBackend(embedding_dim=3)
+            with mock.patch.object(embed, "load_backend", return_value=fake_backend):
+                with self.assertRaisesRegex(ValueError, "relative_path"):
+                    embed.embed_photo_previews_dinov2(
+                        workspace_dir=workspace_dir,
+                        manifest_csv=manifest_csv,
+                        features_dir=features_dir,
+                        model_name="dinov2_vitb14",
+                        batch_size=8,
+                        device="cpu",
+                        image_size=224,
+                    )
 
 
 if __name__ == "__main__":

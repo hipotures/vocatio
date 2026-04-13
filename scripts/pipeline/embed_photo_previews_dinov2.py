@@ -178,6 +178,21 @@ def resolve_workspace_path(workspace_dir: Path, relative_value: str, column_name
     return resolved_path
 
 
+def normalize_day_relative_path(relative_path: str, column_name: str) -> str:
+    value = relative_path.strip()
+    candidate = PurePosixPath(value)
+    if not value or not candidate.parts:
+        raise ValueError(f"{column_name} is empty")
+    if candidate.is_absolute():
+        raise ValueError(f"{column_name} must be a normalized day-relative path: {relative_path}")
+    if any(part in {".", ".."} for part in candidate.parts):
+        raise ValueError(f"{column_name} must be a normalized day-relative path: {relative_path}")
+    normalized = candidate.as_posix()
+    if value != normalized:
+        raise ValueError(f"{column_name} must be a normalized day-relative path: {relative_path}")
+    return normalized
+
+
 def read_embedded_manifest(path: Path) -> List[Dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -211,9 +226,13 @@ def build_embedding_index(
 ) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     for row_index, manifest_row in enumerate(manifest_rows):
+        relative_path = normalize_day_relative_path(
+            str(manifest_row.get("relative_path") or ""),
+            "photo_embedded_manifest.csv relative_path",
+        )
         rows.append(
             {
-                "relative_path": str(manifest_row.get("relative_path") or "").strip(),
+                "relative_path": relative_path,
                 "row_index": str(row_index),
                 "embedding_dim": str(embedding_dim),
                 "model_name": model_name,
@@ -319,7 +338,9 @@ class Dinov2TorchHubBackend:
 
     def _normalize_output(self, output):
         if isinstance(output, dict):
-            tensor = output.get("x_norm_clstoken") or output.get("pooler_output")
+            tensor = output.get("x_norm_clstoken")
+            if tensor is None:
+                tensor = output.get("pooler_output")
             if tensor is None:
                 raise RuntimeError(f"Unexpected DINOv2 backend output keys: {sorted(output.keys())}")
         elif isinstance(output, (list, tuple)):
