@@ -258,7 +258,7 @@ def read_photo_manifest(path: Path) -> List[Dict[str, str]]:
                 f"{path.name} photo_order_index contract mismatch at row {row_number}: "
                 f"expected {row_number - 1}, got {photo_order_index}"
             )
-        start_local = str(row.get("start_local") or "").strip()
+        start_local = str(row.get("start_local") or "")
         parse_local_datetime(start_local, f"{path.name} start_local")
         normalized_row = dict(row)
         normalized_row["relative_path"] = relative_path
@@ -425,11 +425,6 @@ def compute_boundary_rows(
             left_dt = parse_local_datetime(left_start_local, "photo_manifest.csv start_local")
             right_dt = parse_local_datetime(right_start_local, "photo_manifest.csv start_local")
             time_gap_seconds = float((right_dt - left_dt).total_seconds())
-            if time_gap_seconds < 0.0:
-                raise ValueError(
-                    "photo_manifest.csv start_local must be non-decreasing in manifest order: "
-                    f"{left_manifest['relative_path']} -> {right_manifest['relative_path']}"
-                )
             distance = distances[index]
             window_start = max(0, index - rolling_window_size + 1)
             window = np.asarray(distances[window_start : index + 1], dtype=np.float32)
