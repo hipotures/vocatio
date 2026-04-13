@@ -321,6 +321,56 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             self.assertEqual(rows[0]["preview_source"], "embedded_preview")
             self.assertEqual(rows[1]["preview_source"], "generated_from_source")
 
+    def test_build_manifest_rows_rejects_source_paths_outside_day_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            day_dir = root_dir / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            outside_path = root_dir / "outside.jpg"
+            workspace_dir.mkdir(parents=True)
+            outside_path.write_bytes(b"x")
+
+            manifest_path = workspace_dir / "photo_manifest.csv"
+            with manifest_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "path", "photo_order_index"])
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "relative_path": "hour10/a.jpg",
+                        "path": str(outside_path),
+                        "photo_order_index": "0",
+                    }
+                )
+
+            with self.assertRaisesRegex(ValueError, "Source photo path must stay under"):
+                extract_jpg.build_manifest_rows(day_dir, workspace_dir, overwrite=False)
+
+    def test_build_manifest_rows_rejects_source_paths_that_disagree_with_relative_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            source_dir = day_dir / "hour10"
+            workspace_dir.mkdir(parents=True)
+            source_dir.mkdir(parents=True)
+            (source_dir / "a.jpg").write_bytes(b"a")
+            mismatched_path = source_dir / "b.jpg"
+            mismatched_path.write_bytes(b"b")
+
+            manifest_path = workspace_dir / "photo_manifest.csv"
+            with manifest_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "path", "photo_order_index"])
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "relative_path": "hour10/a.jpg",
+                        "path": str(mismatched_path),
+                        "photo_order_index": "0",
+                    }
+                )
+
+            with self.assertRaisesRegex(ValueError, "does not match relative_path"):
+                extract_jpg.build_manifest_rows(day_dir, workspace_dir, overwrite=False)
+
 
 if __name__ == "__main__":
     unittest.main()

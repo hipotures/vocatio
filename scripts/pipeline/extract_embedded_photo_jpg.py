@@ -392,6 +392,28 @@ def read_jpeg_dimensions(path: Path) -> Tuple[int, int]:
     return parse_jpeg_dimensions(path.read_bytes())
 
 
+def resolve_manifest_source_path(day_dir: Path, relative_path: str, source_value: str) -> Path:
+    day_dir = day_dir.resolve()
+    expected_relative_path = normalize_manifest_relative_path(relative_path)
+    expected_source_path = (day_dir / expected_relative_path).resolve()
+    try:
+        expected_source_path.relative_to(day_dir)
+    except ValueError as exc:
+        raise ValueError(f"photo_manifest.csv relative_path must stay under day_dir: {relative_path}") from exc
+
+    source_candidate = Path(source_value.strip())
+    source_path = source_candidate.resolve() if source_candidate.is_absolute() else (day_dir / source_candidate).resolve()
+    try:
+        source_path.relative_to(day_dir)
+    except ValueError as exc:
+        raise ValueError(f"Source photo path must stay under {day_dir}: {source_value}") from exc
+    if source_path != expected_source_path:
+        raise ValueError(
+            f"Source photo path does not match relative_path {relative_path}: {source_value}"
+        )
+    return source_path
+
+
 def ensure_preview_jpg(
     source_path: Path,
     preview_path: Path,
@@ -453,9 +475,7 @@ def build_manifest_rows(
             source_value = photo_row.get("path", "").strip()
             if not source_value:
                 raise ValueError(f"photo_manifest.csv row missing path for {relative_path}")
-            source_path = Path(source_value)
-            if not source_path.is_absolute():
-                source_path = day_dir / source_path
+            source_path = resolve_manifest_source_path(day_dir, relative_path, source_value)
             if not source_path.exists() or not source_path.is_file():
                 raise ValueError(f"Source photo listed in photo_manifest.csv does not exist: {source_path}")
             if source_path.suffix.lower() not in PHOTO_EXTENSIONS:
