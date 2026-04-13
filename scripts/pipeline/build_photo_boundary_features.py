@@ -39,6 +39,8 @@ PHOTO_BOUNDARY_FEATURE_HEADERS = [
     "right_relative_path",
     "left_start_local",
     "right_start_local",
+    "left_start_epoch_ms",
+    "right_start_epoch_ms",
     "time_gap_seconds",
     "dino_cosine_distance",
     "rolling_dino_distance_mean",
@@ -52,7 +54,7 @@ PHOTO_BOUNDARY_FEATURE_HEADERS = [
     "contrast_delta",
 ]
 
-PHOTO_BOUNDARY_MANIFEST_REQUIRED_COLUMNS = frozenset(set(PHOTO_MANIFEST_REQUIRED_COLUMNS) | {"start_local"})
+PHOTO_BOUNDARY_MANIFEST_REQUIRED_COLUMNS = frozenset(set(PHOTO_MANIFEST_REQUIRED_COLUMNS) | {"start_local", "start_epoch_ms"})
 PHOTO_QUALITY_REQUIRED_COLUMNS = frozenset(
     {
         "relative_path",
@@ -211,6 +213,10 @@ def parse_non_negative_int(value: str, column_name: str) -> int:
     return parsed
 
 
+def parse_epoch_ms(value: str, column_name: str) -> int:
+    return parse_non_negative_int(value, column_name)
+
+
 def parse_float(value: str, column_name: str) -> float:
     text = str(value).strip()
     if not text:
@@ -245,6 +251,7 @@ def read_photo_manifest(path: Path) -> List[Dict[str, str]]:
     if not rows:
         raise ValueError(f"{path.name} contains no rows")
     normalized_rows: List[Dict[str, str]] = []
+    previous_start_epoch_ms: Optional[int] = None
     for row_number, row in enumerate(rows, start=1):
         relative_path = normalize_day_relative_path(
             str(row.get("relative_path") or ""),
@@ -261,10 +268,18 @@ def read_photo_manifest(path: Path) -> List[Dict[str, str]]:
             )
         start_local = str(row.get("start_local") or "")
         parse_local_datetime(start_local, f"{path.name} start_local")
+        start_epoch_ms = parse_epoch_ms(str(row.get("start_epoch_ms") or ""), f"{path.name} start_epoch_ms")
+        if previous_start_epoch_ms is not None and start_epoch_ms < previous_start_epoch_ms:
+            raise ValueError(
+                f"{path.name} start_epoch_ms must be non-decreasing at row {row_number}: "
+                f"{start_epoch_ms} is earlier than previous row"
+            )
+        previous_start_epoch_ms = start_epoch_ms
         normalized_row = dict(row)
         normalized_row["relative_path"] = relative_path
         normalized_row["photo_order_index"] = str(photo_order_index)
         normalized_row["start_local"] = start_local
+        normalized_row["start_epoch_ms"] = str(start_epoch_ms)
         normalized_rows.append(normalized_row)
     return normalized_rows
 
@@ -423,9 +438,12 @@ def compute_boundary_rows(
             right_quality = quality_rows[index + 1]
             left_start_local = str(left_manifest["start_local"])
             right_start_local = str(right_manifest["start_local"])
-            left_dt = parse_local_datetime(left_start_local, "photo_manifest.csv start_local")
-            right_dt = parse_local_datetime(right_start_local, "photo_manifest.csv start_local")
-            time_gap_seconds = float((right_dt - left_dt).total_seconds())
+            left_start_epoch_ms = parse_epoch_ms(str(left_manifest["start_epoch_ms"]), "photo_manifest.csv start_epoch_ms")
+            right_start_epoch_ms = parse_epoch_ms(
+                str(right_manifest["start_epoch_ms"]),
+                "photo_manifest.csv start_epoch_ms",
+            )
+            time_gap_seconds = float(right_start_epoch_ms - left_start_epoch_ms) / 1000.0
             distance = distances[index]
             window_start = max(0, index - rolling_window_size + 1)
             window = np.asarray(distances[window_start : index + 1], dtype=np.float32)
@@ -446,6 +464,8 @@ def compute_boundary_rows(
                     "right_relative_path": str(right_manifest["relative_path"]),
                     "left_start_local": left_start_local,
                     "right_start_local": right_start_local,
+                    "left_start_epoch_ms": str(left_start_epoch_ms),
+                    "right_start_epoch_ms": str(right_start_epoch_ms),
                     "time_gap_seconds": format_float(time_gap_seconds),
                     "dino_cosine_distance": format_float(distance),
                     "rolling_dino_distance_mean": format_float(rolling_mean),

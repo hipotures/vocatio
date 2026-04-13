@@ -31,6 +31,7 @@ console = Console()
 PHOTO_EXTENSIONS = {".arw", ".cr3", ".hif", ".heif", ".jpg", ".jpeg", ".nef"}
 MANIFEST_HEADERS = [
     "relative_path",
+    "photo_order_index",
     "path",
     "source_path",
     "photo_id",
@@ -194,6 +195,7 @@ def build_manifest_row(
     workspace_dir: Path,
     source_path: Path,
     relative_path: str,
+    photo_order_index: str,
     thumb_path: Path,
     preview_path: Path,
     preview_source: str,
@@ -212,6 +214,7 @@ def build_manifest_row(
     row.update(
         {
             "relative_path": relative_path,
+            "photo_order_index": photo_order_index,
             "path": relative_path,
             "source_path": relative_path,
             "photo_id": relative_path,
@@ -511,7 +514,10 @@ def build_manifest_rows(
         task_id = progress.add_task("Extract embedded JPG".ljust(25), total=len(photo_rows))
         for photo_row in photo_rows:
             relative_path = photo_row["relative_path"]
+            photo_order_index = str(photo_row.get("photo_order_index") or "").strip()
             source_value = photo_row.get("path", "").strip()
+            if not photo_order_index:
+                raise ValueError(f"photo_manifest.csv row missing photo_order_index for {relative_path}")
             if not source_value:
                 raise ValueError(f"photo_manifest.csv row missing path for {relative_path}")
             source_path = resolve_manifest_source_path(day_dir, relative_path, source_value)
@@ -538,6 +544,7 @@ def build_manifest_rows(
                     workspace_dir=workspace_dir,
                     source_path=source_path,
                     relative_path=relative_path,
+                    photo_order_index=photo_order_index,
                     thumb_path=output_paths["thumb_path"],
                     preview_path=output_paths["preview_path"],
                     preview_source=preview_source,

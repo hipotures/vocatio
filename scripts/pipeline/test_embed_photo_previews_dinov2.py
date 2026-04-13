@@ -1,4 +1,5 @@
 import importlib.util
+import csv
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ def load_module(name: str, relative_path: str):
 
 
 embed = load_module("embed_photo_previews_dinov2_test", "scripts/pipeline/embed_photo_previews_dinov2.py")
+extract = load_module("extract_embedded_photo_jpg_for_embed_test", "scripts/pipeline/extract_embedded_photo_jpg.py")
 
 
 class FakeBackend:
@@ -180,6 +182,52 @@ class EmbedPhotoPreviewsDinov2Tests(unittest.TestCase):
                     )
             load_backend_mock.assert_not_called()
             compute_embeddings_mock.assert_not_called()
+
+    def test_embed_photo_previews_dinov2_accepts_extractor_manifest_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            features_dir = workspace_dir / "features"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "hour10"
+            thumb_dir = workspace_dir / "embedded_jpg" / "thumb" / "hour10"
+            workspace_dir.mkdir(parents=True, exist_ok=True)
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            thumb_dir.mkdir(parents=True, exist_ok=True)
+            preview_path = preview_dir / "a.jpg.jpg"
+            thumb_path = thumb_dir / "a.jpg.jpg"
+            preview_path.write_bytes(b"jpeg-a")
+            thumb_path.write_bytes(b"jpeg-b")
+
+            manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            row = extract.build_manifest_row(
+                workspace_dir=workspace_dir,
+                source_path=Path("/tmp/day/hour10/a.jpg"),
+                relative_path="hour10/a.jpg",
+                photo_order_index="3",
+                thumb_path=thumb_path,
+                preview_path=preview_path,
+                preview_source="existing_preview",
+                thumb_dimensions=(1, 1),
+                preview_dimensions=(1, 1),
+            )
+            with manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=extract.MANIFEST_HEADERS)
+                writer.writeheader()
+                writer.writerow(row)
+
+            fake_backend = FakeBackend(embedding_dim=2)
+            with mock.patch.object(embed, "load_backend", return_value=fake_backend):
+                row_count = embed.embed_photo_previews_dinov2(
+                    workspace_dir=workspace_dir,
+                    manifest_csv=manifest_csv,
+                    features_dir=features_dir,
+                    model_name="dinov2_vitb14",
+                    batch_size=8,
+                    device="cpu",
+                    image_size=224,
+                )
+
+            self.assertEqual(row_count, 1)
+            self.assertTrue((features_dir / "dinov2_index.csv").exists())
 
 
 if __name__ == "__main__":

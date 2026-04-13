@@ -19,11 +19,18 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
-from lib.image_pipeline_contracts import PHOTO_MANIFEST_REQUIRED_COLUMNS, validate_required_columns
+from lib.image_pipeline_contracts import validate_required_columns
 from lib.pipeline_io import atomic_write_csv
 
 
 console = Console()
+
+PHOTO_EMBEDDED_MANIFEST_REQUIRED_COLUMNS = frozenset(
+    {
+        "relative_path",
+        "preview_path",
+    }
+)
 
 PHOTO_QUALITY_HEADERS = [
     "relative_path",
@@ -57,11 +64,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("day_dir", help="Path to a single day directory like /data/20260323")
     parser.add_argument(
         "--workspace-dir",
-        help="Directory that holds photo_manifest.csv and will receive photo_quality.csv. Default: DAY/_workspace",
+        help="Directory that holds photo_embedded_manifest.csv and will receive photo_quality.csv. Default: DAY/_workspace",
     )
     parser.add_argument(
         "--manifest-csv",
-        help="Input manifest CSV filename or absolute path. Default: WORKSPACE/photo_manifest.csv",
+        help="Input manifest CSV filename or absolute path. Default: WORKSPACE/photo_embedded_manifest.csv",
     )
     parser.add_argument(
         "--output",
@@ -77,7 +84,7 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_manifest_path(workspace_dir: Path, manifest_value: Optional[str]) -> Path:
     if not manifest_value:
-        return workspace_dir / "photo_manifest.csv"
+        return workspace_dir / "photo_embedded_manifest.csv"
     candidate = Path(manifest_value)
     if candidate.is_absolute():
         return candidate
@@ -96,49 +103,68 @@ def resolve_output_path(workspace_dir: Path, output_value: Optional[str]) -> Pat
 def normalize_relative_path(relative_path: str) -> Path:
     candidate = PurePosixPath(relative_path.strip())
     if not candidate.parts:
-        raise ValueError("photo_manifest.csv row missing relative_path")
+        raise ValueError("photo_embedded_manifest.csv row missing relative_path")
     if candidate.is_absolute():
-        raise ValueError(f"photo_manifest.csv relative_path must stay under day_dir: {relative_path}")
+        raise ValueError(f"photo_embedded_manifest.csv relative_path must stay under day_dir: {relative_path}")
     normalized_parts: List[str] = []
     for part in candidate.parts:
         if part in {"", "."}:
             continue
         if part == "..":
             if not normalized_parts:
-                raise ValueError(f"photo_manifest.csv relative_path must stay under day_dir: {relative_path}")
+                raise ValueError(f"photo_embedded_manifest.csv relative_path must stay under day_dir: {relative_path}")
             normalized_parts.pop()
             continue
         normalized_parts.append(part)
     if not normalized_parts:
-        raise ValueError(f"photo_manifest.csv relative_path must stay under day_dir: {relative_path}")
+        raise ValueError(f"photo_embedded_manifest.csv relative_path must stay under day_dir: {relative_path}")
     return Path(*normalized_parts)
 
 
-def resolve_source_path(day_dir: Path, relative_path: str, source_path: str) -> Path:
-    resolved_day_dir = day_dir.resolve()
-    normalized_relative_path = normalize_relative_path(relative_path)
-    expected_source_path = (resolved_day_dir / normalized_relative_path).resolve()
-    raw_source_path = Path(source_path.strip())
-    resolved_source_path = (
-        raw_source_path if raw_source_path.is_absolute() else resolved_day_dir / raw_source_path
-    ).resolve()
+def normalize_workspace_relative_path(relative_path: str, column_name: str) -> Path:
+    candidate = PurePosixPath(relative_path.strip())
+    if not candidate.parts:
+        raise ValueError(f"{column_name} is empty")
+    if candidate.is_absolute():
+        raise ValueError(f"{column_name} must stay under workspace: {relative_path}")
+    normalized_parts: List[str] = []
+    for part in candidate.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not normalized_parts:
+                raise ValueError(f"{column_name} must stay under workspace: {relative_path}")
+            normalized_parts.pop()
+            continue
+        normalized_parts.append(part)
+    if not normalized_parts:
+        raise ValueError(f"{column_name} must stay under workspace: {relative_path}")
+    return Path(*normalized_parts)
+
+
+def resolve_preview_path(workspace_dir: Path, relative_path: str, preview_path: str) -> Path:
+    workspace_dir = workspace_dir.resolve()
+    normalize_relative_path(relative_path)
+    preview_relative_path = normalize_workspace_relative_path(
+        preview_path,
+        f"photo_embedded_manifest.csv preview_path for {relative_path}",
+    )
+    resolved_preview_path = (workspace_dir / preview_relative_path).resolve()
     try:
-        resolved_source_path.relative_to(resolved_day_dir)
+        resolved_preview_path.relative_to(workspace_dir)
     except ValueError as exc:
         raise ValueError(
-            f"photo_manifest.csv path for relative_path {relative_path} must stay under {resolved_day_dir}: {resolved_source_path}"
+            f"photo_embedded_manifest.csv preview_path for {relative_path} must stay under {workspace_dir}: {resolved_preview_path}"
         ) from exc
-    if resolved_source_path != expected_source_path:
-        raise ValueError(
-            f"photo_manifest.csv path does not match relative_path {relative_path}: {resolved_source_path}"
-        )
-    return resolved_source_path
+    if not resolved_preview_path.exists() or not resolved_preview_path.is_file():
+        raise ValueError(f"Preview JPEG listed in photo_embedded_manifest.csv does not exist: {resolved_preview_path}")
+    return resolved_preview_path
 
 
 def read_photo_manifest(path: Path) -> List[Dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
-        validate_required_columns(path.name, PHOTO_MANIFEST_REQUIRED_COLUMNS, reader.fieldnames)
+        validate_required_columns(path.name, PHOTO_EMBEDDED_MANIFEST_REQUIRED_COLUMNS, reader.fieldnames)
         rows = [dict(row) for row in reader]
     if not rows:
         raise ValueError(f"{path.name} contains no rows")
@@ -226,7 +252,7 @@ def compute_quality_row(
 
 
 def build_quality_rows(
-    day_dir: Path,
+    workspace_dir: Path,
     manifest_rows: List[Mapping[str, str]],
     image_loader: Callable[[Path], np.ndarray] = load_grayscale_image,
 ) -> List[Dict[str, str]]:
@@ -244,20 +270,20 @@ def build_quality_rows(
         task = progress.add_task("Annotate quality".ljust(25), total=len(manifest_rows))
         for manifest_row in manifest_rows:
             relative_path = str(manifest_row.get("relative_path") or "").strip()
-            source_path = str(manifest_row.get("path") or "").strip()
+            preview_path = str(manifest_row.get("preview_path") or "").strip()
             if not relative_path:
-                raise ValueError("photo_manifest.csv row missing relative_path")
-            if not source_path:
-                raise ValueError(f"photo_manifest.csv row missing path for {relative_path}")
-            image = image_loader(resolve_source_path(day_dir, relative_path, source_path))
+                raise ValueError("photo_embedded_manifest.csv row missing relative_path")
+            if not preview_path:
+                raise ValueError(f"photo_embedded_manifest.csv row missing preview_path for {relative_path}")
+            image = image_loader(resolve_preview_path(workspace_dir, relative_path, preview_path))
             rows.append(compute_quality_row(relative_path, image))
             progress.advance(task)
     return rows
 
 
-def build_photo_quality_annotations(day_dir: Path, manifest_csv: Path, output_path: Path) -> int:
+def build_photo_quality_annotations(workspace_dir: Path, manifest_csv: Path, output_path: Path) -> int:
     manifest_rows = read_photo_manifest(manifest_csv)
-    quality_rows = build_quality_rows(day_dir, manifest_rows)
+    quality_rows = build_quality_rows(workspace_dir, manifest_rows)
     atomic_write_csv(output_path, PHOTO_QUALITY_HEADERS, quality_rows)
     return len(quality_rows)
 
@@ -274,7 +300,7 @@ def main() -> int:
         raise SystemExit(f"Manifest CSV does not exist: {manifest_csv}")
     if output_path.exists() and not args.overwrite:
         raise SystemExit(f"Output CSV already exists: {output_path}. Use --overwrite to replace it.")
-    row_count = build_photo_quality_annotations(day_dir, manifest_csv, output_path)
+    row_count = build_photo_quality_annotations(workspace_dir, manifest_csv, output_path)
     console.print(f"Wrote {row_count} photo quality rows to {output_path}")
     return 0
 

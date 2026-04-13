@@ -28,18 +28,35 @@ bootstrap = load_module("bootstrap_photo_boundaries_for_segments_test", "scripts
 class BuildPhotoSegmentsTests(unittest.TestCase):
     def write_manifest(self, path: Path, rows: list[dict[str, str]]) -> None:
         with path.open("w", newline="", encoding="utf-8") as handle:
+            normalized_rows = []
+            for row in rows:
+                normalized_row = dict(row)
+                if "start_epoch_ms" not in normalized_row:
+                    start_dt = datetime.fromisoformat(normalized_row["start_local"])
+                    normalized_row["start_epoch_ms"] = str(int(start_dt.timestamp() * 1000))
+                normalized_rows.append(normalized_row)
             writer = csv.DictWriter(
                 handle,
-                fieldnames=["relative_path", "path", "photo_order_index", "start_local"],
+                fieldnames=["relative_path", "path", "photo_order_index", "start_local", "start_epoch_ms"],
             )
             writer.writeheader()
-            writer.writerows(rows)
+            writer.writerows(normalized_rows)
 
     def write_scores(self, path: Path, rows: list[dict[str, str]]) -> None:
         with path.open("w", newline="", encoding="utf-8") as handle:
+            normalized_rows = []
+            for row in rows:
+                normalized_row = dict(row)
+                if "left_start_epoch_ms" not in normalized_row:
+                    left_dt = datetime.fromisoformat(normalized_row["left_start_local"])
+                    normalized_row["left_start_epoch_ms"] = str(int(left_dt.timestamp() * 1000))
+                if "right_start_epoch_ms" not in normalized_row:
+                    right_dt = datetime.fromisoformat(normalized_row["right_start_local"])
+                    normalized_row["right_start_epoch_ms"] = str(int(right_dt.timestamp() * 1000))
+                normalized_rows.append(normalized_row)
             writer = csv.DictWriter(handle, fieldnames=segments.PHOTO_BOUNDARY_SCORE_HEADERS)
             writer.writeheader()
-            writer.writerows(rows)
+            writer.writerows(normalized_rows)
 
     def build_manifest_rows(self, day_dir: Path, count: int, start: datetime) -> list[dict[str, str]]:
         rows: list[dict[str, str]] = []
@@ -51,6 +68,7 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
                     "path": str(day_dir / relative_path),
                     "photo_order_index": str(index),
                     "start_local": (start + timedelta(seconds=index)).isoformat(),
+                    "start_epoch_ms": str(int((start + timedelta(seconds=index)).timestamp() * 1000)),
                 }
             )
         return rows
@@ -70,6 +88,8 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
                     "right_relative_path": manifest_rows[index + 1]["relative_path"],
                     "left_start_local": manifest_rows[index]["start_local"],
                     "right_start_local": manifest_rows[index + 1]["start_local"],
+                    "left_start_epoch_ms": manifest_rows[index]["start_epoch_ms"],
+                    "right_start_epoch_ms": manifest_rows[index + 1]["start_epoch_ms"],
                     "time_gap_seconds": "120.000000" if index in hard_gap_indexes else "1.000000",
                     "dino_cosine_distance": "0.400000" if index in cut_indexes else "0.050000",
                     "distance_zscore": "2.000000" if index in cut_indexes else "0.000000",
@@ -98,6 +118,63 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
                 "segment_confidence",
             ],
         )
+
+    def test_build_photo_segments_accepts_mixed_offset_local_order_when_epoch_is_monotonic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            manifest_csv = workspace_dir / "photo_manifest.csv"
+            scores_csv = workspace_dir / "photo_boundary_scores.csv"
+            output_csv = workspace_dir / "photo_segments.csv"
+            manifest_rows = [
+                {
+                    "relative_path": "hour10/early.jpg",
+                    "path": str(day_dir / "hour10/early.jpg"),
+                    "photo_order_index": "0",
+                    "start_local": "2026-03-23T10:00:00",
+                    "start_epoch_ms": "1774252800000",
+                },
+                {
+                    "relative_path": "hour10/late.jpg",
+                    "path": str(day_dir / "hour10/late.jpg"),
+                    "photo_order_index": "1",
+                    "start_local": "2026-03-23T09:30:00",
+                    "start_epoch_ms": "1774254600000",
+                },
+            ]
+            score_rows = [
+                {
+                    "left_relative_path": "hour10/early.jpg",
+                    "right_relative_path": "hour10/late.jpg",
+                    "left_start_local": "2026-03-23T10:00:00",
+                    "right_start_local": "2026-03-23T09:30:00",
+                    "left_start_epoch_ms": "1774252800000",
+                    "right_start_epoch_ms": "1774254600000",
+                    "time_gap_seconds": "1800.000000",
+                    "dino_cosine_distance": "0.050000",
+                    "distance_zscore": "0.000000",
+                    "smoothed_distance_zscore": "0.000000",
+                    "time_gap_boost": "0.000000",
+                    "boundary_score": "0.050000",
+                    "boundary_label": "none",
+                    "boundary_reason": "distance_only",
+                    "model_source": "bootstrap_heuristic",
+                }
+            ]
+            self.write_manifest(manifest_csv, manifest_rows)
+            self.write_scores(scores_csv, score_rows)
+
+            row_count = segments.build_photo_segments(
+                workspace_dir=workspace_dir,
+                manifest_csv=manifest_csv,
+                boundary_scores_csv=scores_csv,
+                output_path=output_csv,
+                min_segment_photos=1,
+                min_segment_seconds=1.0,
+            )
+
+            self.assertEqual(row_count, 1)
 
     def test_build_photo_segments_writes_stable_ids_and_confidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -265,9 +342,9 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
             output_csv = workspace_dir / "photo_segments.csv"
             manifest_rows = self.build_manifest_rows(day_dir, 16, datetime(2026, 3, 23, 10, 0, 0))
             for index in range(8, len(manifest_rows)):
-                manifest_rows[index]["start_local"] = (
-                    datetime(2026, 3, 23, 10, 0, 0) + timedelta(seconds=index + 119)
-                ).isoformat()
+                shifted_dt = datetime(2026, 3, 23, 10, 0, 0) + timedelta(seconds=index + 119)
+                manifest_rows[index]["start_local"] = shifted_dt.isoformat()
+                manifest_rows[index]["start_epoch_ms"] = str(int(shifted_dt.timestamp() * 1000))
             self.write_manifest(manifest_csv, manifest_rows)
             with features_csv.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(
@@ -277,6 +354,8 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
                         "right_relative_path",
                         "left_start_local",
                         "right_start_local",
+                        "left_start_epoch_ms",
+                        "right_start_epoch_ms",
                         "time_gap_seconds",
                         "dino_cosine_distance",
                         "rolling_dino_distance_mean",
@@ -298,6 +377,8 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
                             "right_relative_path": manifest_rows[index + 1]["relative_path"],
                             "left_start_local": manifest_rows[index]["start_local"],
                             "right_start_local": manifest_rows[index + 1]["start_local"],
+                            "left_start_epoch_ms": manifest_rows[index]["start_epoch_ms"],
+                            "right_start_epoch_ms": manifest_rows[index + 1]["start_epoch_ms"],
                             "time_gap_seconds": "120.000000" if index == 7 else "1.000000",
                             "dino_cosine_distance": "0.400000" if index == 7 else "0.050000",
                             "rolling_dino_distance_mean": "0.400000" if index == 7 else "0.050000",
@@ -340,6 +421,7 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
             output_csv = workspace_dir / "photo_segments.csv"
             manifest_rows = self.build_manifest_rows(day_dir, 3, datetime(2026, 3, 23, 10, 0, 0))
             manifest_rows[1]["start_local"] = "2026-03-23T09:59:59"
+            manifest_rows[1]["start_epoch_ms"] = str(int(datetime.fromisoformat("2026-03-23T09:59:59").timestamp() * 1000))
             score_rows = self.build_score_rows(manifest_rows, cut_indexes=set())
             self.write_manifest(manifest_csv, manifest_rows)
             self.write_scores(scores_csv, score_rows)
@@ -351,7 +433,7 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
                     boundary_scores_csv=scores_csv,
                     output_path=output_csv,
                 )
-            self.assertIn("start_local must be non-decreasing", str(ctx.exception))
+            self.assertIn("start_epoch_ms must be non-decreasing", str(ctx.exception))
 
 
 if __name__ == "__main__":

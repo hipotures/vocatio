@@ -3,6 +3,7 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -28,6 +29,16 @@ class BootstrapPhotoBoundariesTests(unittest.TestCase):
         features_csv = workspace_dir / "photo_boundary_features.csv"
         output_csv = workspace_dir / "photo_boundary_scores.csv"
         with features_csv.open("w", newline="", encoding="utf-8") as handle:
+            normalized_rows = []
+            for row in rows:
+                normalized_row = dict(row)
+                if "left_start_epoch_ms" not in normalized_row:
+                    left_dt = datetime.fromisoformat(normalized_row["left_start_local"])
+                    normalized_row["left_start_epoch_ms"] = str(int(left_dt.timestamp() * 1000))
+                if "right_start_epoch_ms" not in normalized_row:
+                    right_dt = datetime.fromisoformat(normalized_row["right_start_local"])
+                    normalized_row["right_start_epoch_ms"] = str(int(right_dt.timestamp() * 1000))
+                normalized_rows.append(normalized_row)
             writer = csv.DictWriter(
                 handle,
                 fieldnames=[
@@ -35,6 +46,8 @@ class BootstrapPhotoBoundariesTests(unittest.TestCase):
                     "right_relative_path",
                     "left_start_local",
                     "right_start_local",
+                    "left_start_epoch_ms",
+                    "right_start_epoch_ms",
                     "time_gap_seconds",
                     "dino_cosine_distance",
                     "rolling_dino_distance_mean",
@@ -49,7 +62,7 @@ class BootstrapPhotoBoundariesTests(unittest.TestCase):
                 ],
             )
             writer.writeheader()
-            writer.writerows(rows)
+            writer.writerows(normalized_rows)
         return features_csv, output_csv
 
     def test_photo_boundary_score_headers_match_stage1_contract(self):
@@ -60,6 +73,8 @@ class BootstrapPhotoBoundariesTests(unittest.TestCase):
                 "right_relative_path",
                 "left_start_local",
                 "right_start_local",
+                "left_start_epoch_ms",
+                "right_start_epoch_ms",
                 "time_gap_seconds",
                 "dino_cosine_distance",
                 "distance_zscore",
@@ -251,7 +266,7 @@ class BootstrapPhotoBoundariesTests(unittest.TestCase):
                     boundary_features_csv=features_csv,
                     output_path=output_csv,
                 )
-            self.assertIn("time_gap_seconds does not match adjacent timestamps", str(ctx.exception))
+            self.assertIn("time_gap_seconds does not match adjacent epoch timestamps", str(ctx.exception))
 
     def test_bootstrap_photo_boundaries_rejects_reversed_timestamps(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -285,7 +300,7 @@ class BootstrapPhotoBoundariesTests(unittest.TestCase):
                     boundary_features_csv=features_csv,
                     output_path=output_csv,
                 )
-            self.assertIn("adjacent timestamps must be non-decreasing", str(ctx.exception))
+            self.assertIn("adjacent epoch timestamps must be non-decreasing", str(ctx.exception))
 
 
 if __name__ == "__main__":

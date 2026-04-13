@@ -70,7 +70,7 @@ Image-only stage 1 pipeline:
 
 - `export_recursive_photo_csv.py` -> `_workspace/photo_manifest.csv`
 - `extract_embedded_photo_jpg.py` -> `_workspace/photo_embedded_manifest.csv`
-- `build_photo_quality_annotations.py` -> `_workspace/photo_quality.csv`
+- `build_photo_quality_annotations.py` -> `_workspace/photo_quality.csv` from preview JPGs in `photo_embedded_manifest.csv`
 - `embed_photo_previews_dinov2.py` -> `_workspace/features/dinov2_embeddings.npy`, `_workspace/features/dinov2_index.csv`
 - `build_photo_boundary_features.py` -> `_workspace/photo_boundary_features.csv`
 - `bootstrap_photo_boundaries.py` -> `_workspace/photo_boundary_scores.csv`

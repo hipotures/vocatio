@@ -42,12 +42,26 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
         output_csv = workspace_dir / "photo_boundary_features.csv"
 
         with manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+            normalized_manifest_rows = []
+            for row in manifest_rows:
+                normalized_row = dict(row)
+                if "start_epoch_ms" not in normalized_row:
+                    try:
+                        start_dt = boundary.parse_local_datetime(
+                            normalized_row["start_local"],
+                            "photo_manifest.csv start_local",
+                        )
+                    except ValueError:
+                        normalized_row["start_epoch_ms"] = ""
+                    else:
+                        normalized_row["start_epoch_ms"] = str(int(start_dt.timestamp() * 1000))
+                normalized_manifest_rows.append(normalized_row)
             writer = csv.DictWriter(
                 handle,
-                fieldnames=["relative_path", "path", "photo_order_index", "start_local"],
+                fieldnames=["relative_path", "path", "photo_order_index", "start_local", "start_epoch_ms"],
             )
             writer.writeheader()
-            writer.writerows(manifest_rows)
+            writer.writerows(normalized_manifest_rows)
 
         with quality_csv.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(
@@ -82,6 +96,8 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
                 "right_relative_path",
                 "left_start_local",
                 "right_start_local",
+                "left_start_epoch_ms",
+                "right_start_epoch_ms",
                 "time_gap_seconds",
                 "dino_cosine_distance",
                 "rolling_dino_distance_mean",
@@ -95,6 +111,54 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
                 "contrast_delta",
             ],
         )
+
+    def test_build_photo_boundary_features_uses_epoch_gap_for_mixed_offset_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            manifest_csv, quality_csv, features_dir, output_csv = self.write_stage1_artifacts(
+                workspace_dir=workspace_dir,
+                manifest_rows=[
+                    {
+                        "relative_path": "hour10/early.jpg",
+                        "path": "/tmp/day/hour10/early.jpg",
+                        "photo_order_index": "0",
+                        "start_local": "2026-03-23T10:00:00",
+                        "start_epoch_ms": "1774252800000",
+                    },
+                    {
+                        "relative_path": "hour10/late.jpg",
+                        "path": "/tmp/day/hour10/late.jpg",
+                        "photo_order_index": "1",
+                        "start_local": "2026-03-23T09:30:00",
+                        "start_epoch_ms": "1774254600000",
+                    },
+                ],
+                quality_rows=[
+                    {"relative_path": "hour10/early.jpg", "brightness_mean": "0.5", "contrast_score": "0.2", "flag_blurry": "0", "flag_dark": "0"},
+                    {"relative_path": "hour10/late.jpg", "brightness_mean": "0.6", "contrast_score": "0.3", "flag_blurry": "0", "flag_dark": "0"},
+                ],
+                index_rows=[
+                    {"relative_path": "hour10/early.jpg", "row_index": "0", "embedding_dim": "2", "model_name": "dinov2_vitb14"},
+                    {"relative_path": "hour10/late.jpg", "row_index": "1", "embedding_dim": "2", "model_name": "dinov2_vitb14"},
+                ],
+                embeddings=np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+            )
+
+            row_count = boundary.build_photo_boundary_features(
+                workspace_dir=workspace_dir,
+                manifest_csv=manifest_csv,
+                quality_csv=quality_csv,
+                features_dir=features_dir,
+                output_path=output_csv,
+            )
+
+            self.assertEqual(row_count, 1)
+            with output_csv.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["left_start_local"], "2026-03-23T10:00:00")
+            self.assertEqual(rows[0]["right_start_local"], "2026-03-23T09:30:00")
+            self.assertEqual(rows[0]["time_gap_seconds"], "1800.000000")
 
     def test_normalize_day_relative_path_rejects_backslashes(self):
         with self.assertRaises(ValueError) as ctx:
@@ -227,6 +291,8 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
                     "right_relative_path": "hour10/b.jpg",
                     "left_start_local": "2026-03-23T10:00:00",
                     "right_start_local": "2026-03-23T10:00:05",
+                    "left_start_epoch_ms": "1774256400000",
+                    "right_start_epoch_ms": "1774256405000",
                     "time_gap_seconds": "5.000000",
                     "dino_cosine_distance": "0.000000",
                     "rolling_dino_distance_mean": "0.000000",
@@ -247,6 +313,8 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
                     "right_relative_path": "hour10/c.jpg",
                     "left_start_local": "2026-03-23T10:00:05",
                     "right_start_local": "2026-03-23T10:00:25",
+                    "left_start_epoch_ms": "1774256405000",
+                    "right_start_epoch_ms": "1774256425000",
                     "time_gap_seconds": "20.000000",
                     "dino_cosine_distance": "1.000000",
                     "rolling_dino_distance_mean": "0.500000",
@@ -274,12 +342,14 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
                         "path": str(day_dir / "a.jpg"),
                         "photo_order_index": "0",
                         "start_local": "2026-03-23T10:00:05",
+                        "start_epoch_ms": "1774256405000",
                     },
                     {
                         "relative_path": "b.jpg",
                         "path": str(day_dir / "b.jpg"),
                         "photo_order_index": "1",
                         "start_local": "2026-03-23T10:00:00",
+                        "start_epoch_ms": "1774256410000",
                     },
                 ],
                 quality_rows=[
@@ -326,7 +396,7 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
             self.assertEqual(row_count, 1)
             with output_csv.open("r", newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
-            self.assertEqual(rows[0]["time_gap_seconds"], "-5.000000")
+            self.assertEqual(rows[0]["time_gap_seconds"], "5.000000")
 
     def test_build_photo_boundary_features_rejects_count_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -37,12 +38,14 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
     def write_manifest(self, path: Path, day_dir: Path, relative_paths: list[str]) -> None:
         rows: list[dict[str, str]] = []
         for index, relative_path in enumerate(relative_paths):
+            start_local = f"2026-03-23T10:00:{index * 5:02d}"
             rows.append(
                 {
                     "relative_path": relative_path,
                     "path": str(day_dir / relative_path),
                     "photo_order_index": str(index),
-                    "start_local": f"2026-03-23T10:00:{index * 5:02d}",
+                    "start_local": start_local,
+                    "start_epoch_ms": str(int(datetime.fromisoformat(start_local).timestamp() * 1000)),
                     "stream_id": "p-photos",
                     "device": "A7R5",
                     "filename": Path(relative_path).name,
@@ -50,7 +53,16 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             )
         self.write_csv(
             path,
-            ["relative_path", "path", "photo_order_index", "start_local", "stream_id", "device", "filename"],
+            [
+                "relative_path",
+                "path",
+                "photo_order_index",
+                "start_local",
+                "start_epoch_ms",
+                "stream_id",
+                "device",
+                "filename",
+            ],
             rows,
         )
 
@@ -69,12 +81,16 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
     def write_boundary_scores(self, path: Path, relative_paths: list[str]) -> None:
         rows: list[dict[str, str]] = []
         for index in range(len(relative_paths) - 1):
+            left_start_local = f"2026-03-23T10:00:{index * 5:02d}"
+            right_start_local = f"2026-03-23T10:00:{(index + 1) * 5:02d}"
             rows.append(
                 {
                     "left_relative_path": relative_paths[index],
                     "right_relative_path": relative_paths[index + 1],
-                    "left_start_local": f"2026-03-23T10:00:{index * 5:02d}",
-                    "right_start_local": f"2026-03-23T10:00:{(index + 1) * 5:02d}",
+                    "left_start_local": left_start_local,
+                    "right_start_local": right_start_local,
+                    "left_start_epoch_ms": str(int(datetime.fromisoformat(left_start_local).timestamp() * 1000)),
+                    "right_start_epoch_ms": str(int(datetime.fromisoformat(right_start_local).timestamp() * 1000)),
                     "time_gap_seconds": "5.000000",
                     "dino_cosine_distance": "0.280000" if index == 1 else "0.040000",
                     "distance_zscore": "2.100000" if index == 1 else "0.000000",
@@ -93,6 +109,8 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
                 "right_relative_path",
                 "left_start_local",
                 "right_start_local",
+                "left_start_epoch_ms",
+                "right_start_epoch_ms",
                 "time_gap_seconds",
                 "dino_cosine_distance",
                 "distance_zscore",
@@ -269,6 +287,8 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
                     "right_relative_path",
                     "left_start_local",
                     "right_start_local",
+                    "left_start_epoch_ms",
+                    "right_start_epoch_ms",
                     "time_gap_seconds",
                     "dino_cosine_distance",
                     "distance_zscore",
@@ -369,6 +389,8 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
                     "right_relative_path",
                     "left_start_local",
                     "right_start_local",
+                    "left_start_epoch_ms",
+                    "right_start_epoch_ms",
                     "time_gap_seconds",
                     "dino_cosine_distance",
                     "distance_zscore",
@@ -580,13 +602,23 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             manifest_csv = workspace_dir / "photo_manifest.csv"
             self.write_csv(
                 manifest_csv,
-                ["relative_path", "path", "photo_order_index", "start_local", "stream_id", "device", "filename"],
+                [
+                    "relative_path",
+                    "path",
+                    "photo_order_index",
+                    "start_local",
+                    "start_epoch_ms",
+                    "stream_id",
+                    "device",
+                    "filename",
+                ],
                 [
                     {
                         "relative_path": "cam_a/IMG_0001.ARW",
                         "path": str(day_dir / "cam_a" / "IMG_0001.ARW"),
                         "photo_order_index": "0",
                         "start_local": "2026-03-23T10:00:00.123000",
+                        "start_epoch_ms": "1774256400123",
                         "stream_id": "p-main",
                         "device": "",
                         "filename": "IMG_0001.ARW",
@@ -596,6 +628,7 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
                         "path": str(day_dir / "cam_a" / "IMG_0002.ARW"),
                         "photo_order_index": "1",
                         "start_local": "2026-03-23T10:00:00.123",
+                        "start_epoch_ms": "1774256400123",
                         "stream_id": "p-main",
                         "device": "",
                         "filename": "IMG_0002.ARW",

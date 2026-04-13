@@ -99,10 +99,12 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             workspace_dir=workspace_dir,
             source_path=Path("/tmp/day/hour10/a.arw"),
             relative_path="hour10/a.arw",
+            photo_order_index="7",
             thumb_path=workspace_dir / "embedded_jpg" / "thumb" / "hour10/a.arw.jpg",
             preview_path=workspace_dir / "embedded_jpg" / "preview" / "hour10/a.arw.jpg",
             preview_source="embedded_preview",
         )
+        self.assertEqual(row["photo_order_index"], "7")
         self.assertEqual(row["path"], "hour10/a.arw")
         self.assertEqual(row["source_path"], "hour10/a.arw")
         self.assertEqual(row["preview_path"], "embedded_jpg/preview/hour10/a.arw.jpg")
@@ -127,6 +129,7 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
                 workspace_dir=workspace_dir,
                 source_path=day_dir / "hour10" / "a.arw",
                 relative_path="hour10/a.arw",
+                photo_order_index="5",
                 thumb_path=output_paths["thumb_path"],
                 preview_path=output_paths["preview_path"],
                 preview_source="embedded_preview",
@@ -136,6 +139,7 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
 
             self.assertEqual(row["preview_path"], "embedded_jpg/preview/hour10/a.arw.jpg")
             self.assertEqual(row["thumb_path"], "embedded_jpg/thumb/hour10/a.arw.jpg")
+            self.assertEqual(row["photo_order_index"], "5")
 
     def test_normalize_preview_source_keeps_distinct_contract_values(self):
         self.assertEqual(extract_jpg.normalize_preview_source("PreviewImage"), "embedded_preview")
@@ -450,6 +454,7 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
                 extract_jpg.ensure_thumb_jpg = original_thumb
 
             self.assertEqual([row["relative_path"] for row in rows], ["hour10/b.jpg", "hour10/a.jpg"])
+            self.assertEqual([row["photo_order_index"] for row in rows], ["0", "1"])
             self.assertEqual(rows[0]["path"], "hour10/b.jpg")
             self.assertEqual(rows[0]["preview_source"], "embedded_preview")
             self.assertEqual(rows[1]["preview_source"], "generated_from_source")

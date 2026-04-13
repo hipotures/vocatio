@@ -24,6 +24,7 @@ from build_photo_segments import (
     PHOTO_SEGMENT_HEADERS,
     format_float,
     parse_float,
+    parse_epoch_ms,
     parse_local_datetime,
     parse_non_negative_int,
     read_boundary_scores,
@@ -37,7 +38,7 @@ console = Console()
 
 PHOTO_EMBEDDED_MANIFEST_FILENAME = "photo_embedded_manifest.csv"
 PHOTO_REVIEW_INDEX_FILENAME = "performance_proxy_index.image.json"
-MANIFEST_REQUIRED_COLUMNS = frozenset(set(PHOTO_MANIFEST_REQUIRED_COLUMNS) | {"start_local"})
+MANIFEST_REQUIRED_COLUMNS = frozenset(set(PHOTO_MANIFEST_REQUIRED_COLUMNS) | {"start_local", "start_epoch_ms"})
 EMBEDDED_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "preview_path"})
 UNCERTAIN_BOUNDARY_SCORE_THRESHOLD = 0.95
 IMAGE_ONLY_TIMELINE_STATUS = "image_only"
@@ -212,7 +213,7 @@ def read_photo_manifest(day_dir: Path, path: Path) -> List[Dict[str, str]]:
     if not rows:
         raise ValueError(f"{path.name} contains no rows")
     normalized_rows: List[Dict[str, str]] = []
-    previous_start_dt: Optional[datetime] = None
+    previous_start_epoch_ms: Optional[int] = None
     for row_number, row in enumerate(rows, start=1):
         relative_path = normalize_day_relative_path(str(row.get("relative_path") or ""), f"{path.name} relative_path")
         photo_order_index = parse_non_negative_int(str(row.get("photo_order_index") or ""), f"{path.name} photo_order_index")
@@ -220,15 +221,16 @@ def read_photo_manifest(day_dir: Path, path: Path) -> List[Dict[str, str]]:
             raise ValueError(
                 f"{path.name} photo_order_index contract mismatch at row {row_number}: "
                 f"expected {row_number - 1}, got {photo_order_index}"
-            )
+        )
         start_local = str(row.get("start_local") or "")
-        start_dt = parse_local_datetime(start_local, f"{path.name} start_local")
-        if previous_start_dt is not None and start_dt < previous_start_dt:
+        parse_local_datetime(start_local, f"{path.name} start_local")
+        start_epoch_ms = parse_epoch_ms(str(row.get("start_epoch_ms") or ""), f"{path.name} start_epoch_ms")
+        if previous_start_epoch_ms is not None and start_epoch_ms < previous_start_epoch_ms:
             raise ValueError(
-                f"{path.name} start_local must be non-decreasing at row {row_number}: "
-                f"{start_local} is earlier than previous row"
+                f"{path.name} start_epoch_ms must be non-decreasing at row {row_number}: "
+                f"{start_epoch_ms} is earlier than previous row"
             )
-        previous_start_dt = start_dt
+        previous_start_epoch_ms = start_epoch_ms
         source_value = str(row.get("path") or "").strip()
         if not source_value:
             raise ValueError(f"{path.name} row missing path for {relative_path}")
@@ -239,6 +241,7 @@ def read_photo_manifest(day_dir: Path, path: Path) -> List[Dict[str, str]]:
                 "path": source_value,
                 "photo_order_index": str(photo_order_index),
                 "start_local": start_local,
+                "start_epoch_ms": str(start_epoch_ms),
                 "stream_id": str(row.get("stream_id") or "").strip(),
                 "device": str(row.get("device") or "").strip(),
                 "filename": str(row.get("filename") or Path(relative_path).name).strip() or Path(relative_path).name,
@@ -403,14 +406,14 @@ def nearest_boundary_seconds(
     anchor_indexes = [index for index in [left_anchor_index, right_anchor_index] if index is not None]
     if not anchor_indexes:
         return ""
-    photo_dt = parse_local_datetime(str(manifest_rows[photo_index]["start_local"]), "photo_manifest.csv start_local")
+    photo_epoch_ms = parse_epoch_ms(str(manifest_rows[photo_index]["start_epoch_ms"]), "photo_manifest.csv start_epoch_ms")
     distances = []
     for anchor_index in anchor_indexes:
-        anchor_dt = parse_local_datetime(
-            str(manifest_rows[anchor_index]["start_local"]),
-            "photo_manifest.csv start_local",
+        anchor_epoch_ms = parse_epoch_ms(
+            str(manifest_rows[anchor_index]["start_epoch_ms"]),
+            "photo_manifest.csv start_epoch_ms",
         )
-        distances.append(abs((photo_dt - anchor_dt).total_seconds()))
+        distances.append(abs(float(photo_epoch_ms - anchor_epoch_ms) / 1000.0))
     return format_float(min(distances))
 
 

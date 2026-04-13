@@ -48,7 +48,7 @@ PHOTO_SEGMENT_HEADERS = [
     "segment_confidence",
 ]
 
-PHOTO_SEGMENT_MANIFEST_REQUIRED_COLUMNS = frozenset(set(PHOTO_MANIFEST_REQUIRED_COLUMNS) | {"start_local"})
+PHOTO_SEGMENT_MANIFEST_REQUIRED_COLUMNS = frozenset(set(PHOTO_MANIFEST_REQUIRED_COLUMNS) | {"start_local", "start_epoch_ms"})
 
 
 def positive_int_arg(value: str) -> int:
@@ -178,6 +178,10 @@ def parse_non_negative_int(value: str, column_name: str) -> int:
     return int(text)
 
 
+def parse_epoch_ms(value: str, column_name: str) -> int:
+    return parse_non_negative_int(value, column_name)
+
+
 def parse_float(value: str, column_name: str) -> float:
     text = str(value).strip()
     if not text:
@@ -205,7 +209,7 @@ def read_photo_manifest(path: Path) -> List[Dict[str, str]]:
     if not rows:
         raise ValueError(f"{path.name} contains no rows")
     normalized_rows: List[Dict[str, str]] = []
-    previous_start_dt: Optional[datetime] = None
+    previous_start_epoch_ms: Optional[int] = None
     for row_number, row in enumerate(rows, start=1):
         relative_path = normalize_day_relative_path(
             str(row.get("relative_path") or ""),
@@ -219,21 +223,23 @@ def read_photo_manifest(path: Path) -> List[Dict[str, str]]:
             raise ValueError(
                 f"{path.name} photo_order_index contract mismatch at row {row_number}: "
                 f"expected {row_number - 1}, got {photo_order_index}"
-            )
+        )
         start_local = str(row.get("start_local") or "")
-        start_dt = parse_local_datetime(start_local, f"{path.name} start_local")
-        if previous_start_dt is not None and start_dt < previous_start_dt:
+        parse_local_datetime(start_local, f"{path.name} start_local")
+        start_epoch_ms = parse_epoch_ms(str(row.get("start_epoch_ms") or ""), f"{path.name} start_epoch_ms")
+        if previous_start_epoch_ms is not None and start_epoch_ms < previous_start_epoch_ms:
             raise ValueError(
-                f"{path.name} start_local must be non-decreasing at row {row_number}: "
-                f"{start_local} is earlier than previous row"
+                f"{path.name} start_epoch_ms must be non-decreasing at row {row_number}: "
+                f"{start_epoch_ms} is earlier than previous row"
             )
-        previous_start_dt = start_dt
+        previous_start_epoch_ms = start_epoch_ms
         normalized_rows.append(
             {
                 "relative_path": relative_path,
                 "path": str(row.get("path") or ""),
                 "photo_order_index": str(photo_order_index),
                 "start_local": start_local,
+                "start_epoch_ms": str(start_epoch_ms),
             }
         )
     return normalized_rows
@@ -247,6 +253,7 @@ def read_boundary_scores(path: Path) -> List[Dict[str, str]]:
     normalized_rows: List[Dict[str, str]] = []
     previous_right_path: Optional[str] = None
     previous_right_start_local: Optional[str] = None
+    previous_right_start_epoch_ms: Optional[str] = None
     for row_number, row in enumerate(rows, start=1):
         left_relative_path = normalize_day_relative_path(
             str(row.get("left_relative_path") or ""),
@@ -260,6 +267,11 @@ def read_boundary_scores(path: Path) -> List[Dict[str, str]]:
         right_start_local = str(row.get("right_start_local") or "")
         parse_local_datetime(left_start_local, f"{path.name} left_start_local")
         parse_local_datetime(right_start_local, f"{path.name} right_start_local")
+        left_start_epoch_ms = parse_epoch_ms(str(row.get("left_start_epoch_ms") or ""), f"{path.name} left_start_epoch_ms")
+        right_start_epoch_ms = parse_epoch_ms(
+            str(row.get("right_start_epoch_ms") or ""),
+            f"{path.name} right_start_epoch_ms",
+        )
         parse_float(str(row.get("time_gap_seconds") or ""), f"{path.name} time_gap_seconds")
         parse_float(str(row.get("dino_cosine_distance") or ""), f"{path.name} dino_cosine_distance")
         parse_float(str(row.get("distance_zscore") or ""), f"{path.name} distance_zscore")
@@ -291,14 +303,22 @@ def read_boundary_scores(path: Path) -> List[Dict[str, str]]:
                 f"{path.name} timestamp adjacency mismatch at row {row_number}: expected left_start_local "
                 f"{previous_right_start_local}, got {left_start_local}"
             )
+        if previous_right_start_epoch_ms is not None and str(left_start_epoch_ms) != previous_right_start_epoch_ms:
+            raise ValueError(
+                f"{path.name} epoch adjacency mismatch at row {row_number}: expected left_start_epoch_ms "
+                f"{previous_right_start_epoch_ms}, got {left_start_epoch_ms}"
+            )
         previous_right_path = right_relative_path
         previous_right_start_local = right_start_local
+        previous_right_start_epoch_ms = str(right_start_epoch_ms)
         normalized_rows.append(
             {
                 "left_relative_path": left_relative_path,
                 "right_relative_path": right_relative_path,
                 "left_start_local": left_start_local,
                 "right_start_local": right_start_local,
+                "left_start_epoch_ms": str(left_start_epoch_ms),
+                "right_start_epoch_ms": str(right_start_epoch_ms),
                 "time_gap_seconds": format_float(
                     parse_float(str(row.get("time_gap_seconds") or ""), f"{path.name} time_gap_seconds")
                 ),
@@ -356,6 +376,16 @@ def validate_boundary_alignment(
                 f"photo_boundary_scores.csv start_local mismatch at row {row_number}: "
                 f"expected {manifest_rows[row_number]['start_local']}, got {boundary_row['right_start_local']}"
             )
+        if str(boundary_row["left_start_epoch_ms"]) != str(manifest_rows[row_number - 1]["start_epoch_ms"]):
+            raise ValueError(
+                f"photo_boundary_scores.csv start_epoch_ms mismatch at row {row_number}: "
+                f"expected {manifest_rows[row_number - 1]['start_epoch_ms']}, got {boundary_row['left_start_epoch_ms']}"
+            )
+        if str(boundary_row["right_start_epoch_ms"]) != str(manifest_rows[row_number]["start_epoch_ms"]):
+            raise ValueError(
+                f"photo_boundary_scores.csv start_epoch_ms mismatch at row {row_number}: "
+                f"expected {manifest_rows[row_number]['start_epoch_ms']}, got {boundary_row['right_start_epoch_ms']}"
+            )
 
 
 def build_segment_ranges(photo_count: int, cut_indexes: Sequence[int]) -> List[Tuple[int, int]]:
@@ -371,9 +401,15 @@ def build_segment_ranges(photo_count: int, cut_indexes: Sequence[int]) -> List[T
 
 
 def segment_duration_seconds(segment_range: Tuple[int, int], manifest_rows: Sequence[Mapping[str, str]]) -> float:
-    start_dt = parse_local_datetime(str(manifest_rows[segment_range[0]]["start_local"]), "photo_manifest.csv start_local")
-    end_dt = parse_local_datetime(str(manifest_rows[segment_range[1]]["start_local"]), "photo_manifest.csv start_local")
-    return max(0.0, float((end_dt - start_dt).total_seconds()))
+    start_epoch_ms = parse_epoch_ms(
+        str(manifest_rows[segment_range[0]]["start_epoch_ms"]),
+        "photo_manifest.csv start_epoch_ms",
+    )
+    end_epoch_ms = parse_epoch_ms(
+        str(manifest_rows[segment_range[1]]["start_epoch_ms"]),
+        "photo_manifest.csv start_epoch_ms",
+    )
+    return max(0.0, float(end_epoch_ms - start_epoch_ms) / 1000.0)
 
 
 def choose_cut_to_remove(

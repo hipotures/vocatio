@@ -34,6 +34,7 @@ DEFAULT_SOFT_GAP_SECONDS = 20.0
 DEFAULT_HARD_GAP_SECONDS = 90.0
 
 LOCAL_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3}|\.\d{6})?$")
+CANONICAL_NON_NEGATIVE_INT_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 
 PHOTO_BOUNDARY_FEATURE_REQUIRED_COLUMNS = frozenset(
     {
@@ -41,6 +42,8 @@ PHOTO_BOUNDARY_FEATURE_REQUIRED_COLUMNS = frozenset(
         "right_relative_path",
         "left_start_local",
         "right_start_local",
+        "left_start_epoch_ms",
+        "right_start_epoch_ms",
         "time_gap_seconds",
         "dino_cosine_distance",
         "distance_zscore",
@@ -52,6 +55,8 @@ PHOTO_BOUNDARY_SCORE_HEADERS = [
     "right_relative_path",
     "left_start_local",
     "right_start_local",
+    "left_start_epoch_ms",
+    "right_start_epoch_ms",
     "time_gap_seconds",
     "dino_cosine_distance",
     "distance_zscore",
@@ -151,7 +156,7 @@ def normalize_day_relative_path(relative_path: str, column_name: str) -> str:
     return normalized
 
 
-def parse_local_datetime(value: str, column_name: str) -> datetime:
+def parse_local_datetime(value: str, column_name: str) -> None:
     text = str(value)
     if not text:
         raise ValueError(f"{column_name} is empty")
@@ -165,7 +170,15 @@ def parse_local_datetime(value: str, column_name: str) -> datetime:
         raise ValueError(f"{column_name} must be a valid ISO local datetime: {value}") from exc
     if parsed.tzinfo is not None:
         raise ValueError(f"{column_name} must be a naive ISO local datetime without timezone offset: {value}")
-    return parsed
+
+
+def parse_epoch_ms(value: str, column_name: str) -> int:
+    text = str(value)
+    if not text:
+        raise ValueError(f"{column_name} is empty")
+    if not CANONICAL_NON_NEGATIVE_INT_RE.match(text):
+        raise ValueError(f"{column_name} must be a canonical non-negative integer: {value}")
+    return int(text)
 
 
 def parse_float(value: str, column_name: str) -> float:
@@ -207,6 +220,7 @@ def read_boundary_features(path: Path) -> List[Dict[str, str]]:
     seen_keys: set[tuple[str, str]] = set()
     previous_right_path: Optional[str] = None
     previous_right_start_local: Optional[str] = None
+    previous_right_start_epoch_ms: Optional[str] = None
     for row_number, row in enumerate(rows, start=1):
         left_relative_path = normalize_day_relative_path(
             str(row.get("left_relative_path") or ""),
@@ -218,18 +232,23 @@ def read_boundary_features(path: Path) -> List[Dict[str, str]]:
         )
         left_start_local = str(row.get("left_start_local") or "")
         right_start_local = str(row.get("right_start_local") or "")
-        left_dt = parse_local_datetime(left_start_local, f"{path.name} left_start_local")
-        right_dt = parse_local_datetime(right_start_local, f"{path.name} right_start_local")
-        if right_dt < left_dt:
+        parse_local_datetime(left_start_local, f"{path.name} left_start_local")
+        parse_local_datetime(right_start_local, f"{path.name} right_start_local")
+        left_start_epoch_ms = parse_epoch_ms(str(row.get("left_start_epoch_ms") or ""), f"{path.name} left_start_epoch_ms")
+        right_start_epoch_ms = parse_epoch_ms(
+            str(row.get("right_start_epoch_ms") or ""),
+            f"{path.name} right_start_epoch_ms",
+        )
+        if right_start_epoch_ms < left_start_epoch_ms:
             raise ValueError(
-                f"{path.name} adjacent timestamps must be non-decreasing at row {row_number}: "
-                f"{left_start_local} -> {right_start_local}"
+                f"{path.name} adjacent epoch timestamps must be non-decreasing at row {row_number}: "
+                f"{left_start_epoch_ms} -> {right_start_epoch_ms}"
             )
         time_gap_seconds = parse_float(str(row.get("time_gap_seconds") or ""), f"{path.name} time_gap_seconds")
-        expected_gap_seconds = float((right_dt - left_dt).total_seconds())
+        expected_gap_seconds = float(right_start_epoch_ms - left_start_epoch_ms) / 1000.0
         if abs(time_gap_seconds - expected_gap_seconds) > 0.0000005:
             raise ValueError(
-                f"{path.name} time_gap_seconds does not match adjacent timestamps at row {row_number}: "
+                f"{path.name} time_gap_seconds does not match adjacent epoch timestamps at row {row_number}: "
                 f"expected {format_float(expected_gap_seconds)}, got {format_float(time_gap_seconds)}"
             )
         dino_cosine_distance = parse_float(
@@ -255,14 +274,22 @@ def read_boundary_features(path: Path) -> List[Dict[str, str]]:
                 f"{path.name} timestamp adjacency mismatch at row {row_number}: expected left_start_local "
                 f"{previous_right_start_local}, got {left_start_local}"
             )
+        if previous_right_start_epoch_ms is not None and str(left_start_epoch_ms) != previous_right_start_epoch_ms:
+            raise ValueError(
+                f"{path.name} epoch adjacency mismatch at row {row_number}: expected left_start_epoch_ms "
+                f"{previous_right_start_epoch_ms}, got {left_start_epoch_ms}"
+            )
         previous_right_path = right_relative_path
         previous_right_start_local = right_start_local
+        previous_right_start_epoch_ms = str(right_start_epoch_ms)
         normalized_rows.append(
             {
                 "left_relative_path": left_relative_path,
                 "right_relative_path": right_relative_path,
                 "left_start_local": left_start_local,
                 "right_start_local": right_start_local,
+                "left_start_epoch_ms": str(left_start_epoch_ms),
+                "right_start_epoch_ms": str(right_start_epoch_ms),
                 "time_gap_seconds": format_float(time_gap_seconds),
                 "dino_cosine_distance": format_float(dino_cosine_distance),
                 "distance_zscore": format_float(
@@ -331,6 +358,8 @@ def compute_score_row(
         "right_relative_path": str(row["right_relative_path"]),
         "left_start_local": str(row["left_start_local"]),
         "right_start_local": str(row["right_start_local"]),
+        "left_start_epoch_ms": str(row["left_start_epoch_ms"]),
+        "right_start_epoch_ms": str(row["right_start_epoch_ms"]),
         "time_gap_seconds": format_float(time_gap_seconds),
         "dino_cosine_distance": format_float(dino_cosine_distance),
         "distance_zscore": format_float(
