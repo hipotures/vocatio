@@ -266,6 +266,33 @@ def build_manifest_entry(
     return (time_parts.sort_dt, row["capture_subsec"], row["relative_path"]), row
 
 
+def build_batch_manifest_rows(
+    day_dir: Path,
+    stream_id: str,
+    device: str,
+    paths: Sequence[Path],
+    metadata_by_path: Mapping[str, Mapping[str, object]],
+) -> List[tuple[tuple[object, str, str], Dict[str, str]]]:
+    rows_with_sort: List[tuple[tuple[object, str, str], Dict[str, str]]] = []
+    invalid_capture_paths: List[str] = []
+    for path in paths:
+        metadata = metadata_by_path.get(str(path))
+        if metadata is None:
+            raise ValueError(f"Missing metadata for {path}")
+        try:
+            rows_with_sort.append(build_manifest_entry(day_dir, stream_id, device, path, metadata))
+        except ValueError as error:
+            if str(error) != "Could not determine capture time from trusted EXIF metadata":
+                raise
+            invalid_capture_paths.append(path.relative_to(day_dir).as_posix())
+    if invalid_capture_paths:
+        raise ValueError(
+            f"Missing trusted EXIF capture time for {len(invalid_capture_paths)} photo file(s): "
+            + ", ".join(invalid_capture_paths)
+        )
+    return rows_with_sort
+
+
 def finalize_manifest_rows(rows_with_sort: Sequence[tuple[tuple[object, str, str], Dict[str, str]]]) -> List[Dict[str, str]]:
     rows = [dict(row) for _sort_key, row in sorted(rows_with_sort, key=lambda item: item[0])]
     for index, row in enumerate(rows):
@@ -282,12 +309,7 @@ def build_manifest_rows(
     files = collect_source_files(day_dir)
     if not files:
         raise ValueError(f"No photo files found under {day_dir}")
-    rows_with_sort: List[tuple[tuple[object, str, str], Dict[str, str]]] = []
-    for path in files:
-        metadata = metadata_by_path.get(str(path))
-        if metadata is None:
-            raise ValueError(f"Missing metadata for {path}")
-        rows_with_sort.append(build_manifest_entry(day_dir, stream_id, device, path, metadata))
+    rows_with_sort = build_batch_manifest_rows(day_dir, stream_id, device, files, metadata_by_path)
     return finalize_manifest_rows(rows_with_sort)
 
 
@@ -333,12 +355,7 @@ def export_recursive_photo_csv(
                     ),
                 )
                 batch_metadata_by_path = metadata_by_source_path(metadata_items)
-                batch_rows_with_sort: List[tuple[tuple[object, str, str], Dict[str, str]]] = []
-                for path in batch:
-                    metadata = batch_metadata_by_path.get(str(path))
-                    if metadata is None:
-                        raise ValueError(f"Missing metadata for {path}")
-                    batch_rows_with_sort.append(build_manifest_entry(day_dir, stream_id, device, path, metadata))
+                batch_rows_with_sort = build_batch_manifest_rows(day_dir, stream_id, device, batch, batch_metadata_by_path)
                 rows_with_sort.extend(batch_rows_with_sort)
                 append_partial_manifest_rows(
                     partial_handle,

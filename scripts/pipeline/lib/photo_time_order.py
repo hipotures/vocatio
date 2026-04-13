@@ -10,8 +10,6 @@ PHOTO_CAPTURE_TIME_FIELDS: Sequence[tuple[str, str]] = (
     ("DateTimeOriginal", "datetime_original"),
     ("SubSecCreateDate", "subsec_create_date"),
     ("CreateDate", "create_date"),
-    ("FileModifyDate", "file_modify_date"),
-    ("FileCreateDate", "file_create_date"),
 )
 
 _EXIF_TIMESTAMP_RE = re.compile(
@@ -102,4 +100,4 @@ def pick_capture_time_parts(item: Mapping[str, object]) -> CaptureTimeParts:
             start_epoch_ms=format_start_epoch_ms(dt, parsed.aware_dt),
             sort_dt=normalize_sort_datetime(dt, parsed.aware_dt),
         )
-    raise ValueError("Could not determine capture time from photo metadata")
+    raise ValueError("Could not determine capture time from trusted EXIF metadata")

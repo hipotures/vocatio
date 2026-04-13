@@ -139,25 +139,43 @@ class ExportRecursivePhotoCsvTests(unittest.TestCase):
             self.assertEqual([row["photo_id"] for row in rows], ["hour10/a.jpg", "hour10/b.jpg"])
             self.assertEqual([row["filename"] for row in rows], ["hour10/a.jpg", "hour10/b.jpg"])
 
-    def test_pick_capture_time_falls_back_to_file_modify_date(self):
-        item = {"FileModifyDate": "2026:03:23 11:00:00"}
-        start_local, capture_subsec, source = export_csv.pick_capture_time(item)
-        self.assertEqual(start_local, "2026-03-23T11:00:00")
-        self.assertEqual(capture_subsec, "0")
-        self.assertEqual(source, "file_modify_date")
+    def test_pick_capture_time_rejects_file_timestamp_fallbacks(self):
+        with self.assertRaisesRegex(ValueError, "Could not determine capture time from trusted EXIF metadata"):
+            export_csv.pick_capture_time({"FileModifyDate": "2026:03:23 11:00:00"})
 
     def test_pick_capture_time_uses_canonical_exif_priority_order(self):
         item = {
             "DateTimeOriginal": "2026:03:23 11:00:00",
             "SubSecCreateDate": "2026:03:23 09:00:00.250",
             "CreateDate": "2026:03:23 08:00:00",
-            "FileModifyDate": "2026:03:23 07:00:00",
-            "FileCreateDate": "2026:03:23 06:00:00",
         }
         start_local, capture_subsec, source = export_csv.pick_capture_time(item)
         self.assertEqual(start_local, "2026-03-23T11:00:00")
         self.assertEqual(capture_subsec, "0")
         self.assertEqual(source, "datetime_original")
+
+    def test_build_manifest_rows_reports_all_files_missing_trusted_exif_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            (day_dir / "hour10").mkdir(parents=True)
+            bad_a = day_dir / "hour10" / "a.jpg"
+            bad_b = day_dir / "hour10" / "b.jpg"
+            bad_a.write_bytes(b"a")
+            bad_b.write_bytes(b"b")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"Missing trusted EXIF capture time for 2 photo file\(s\): hour10/a\.jpg, hour10/b\.jpg",
+            ):
+                export_csv.build_manifest_rows(
+                    day_dir=day_dir,
+                    stream_id="p-main",
+                    device="",
+                    metadata_by_path={
+                        str(bad_a): {"FileModifyDate": "2026:03:23 10:00:00"},
+                        str(bad_b): {"FileCreateDate": "2026:03:23 10:00:01"},
+                    },
+                )
 
     def test_build_manifest_rows_uses_explicit_timezone_for_start_epoch_ms(self):
         with tempfile.TemporaryDirectory() as tmp:
