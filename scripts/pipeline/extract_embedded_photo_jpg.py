@@ -139,11 +139,22 @@ def normalize_manifest_relative_path(relative_path: str) -> Path:
     return Path(*normalized_parts)
 
 
+def resolve_workspace_derived_output_path(workspace_dir: Path, relative_path: str, variant: str) -> Path:
+    workspace_dir = workspace_dir.resolve()
+    normalized_relative_path = normalize_manifest_relative_path(relative_path)
+    candidate = workspace_dir / "embedded_jpg" / variant / normalized_relative_path.parent / f"{normalized_relative_path.name}.jpg"
+    resolved_candidate = candidate.resolve()
+    try:
+        resolved_candidate.relative_to(workspace_dir)
+    except ValueError as exc:
+        raise ValueError(f"Derived output path must stay under {workspace_dir}: {candidate}") from exc
+    return resolved_candidate
+
+
 def build_output_paths(workspace_dir: Path, relative_path: str) -> Dict[str, Path]:
-    relative_jpg = normalize_manifest_relative_path(relative_path).with_suffix(".jpg")
     return {
-        "thumb_path": workspace_dir / "embedded_jpg" / "thumb" / relative_jpg,
-        "preview_path": workspace_dir / "embedded_jpg" / "preview" / relative_jpg,
+        "thumb_path": resolve_workspace_derived_output_path(workspace_dir, relative_path, "thumb"),
+        "preview_path": resolve_workspace_derived_output_path(workspace_dir, relative_path, "preview"),
     }
 
 
