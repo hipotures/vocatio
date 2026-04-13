@@ -360,6 +360,7 @@ class ReviewIndexLoaderTests(unittest.TestCase):
                 "workspace_dir": str(workspace_dir),
                 "performance_count": 0,
                 "photo_count": 0,
+                "source_mode": contracts.SOURCE_MODE_IMAGE_ONLY_V1,
                 "performances": [],
             }
 
@@ -367,6 +368,41 @@ class ReviewIndexLoaderTests(unittest.TestCase):
                 review_index_loader.load_review_index(self.write_payload(workspace_dir, payload))
 
             self.assertIn("day/workspace_dir mismatch", str(ctx.exception))
+
+    def test_load_review_index_allows_legacy_external_workspace_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            day_dir = tmp_path / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            external_workspace_dir = tmp_path / "external-workspace"
+            workspace_dir.mkdir(parents=True)
+            external_workspace_dir.mkdir(parents=True)
+
+            payload = {
+                "day": day_dir.name,
+                "workspace_dir": str(external_workspace_dir.resolve()),
+                "performance_count": 1,
+                "photo_count": 1,
+                "performances": [
+                    {
+                        "performance_number": "101",
+                        "photos": [
+                            {
+                                "source_path": "/tmp/source.jpg",
+                                "proxy_path": "/tmp/proxy.jpg",
+                                "photo_start_local": "2026-03-23 10:00:00",
+                                "adjusted_start_local": "2026-03-23 10:00:00",
+                                "assignment_status": "assigned",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            normalized = review_index_loader.load_review_index(self.write_payload(workspace_dir, payload))
+
+            self.assertEqual(normalized["workspace_dir"], str(external_workspace_dir.resolve()))
+            self.assertEqual(normalized["performances"][0]["photos"][0]["source_path"], "/tmp/source.jpg")
 
     def test_load_review_index_rejects_relative_workspace_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

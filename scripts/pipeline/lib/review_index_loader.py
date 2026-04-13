@@ -42,8 +42,8 @@ def load_review_index(index_path: Path | str) -> dict[str, Any]:
         raise ValueError(f"Review index payload must be a JSON object: {index_file_path}")
     validate_required_fields("review index payload", REQUIRED_TOP_LEVEL_FIELDS, payload)
 
-    day_dir, workspace_dir = resolve_day_and_workspace_dir(payload, index_file_path)
     source_mode = str(payload.get("source_mode", "") or "").strip()
+    day_dir, workspace_dir = resolve_day_and_workspace_dir(payload, index_file_path, source_mode)
     performances = payload["performances"]
     if not isinstance(performances, list):
         raise ValueError("review index payload field 'performances' must be a list")
@@ -88,7 +88,7 @@ def load_review_index(index_path: Path | str) -> dict[str, Any]:
     return normalized_payload
 
 
-def resolve_day_and_workspace_dir(payload: Mapping[str, Any], index_path: Path) -> tuple[Path, Path]:
+def resolve_day_and_workspace_dir(payload: Mapping[str, Any], index_path: Path, source_mode: str) -> tuple[Path, Path]:
     day = str(payload.get("day", "") or "").strip()
     if not day:
         raise ValueError("review index payload field 'day' must not be empty")
@@ -99,13 +99,20 @@ def resolve_day_and_workspace_dir(payload: Mapping[str, Any], index_path: Path) 
     if not declared_workspace_dir.is_absolute():
         relative_workspace = normalize_relative_workspace_dir(workspace_value)
         declared_workspace_dir = index_path.parent / relative_workspace
-    declared_day_dir = declared_workspace_dir.parent
-    if declared_day_dir.name != day:
-        raise ValueError(
-            "review index payload day/workspace_dir mismatch: "
-            f"day={day} workspace_dir={declared_workspace_dir}"
-        )
-    return declared_day_dir.resolve(), declared_workspace_dir.resolve()
+    if source_mode == SOURCE_MODE_IMAGE_ONLY_V1:
+        declared_day_dir = declared_workspace_dir.parent
+        if declared_day_dir.name != day:
+            raise ValueError(
+                "review index payload day/workspace_dir mismatch: "
+                f"day={day} workspace_dir={declared_workspace_dir}"
+            )
+        return declared_day_dir.resolve(), declared_workspace_dir.resolve()
+
+    if index_path.parent.name == "_workspace" and index_path.parent.parent.name == day:
+        return index_path.parent.parent.resolve(), declared_workspace_dir.resolve()
+    if declared_workspace_dir.parent.name == day:
+        return declared_workspace_dir.parent.resolve(), declared_workspace_dir.resolve()
+    return index_path.parent.resolve(), declared_workspace_dir.resolve()
 
 
 def normalize_relative_workspace_dir(value: str) -> Path:
