@@ -78,6 +78,28 @@ class ExportRecursivePhotoCsvTests(unittest.TestCase):
         self.assertEqual(capture_subsec, "0")
         self.assertEqual(source, "datetime_original")
 
+    def test_build_manifest_rows_uses_explicit_timezone_for_start_epoch_ms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            (day_dir / "hour10").mkdir(parents=True)
+            photo_path = day_dir / "hour10" / "a.jpg"
+            photo_path.write_bytes(b"a")
+
+            rows = export_csv.build_manifest_rows(
+                day_dir=day_dir,
+                stream_id="p-main",
+                device="",
+                metadata_by_path={
+                    str(photo_path): {
+                        "DateTimeOriginal": "2026:03:23 10:00:00+02:00",
+                    }
+                },
+            )
+
+            self.assertEqual(rows[0]["capture_time_local"], "2026-03-23T10:00:00")
+            self.assertEqual(rows[0]["start_local"], "2026-03-23T10:00:00")
+            self.assertEqual(rows[0]["start_epoch_ms"], "1774252800000")
+
 
 if __name__ == "__main__":
     unittest.main()

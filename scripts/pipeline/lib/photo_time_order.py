@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Mapping, NamedTuple, Optional, Sequence
 
 
@@ -15,7 +15,7 @@ PHOTO_CAPTURE_TIME_FIELDS: Sequence[tuple[str, str]] = (
 )
 
 _EXIF_TIMESTAMP_RE = re.compile(
-    r"^(?P<base>\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2})(?:\.(?P<fraction>\d+))?(?:Z|[+-]\d{2}:?\d{2})?$"
+    r"^(?P<base>\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2})(?:\.(?P<fraction>\d+))?(?P<offset>Z|[+-]\d{2}:?\d{2})?$"
 )
 
 
@@ -27,18 +27,36 @@ class CaptureTimeParts(NamedTuple):
     start_epoch_ms: str
 
 
-def parse_exif_datetime(value: object) -> Optional[tuple[datetime, str]]:
+class ParsedExifDatetime(NamedTuple):
+    local_dt: datetime
+    fraction: str
+    aware_dt: Optional[datetime]
+
+
+def parse_timezone_offset(value: str) -> timezone:
+    if value == "Z":
+        return timezone.utc
+    normalized = value.replace(":", "")
+    sign = 1 if normalized[0] == "+" else -1
+    hours = int(normalized[1:3])
+    minutes = int(normalized[3:5])
+    return timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+
+def parse_exif_datetime(value: object) -> Optional[ParsedExifDatetime]:
     if value is None:
         return None
     text = str(value).strip().replace("T", " ")
     match = _EXIF_TIMESTAMP_RE.match(text)
     if match is None:
         return None
-    dt = datetime.strptime(match.group("base"), "%Y:%m:%d %H:%M:%S")
+    local_dt = datetime.strptime(match.group("base"), "%Y:%m:%d %H:%M:%S")
     fraction = match.group("fraction") or ""
     if fraction:
-        dt = dt.replace(microsecond=int((fraction + "000000")[:6]))
-    return dt, fraction
+        local_dt = local_dt.replace(microsecond=int((fraction + "000000")[:6]))
+    offset = match.group("offset") or ""
+    aware_dt = local_dt.replace(tzinfo=parse_timezone_offset(offset)) if offset else None
+    return ParsedExifDatetime(local_dt=local_dt, fraction=fraction, aware_dt=aware_dt)
 
 
 def format_capture_subsec(fraction: str) -> str:
@@ -57,8 +75,9 @@ def format_start_local(value: datetime) -> str:
     return value.isoformat(timespec="microseconds")
 
 
-def format_start_epoch_ms(value: datetime) -> str:
-    return str(int(value.timestamp() * 1000))
+def format_start_epoch_ms(value: datetime, aware_value: Optional[datetime]) -> str:
+    timestamp_value = aware_value if aware_value is not None else value
+    return str(int(timestamp_value.timestamp() * 1000))
 
 
 def pick_capture_time_parts(item: Mapping[str, object]) -> CaptureTimeParts:
@@ -66,12 +85,13 @@ def pick_capture_time_parts(item: Mapping[str, object]) -> CaptureTimeParts:
         parsed = parse_exif_datetime(item.get(field_name))
         if parsed is None:
             continue
-        dt, fraction = parsed
+        dt = parsed.local_dt
+        fraction = parsed.fraction
         return CaptureTimeParts(
             capture_time_local=format_capture_time_local(dt),
             capture_subsec=format_capture_subsec(fraction),
             timestamp_source=source_name,
             start_local=format_start_local(dt),
-            start_epoch_ms=format_start_epoch_ms(dt),
+            start_epoch_ms=format_start_epoch_ms(dt, parsed.aware_dt),
         )
     raise ValueError("Could not determine capture time from photo metadata")
