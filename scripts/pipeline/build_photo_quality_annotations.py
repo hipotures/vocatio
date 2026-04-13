@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, List, Mapping, Optional
 
 import numpy as np
@@ -91,6 +91,48 @@ def resolve_output_path(workspace_dir: Path, output_value: Optional[str]) -> Pat
     if candidate.is_absolute():
         return candidate
     return workspace_dir / candidate
+
+
+def normalize_relative_path(relative_path: str) -> Path:
+    candidate = PurePosixPath(relative_path.strip())
+    if not candidate.parts:
+        raise ValueError("photo_manifest.csv row missing relative_path")
+    if candidate.is_absolute():
+        raise ValueError(f"photo_manifest.csv relative_path must stay under day_dir: {relative_path}")
+    normalized_parts: List[str] = []
+    for part in candidate.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not normalized_parts:
+                raise ValueError(f"photo_manifest.csv relative_path must stay under day_dir: {relative_path}")
+            normalized_parts.pop()
+            continue
+        normalized_parts.append(part)
+    if not normalized_parts:
+        raise ValueError(f"photo_manifest.csv relative_path must stay under day_dir: {relative_path}")
+    return Path(*normalized_parts)
+
+
+def resolve_source_path(day_dir: Path, relative_path: str, source_path: str) -> Path:
+    resolved_day_dir = day_dir.resolve()
+    normalized_relative_path = normalize_relative_path(relative_path)
+    expected_source_path = (resolved_day_dir / normalized_relative_path).resolve()
+    raw_source_path = Path(source_path.strip())
+    resolved_source_path = (
+        raw_source_path if raw_source_path.is_absolute() else resolved_day_dir / raw_source_path
+    ).resolve()
+    try:
+        resolved_source_path.relative_to(resolved_day_dir)
+    except ValueError as exc:
+        raise ValueError(
+            f"photo_manifest.csv path for relative_path {relative_path} must stay under {resolved_day_dir}: {resolved_source_path}"
+        ) from exc
+    if resolved_source_path != expected_source_path:
+        raise ValueError(
+            f"photo_manifest.csv path does not match relative_path {relative_path}: {resolved_source_path}"
+        )
+    return resolved_source_path
 
 
 def read_photo_manifest(path: Path) -> List[Dict[str, str]]:
@@ -184,6 +226,7 @@ def compute_quality_row(
 
 
 def build_quality_rows(
+    day_dir: Path,
     manifest_rows: List[Mapping[str, str]],
     image_loader: Callable[[Path], np.ndarray] = load_grayscale_image,
 ) -> List[Dict[str, str]]:
@@ -206,15 +249,15 @@ def build_quality_rows(
                 raise ValueError("photo_manifest.csv row missing relative_path")
             if not source_path:
                 raise ValueError(f"photo_manifest.csv row missing path for {relative_path}")
-            image = image_loader(Path(source_path))
+            image = image_loader(resolve_source_path(day_dir, relative_path, source_path))
             rows.append(compute_quality_row(relative_path, image))
             progress.advance(task)
     return rows
 
 
-def build_photo_quality_annotations(manifest_csv: Path, output_path: Path) -> int:
+def build_photo_quality_annotations(day_dir: Path, manifest_csv: Path, output_path: Path) -> int:
     manifest_rows = read_photo_manifest(manifest_csv)
-    quality_rows = build_quality_rows(manifest_rows)
+    quality_rows = build_quality_rows(day_dir, manifest_rows)
     atomic_write_csv(output_path, PHOTO_QUALITY_HEADERS, quality_rows)
     return len(quality_rows)
 
@@ -231,7 +274,7 @@ def main() -> int:
         raise SystemExit(f"Manifest CSV does not exist: {manifest_csv}")
     if output_path.exists() and not args.overwrite:
         raise SystemExit(f"Output CSV already exists: {output_path}. Use --overwrite to replace it.")
-    row_count = build_photo_quality_annotations(manifest_csv, output_path)
+    row_count = build_photo_quality_annotations(day_dir, manifest_csv, output_path)
     console.print(f"Wrote {row_count} photo quality rows to {output_path}")
     return 0
 
