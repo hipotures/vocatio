@@ -32,7 +32,7 @@ def load_review_index(index_path: Path | str) -> dict[str, Any]:
         raise ValueError(f"Review index payload must be a JSON object: {resolved_index_path}")
     validate_required_fields("review index payload", REQUIRED_TOP_LEVEL_FIELDS, payload)
 
-    workspace_dir = resolve_workspace_dir(payload, resolved_index_path)
+    day_dir, workspace_dir = resolve_day_and_workspace_dir(payload, resolved_index_path)
     source_mode = str(payload.get("source_mode", "") or "").strip()
     performances = payload["performances"]
     if not isinstance(performances, list):
@@ -40,8 +40,6 @@ def load_review_index(index_path: Path | str) -> dict[str, Any]:
 
     if source_mode and source_mode != SOURCE_MODE_IMAGE_ONLY_V1:
         raise ValueError(f"Unsupported review index source_mode: {source_mode}")
-
-    day_dir = workspace_dir.parent
     normalized_performances = [
         normalize_performance(
             performance,
@@ -80,14 +78,23 @@ def load_review_index(index_path: Path | str) -> dict[str, Any]:
     return normalized_payload
 
 
-def resolve_workspace_dir(payload: Mapping[str, Any], index_path: Path) -> Path:
+def resolve_day_and_workspace_dir(payload: Mapping[str, Any], index_path: Path) -> tuple[Path, Path]:
+    day = str(payload.get("day", "") or "").strip()
+    if not day:
+        raise ValueError("review index payload field 'day' must not be empty")
     workspace_value = str(payload.get("workspace_dir", "") or "").strip()
     if not workspace_value:
         raise ValueError("review index payload field 'workspace_dir' must not be empty")
-    workspace_dir = Path(workspace_value)
-    if not workspace_dir.is_absolute():
-        workspace_dir = index_path.parent / workspace_dir
-    return workspace_dir.resolve()
+    declared_workspace_dir = Path(workspace_value)
+    if not declared_workspace_dir.is_absolute():
+        declared_workspace_dir = index_path.parent / declared_workspace_dir
+    declared_day_dir = declared_workspace_dir.parent
+    if declared_day_dir.name != day:
+        raise ValueError(
+            "review index payload day/workspace_dir mismatch: "
+            f"day={day} workspace_dir={declared_workspace_dir}"
+        )
+    return declared_day_dir.resolve(), declared_workspace_dir.resolve()
 
 
 def normalize_count(name: str, value: Any) -> int:
