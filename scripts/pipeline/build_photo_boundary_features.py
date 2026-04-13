@@ -70,6 +70,7 @@ DINO_INDEX_REQUIRED_COLUMNS = frozenset(
 )
 
 LOCAL_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3}|\.\d{6})?$")
+CANONICAL_NON_NEGATIVE_INT_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 
 
 def positive_int_arg(value: str) -> int:
@@ -198,15 +199,15 @@ def parse_local_datetime(value: str, column_name: str) -> datetime:
 
 
 def parse_non_negative_int(value: str, column_name: str) -> int:
-    text = str(value).strip()
+    text = str(value)
     if not text:
         raise ValueError(f"{column_name} is empty")
+    if not CANONICAL_NON_NEGATIVE_INT_RE.match(text):
+        raise ValueError(f"{column_name} must be a canonical non-negative integer: {value}")
     try:
         parsed = int(text)
     except ValueError as exc:
         raise ValueError(f"{column_name} must be an integer: {value}") from exc
-    if parsed < 0:
-        raise ValueError(f"{column_name} must be non-negative: {value}")
     return parsed
 
 
