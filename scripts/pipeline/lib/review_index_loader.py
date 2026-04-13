@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -28,7 +29,11 @@ def validate_required_fields(name: str, required: Iterable[str], payload: Mappin
 def load_review_index(index_path: Path | str) -> dict[str, Any]:
     index_file_path = Path(index_path).expanduser()
     if not index_file_path.is_absolute():
-        index_file_path = Path.cwd() / index_file_path
+        pwd_value = os.environ.get("PWD", "")
+        base_dir = Path(pwd_value).expanduser() if pwd_value else Path.cwd()
+        if not base_dir.is_absolute():
+            base_dir = Path.cwd()
+        index_file_path = base_dir / index_file_path
     payload = json.loads(index_file_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"Review index payload must be a JSON object: {index_file_path}")
