@@ -31,6 +31,11 @@ MINIMAL_JPEG_BYTES = (
 
 
 class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
+    def test_progress_columns_include_eta_and_elapsed(self):
+        columns = extract_jpg.build_progress_columns()
+        self.assertTrue(any(column.__class__.__name__ == "TimeRemainingColumn" for column in columns))
+        self.assertTrue(any(column.__class__.__name__ == "TimeElapsedColumn" for column in columns))
+
     def test_parse_args_uses_stage1_long_edge_defaults(self):
         with mock.patch.object(sys, "argv", ["extract_embedded_photo_jpg.py", "/tmp/day"]):
             args = extract_jpg.parse_args()
@@ -50,23 +55,23 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
     def test_build_output_paths_mirror_relative_tree(self):
         workspace_dir = Path("/tmp/day/_workspace")
         paths = extract_jpg.build_output_paths(workspace_dir, "hour10/camA/a.arw")
-        self.assertEqual(paths["thumb_path"], workspace_dir / "embedded_jpg" / "thumb" / "hour10/camA/a.arw.jpg")
-        self.assertEqual(paths["preview_path"], workspace_dir / "embedded_jpg" / "preview" / "hour10/camA/a.arw.jpg")
+        self.assertEqual(paths["thumb_path"], workspace_dir / "embedded_jpg" / "thumb" / "hour10/camA/a.jpg")
+        self.assertEqual(paths["preview_path"], workspace_dir / "embedded_jpg" / "preview" / "hour10/camA/a.jpg")
 
     def test_build_output_paths_normalizes_relative_path_before_joining(self):
         workspace_dir = Path("/tmp/day/_workspace")
         paths = extract_jpg.build_output_paths(workspace_dir, "hour10/./camA/../a.arw")
-        self.assertEqual(paths["thumb_path"], workspace_dir / "embedded_jpg" / "thumb" / "hour10" / "a.arw.jpg")
-        self.assertEqual(paths["preview_path"], workspace_dir / "embedded_jpg" / "preview" / "hour10" / "a.arw.jpg")
+        self.assertEqual(paths["thumb_path"], workspace_dir / "embedded_jpg" / "thumb" / "hour10" / "a.jpg")
+        self.assertEqual(paths["preview_path"], workspace_dir / "embedded_jpg" / "preview" / "hour10" / "a.jpg")
 
-    def test_build_output_paths_keep_distinct_outputs_for_same_stem_different_extensions(self):
+    def test_build_output_paths_use_legacy_jpg_names(self):
         workspace_dir = Path("/tmp/day/_workspace")
         raw_paths = extract_jpg.build_output_paths(workspace_dir, "hour10/IMG_0001.ARW")
         jpg_paths = extract_jpg.build_output_paths(workspace_dir, "hour10/IMG_0001.JPG")
-        self.assertEqual(raw_paths["preview_path"], workspace_dir / "embedded_jpg" / "preview" / "hour10" / "IMG_0001.ARW.jpg")
-        self.assertEqual(jpg_paths["preview_path"], workspace_dir / "embedded_jpg" / "preview" / "hour10" / "IMG_0001.JPG.jpg")
-        self.assertNotEqual(raw_paths["preview_path"], jpg_paths["preview_path"])
-        self.assertNotEqual(raw_paths["thumb_path"], jpg_paths["thumb_path"])
+        self.assertEqual(raw_paths["preview_path"], workspace_dir / "embedded_jpg" / "preview" / "hour10" / "IMG_0001.jpg")
+        self.assertEqual(jpg_paths["preview_path"], workspace_dir / "embedded_jpg" / "preview" / "hour10" / "IMG_0001.jpg")
+        self.assertEqual(raw_paths["thumb_path"], workspace_dir / "embedded_jpg" / "thumb" / "hour10" / "IMG_0001.jpg")
+        self.assertEqual(jpg_paths["thumb_path"], workspace_dir / "embedded_jpg" / "thumb" / "hour10" / "IMG_0001.jpg")
 
     def test_build_output_paths_rejects_absolute_and_escaping_relative_paths(self):
         workspace_dir = Path("/tmp/day/_workspace")
@@ -100,15 +105,15 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             source_path=Path("/tmp/day/hour10/a.arw"),
             relative_path="hour10/a.arw",
             photo_order_index="7",
-            thumb_path=workspace_dir / "embedded_jpg" / "thumb" / "hour10/a.arw.jpg",
-            preview_path=workspace_dir / "embedded_jpg" / "preview" / "hour10/a.arw.jpg",
+            thumb_path=workspace_dir / "embedded_jpg" / "thumb" / "hour10/a.jpg",
+            preview_path=workspace_dir / "embedded_jpg" / "preview" / "hour10/a.jpg",
             preview_source="embedded_preview",
         )
         self.assertEqual(row["photo_order_index"], "7")
         self.assertEqual(row["path"], "hour10/a.arw")
         self.assertEqual(row["source_path"], "hour10/a.arw")
-        self.assertEqual(row["preview_path"], "embedded_jpg/preview/hour10/a.arw.jpg")
-        self.assertEqual(row["thumb_path"], "embedded_jpg/thumb/hour10/a.arw.jpg")
+        self.assertEqual(row["preview_path"], "embedded_jpg/preview/hour10/a.jpg")
+        self.assertEqual(row["thumb_path"], "embedded_jpg/thumb/hour10/a.jpg")
 
     def test_build_manifest_row_serializes_paths_when_workspace_is_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -137,9 +142,31 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
                 preview_dimensions=(1, 1),
             )
 
-            self.assertEqual(row["preview_path"], "embedded_jpg/preview/hour10/a.arw.jpg")
-            self.assertEqual(row["thumb_path"], "embedded_jpg/thumb/hour10/a.arw.jpg")
+            self.assertEqual(row["preview_path"], "embedded_jpg/preview/hour10/a.jpg")
+            self.assertEqual(row["thumb_path"], "embedded_jpg/thumb/hour10/a.jpg")
             self.assertEqual(row["photo_order_index"], "5")
+
+    def test_build_manifest_rows_rejects_conflicting_legacy_preview_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            source_dir = day_dir / "hour10"
+            workspace_dir.mkdir(parents=True)
+            source_dir.mkdir(parents=True)
+            source_jpg = source_dir / "same.jpg"
+            source_arw = source_dir / "same.arw"
+            source_jpg.write_bytes(b"jpg")
+            source_arw.write_bytes(b"raw")
+
+            manifest_path = workspace_dir / "photo_manifest.csv"
+            with manifest_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "path", "photo_order_index"])
+                writer.writeheader()
+                writer.writerow({"relative_path": "hour10/same.jpg", "path": str(source_jpg), "photo_order_index": "0"})
+                writer.writerow({"relative_path": "hour10/same.arw", "path": str(source_arw), "photo_order_index": "1"})
+
+            with self.assertRaisesRegex(ValueError, r"Conflicting derived preview path .*hour10/same\.jpg.*hour10/same\.arw"):
+                extract_jpg.build_manifest_rows(day_dir, workspace_dir, overwrite=False)
 
     def test_normalize_preview_source_keeps_distinct_contract_values(self):
         self.assertEqual(extract_jpg.normalize_preview_source("PreviewImage"), "embedded_preview")

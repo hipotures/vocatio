@@ -20,6 +20,7 @@ from rich.progress import (
     TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
+    TimeRemainingColumn,
 )
 
 from lib.image_pipeline_contracts import PHOTO_MANIFEST_REQUIRED_COLUMNS, validate_required_columns
@@ -114,6 +115,19 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
+
+def build_progress_columns() -> tuple[object, ...]:
+    return (
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        TimeElapsedColumn(),
+    )
+
+
 def resolve_output_path(workspace_dir: Path, output_value: str) -> Path:
     workspace_dir = workspace_dir.resolve()
     candidate = Path(output_value)
@@ -150,7 +164,8 @@ def normalize_manifest_relative_path(relative_path: str) -> Path:
 def resolve_workspace_derived_output_path(workspace_dir: Path, relative_path: str, variant: str) -> Path:
     workspace_dir = workspace_dir.resolve()
     normalized_relative_path = normalize_manifest_relative_path(relative_path)
-    candidate = workspace_dir / "embedded_jpg" / variant / normalized_relative_path.parent / f"{normalized_relative_path.name}.jpg"
+    output_name = f"{normalized_relative_path.stem}.jpg"
+    candidate = workspace_dir / "embedded_jpg" / variant / normalized_relative_path.parent / output_name
     resolved_candidate = candidate.resolve()
     try:
         resolved_candidate.relative_to(workspace_dir)
@@ -164,6 +179,22 @@ def build_output_paths(workspace_dir: Path, relative_path: str) -> Dict[str, Pat
         "thumb_path": resolve_workspace_derived_output_path(workspace_dir, relative_path, "thumb"),
         "preview_path": resolve_workspace_derived_output_path(workspace_dir, relative_path, "preview"),
     }
+
+
+def validate_unique_output_paths(workspace_dir: Path, photo_rows: Sequence[Dict[str, str]]) -> None:
+    preview_owner_by_path: Dict[Path, str] = {}
+    for photo_row in photo_rows:
+        relative_path = str(photo_row.get("relative_path") or "").strip()
+        if not relative_path:
+            raise ValueError("photo_manifest.csv row missing relative_path")
+        preview_path = build_output_paths(workspace_dir, relative_path)["preview_path"]
+        existing_owner = preview_owner_by_path.get(preview_path)
+        if existing_owner is None:
+            preview_owner_by_path[preview_path] = relative_path
+            continue
+        raise ValueError(
+            f"Conflicting derived preview path {preview_path}: {existing_owner}, {relative_path}"
+        )
 
 
 def serialize_workspace_path(workspace_dir: Path, path: Path) -> str:
@@ -500,14 +531,10 @@ def build_manifest_rows(
     preview_long_edge: int = DEFAULT_PREVIEW_LONG_EDGE,
 ) -> List[Dict[str, str]]:
     photo_rows = load_photo_manifest_rows(workspace_dir)
+    validate_unique_output_paths(workspace_dir, photo_rows)
     rows: List[Dict[str, str]] = []
     with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(bar_width=40),
-        MofNCompleteColumn(),
-        TaskProgressColumn(),
-        TimeElapsedColumn(),
+        *build_progress_columns(),
         expand=False,
         console=console,
     ) as progress:
