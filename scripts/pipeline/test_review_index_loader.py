@@ -368,6 +368,27 @@ class ReviewIndexLoaderTests(unittest.TestCase):
 
             self.assertIn("day/workspace_dir mismatch", str(ctx.exception))
 
+    def test_load_review_index_rejects_relative_workspace_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            day_dir = tmp_path / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            evil_dir = tmp_path / "evil" / "20260323" / "_workspace"
+            evil_dir.mkdir(parents=True)
+            payload = {
+                "day": day_dir.name,
+                "workspace_dir": "../../evil/20260323/_workspace",
+                "performance_count": 0,
+                "photo_count": 0,
+                "performances": [],
+            }
+
+            with self.assertRaises(ValueError) as ctx:
+                review_index_loader.load_review_index(self.write_payload(workspace_dir, payload))
+
+            self.assertIn("relative workspace_dir must stay under the index directory", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
 from .image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1
@@ -29,10 +29,13 @@ def validate_required_fields(name: str, required: Iterable[str], payload: Mappin
 def load_review_index(index_path: Path | str) -> dict[str, Any]:
     index_file_path = Path(index_path).expanduser()
     if not index_file_path.is_absolute():
+        cwd_path = Path.cwd()
         pwd_value = os.environ.get("PWD", "")
-        base_dir = Path(pwd_value).expanduser() if pwd_value else Path.cwd()
-        if not base_dir.is_absolute():
-            base_dir = Path.cwd()
+        base_dir = cwd_path
+        if pwd_value:
+            pwd_path = Path(pwd_value).expanduser()
+            if pwd_path.is_absolute() and pwd_path.resolve() == cwd_path.resolve():
+                base_dir = pwd_path
         index_file_path = base_dir / index_file_path
     payload = json.loads(index_file_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -94,7 +97,8 @@ def resolve_day_and_workspace_dir(payload: Mapping[str, Any], index_path: Path) 
         raise ValueError("review index payload field 'workspace_dir' must not be empty")
     declared_workspace_dir = Path(workspace_value)
     if not declared_workspace_dir.is_absolute():
-        declared_workspace_dir = index_path.parent / declared_workspace_dir
+        relative_workspace = normalize_relative_workspace_dir(workspace_value)
+        declared_workspace_dir = index_path.parent / relative_workspace
     declared_day_dir = declared_workspace_dir.parent
     if declared_day_dir.name != day:
         raise ValueError(
@@ -102,6 +106,26 @@ def resolve_day_and_workspace_dir(payload: Mapping[str, Any], index_path: Path) 
             f"day={day} workspace_dir={declared_workspace_dir}"
         )
     return declared_day_dir.resolve(), declared_workspace_dir.resolve()
+
+
+def normalize_relative_workspace_dir(value: str) -> Path:
+    if value == ".":
+        return Path(".")
+    candidate = PurePosixPath(value)
+    if not candidate.parts:
+        raise ValueError("review index payload field 'workspace_dir' must not be empty")
+    if candidate.is_absolute():
+        raise ValueError(f"review index payload relative workspace_dir must stay under the index directory: {value}")
+    normalized_parts: list[str] = []
+    for part in candidate.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            raise ValueError(f"review index payload relative workspace_dir must stay under the index directory: {value}")
+        normalized_parts.append(part)
+    if not normalized_parts:
+        return Path(".")
+    return Path(*normalized_parts)
 
 
 def normalize_count(name: str, value: Any) -> int:
