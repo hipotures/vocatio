@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from rich.console import Console
 from rich.progress import (
@@ -250,6 +250,25 @@ def atomic_replace_from_command(path: Path, command: Sequence[str]) -> None:
         raise
 
 
+def publish_processed_jpeg(path: Path, populate: Callable[[Path], None]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_suffix = path.suffix if path.suffix else ".tmp"
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=tmp_suffix, dir=path.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        populate(tmp_path)
+        if tmp_path.stat().st_size <= 0:
+            raise ValueError(f"Refusing to replace {path.name} with empty output")
+        auto_orient_jpeg(tmp_path)
+        if tmp_path.stat().st_size <= 0:
+            raise ValueError(f"Refusing to replace {path.name} with empty output")
+        os.replace(tmp_path, path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def extract_exiftool_jpeg(source_path: Path, tag_name: str) -> bytes:
     result = subprocess.run(
         ["exiftool", "-b", f"-{tag_name}", str(source_path)],
@@ -340,8 +359,7 @@ def generate_resized_jpeg(source_path: Path, output_path: Path, max_edge: int) -
             "-q:v",
             "2",
         ]
-    atomic_replace_from_command(output_path, command)
-    auto_orient_jpeg(output_path)
+    publish_processed_jpeg(output_path, lambda tmp_path: atomic_replace_from_command(tmp_path, command))
 
 
 def extract_first_embedded_jpeg(source_path: Path, tag_names: Sequence[str]) -> Tuple[Optional[str], Optional[bytes]]:
@@ -425,8 +443,7 @@ def ensure_preview_jpg(
     tag_name, payload = extract_first_embedded_jpeg(source_path, PREVIEW_TAGS)
     preview_source = normalize_preview_source(tag_name)
     if payload is not None:
-        atomic_write_bytes(preview_path, payload)
-        auto_orient_jpeg(preview_path)
+        publish_processed_jpeg(preview_path, lambda tmp_path: atomic_write_bytes(tmp_path, payload))
         return (preview_source, read_jpeg_dimensions(preview_path))
     generate_resized_jpeg(source_path, preview_path, long_edge)
     return (PREVIEW_SOURCE_GENERATED, read_jpeg_dimensions(preview_path))
@@ -443,8 +460,7 @@ def ensure_thumb_jpg(
         return read_jpeg_dimensions(thumb_path)
     _tag_name, payload = extract_first_embedded_jpeg(source_path, THUMB_TAGS)
     if payload is not None:
-        atomic_write_bytes(thumb_path, payload)
-        auto_orient_jpeg(thumb_path)
+        publish_processed_jpeg(thumb_path, lambda tmp_path: atomic_write_bytes(tmp_path, payload))
         return read_jpeg_dimensions(thumb_path)
     generate_resized_jpeg(preview_path if preview_path.exists() else source_path, thumb_path, long_edge)
     return read_jpeg_dimensions(thumb_path)

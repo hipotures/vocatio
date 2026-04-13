@@ -108,9 +108,8 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             commands = []
 
             def fake_replace(path_value, command):
-                self.assertEqual(path_value, output_path)
                 commands.append(command)
-                output_path.write_bytes(MINIMAL_JPEG_BYTES)
+                path_value.write_bytes(MINIMAL_JPEG_BYTES)
 
             with mock.patch.object(extract_jpg, "detect_generation_backend", return_value="ffmpeg"):
                 with mock.patch.object(extract_jpg, "atomic_replace_from_command", side_effect=fake_replace):
@@ -124,6 +123,24 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
                 scale_value,
                 "scale=if(gte(iw\\,ih)\\,min(iw\\,160)\\,-2):if(gte(ih\\,iw)\\,min(ih\\,160)\\,-2)",
             )
+
+    def test_generate_resized_jpeg_cleans_up_final_output_when_auto_orient_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "source.arw"
+            output_path = Path(tmp) / "preview.jpg"
+            source_path.write_bytes(b"raw")
+
+            def fake_replace(path_value, command):
+                self.assertEqual(command[0], "magick")
+                path_value.write_bytes(MINIMAL_JPEG_BYTES)
+
+            with mock.patch.object(extract_jpg, "detect_generation_backend", return_value="magick"):
+                with mock.patch.object(extract_jpg, "atomic_replace_from_command", side_effect=fake_replace):
+                    with mock.patch.object(extract_jpg, "auto_orient_jpeg", side_effect=RuntimeError("orient failed")):
+                        with self.assertRaisesRegex(RuntimeError, "orient failed"):
+                            extract_jpg.generate_resized_jpeg(source_path, output_path, 160)
+
+            self.assertFalse(output_path.exists())
 
     def test_ensure_thumb_jpg_handles_embedded_tuple_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -144,6 +161,25 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
 
             self.assertEqual(dimensions, (1, 1))
             self.assertEqual(thumb_path.read_bytes(), MINIMAL_JPEG_BYTES)
+
+    def test_ensure_preview_jpg_cleans_up_final_output_when_embedded_auto_orient_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "a.arw"
+            preview_path = Path(tmp) / "preview.jpg"
+            source_path.write_bytes(b"raw")
+
+            original_extract = extract_jpg.extract_first_embedded_jpeg
+            original_orient = extract_jpg.auto_orient_jpeg
+            try:
+                extract_jpg.extract_first_embedded_jpeg = lambda _source, _tags: ("PreviewImage", MINIMAL_JPEG_BYTES)
+                extract_jpg.auto_orient_jpeg = lambda output_value: (_ for _ in ()).throw(RuntimeError("orient failed"))
+                with self.assertRaisesRegex(RuntimeError, "orient failed"):
+                    extract_jpg.ensure_preview_jpg(source_path, preview_path, overwrite=True)
+            finally:
+                extract_jpg.extract_first_embedded_jpeg = original_extract
+                extract_jpg.auto_orient_jpeg = original_orient
+
+            self.assertFalse(preview_path.exists())
 
     def test_ensure_preview_jpg_uses_configured_preview_long_edge(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -239,6 +275,26 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             self.assertEqual(dimensions, (1, 1))
             self.assertEqual(calls[0][0], preview_path)
             self.assertEqual(calls[0][2], 155)
+
+    def test_ensure_thumb_jpg_cleans_up_final_output_when_embedded_auto_orient_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "a.arw"
+            thumb_path = Path(tmp) / "thumb.jpg"
+            preview_path = Path(tmp) / "preview.jpg"
+            source_path.write_bytes(b"raw")
+
+            original_extract = extract_jpg.extract_first_embedded_jpeg
+            original_orient = extract_jpg.auto_orient_jpeg
+            try:
+                extract_jpg.extract_first_embedded_jpeg = lambda _source, _tags: ("ThumbnailImage", MINIMAL_JPEG_BYTES)
+                extract_jpg.auto_orient_jpeg = lambda output_value: (_ for _ in ()).throw(RuntimeError("orient failed"))
+                with self.assertRaisesRegex(RuntimeError, "orient failed"):
+                    extract_jpg.ensure_thumb_jpg(source_path, thumb_path, preview_path, overwrite=True)
+            finally:
+                extract_jpg.extract_first_embedded_jpeg = original_extract
+                extract_jpg.auto_orient_jpeg = original_orient
+
+            self.assertFalse(thumb_path.exists())
 
     def test_load_photo_manifest_rows_preserves_manifest_order(self):
         with tempfile.TemporaryDirectory() as tmp:
