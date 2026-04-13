@@ -29,6 +29,8 @@ console = Console()
 PHOTO_EMBEDDED_MANIFEST_NAME = "photo_embedded_manifest.csv"
 DEFAULT_MODEL_NAME = "dinov2_vitb14"
 DEFAULT_BATCH_SIZE = 16
+DEFAULT_DEVICE = "auto"
+DEFAULT_IMAGE_SIZE = 224
 FEATURES_DIRNAME = "features"
 EMBEDDINGS_FILENAME = "dinov2_embeddings.npy"
 INDEX_FILENAME = "dinov2_index.csv"
@@ -40,12 +42,10 @@ EMBEDDED_MANIFEST_REQUIRED_COLUMNS = frozenset(
     }
 )
 INDEX_HEADERS = [
-    "row_index",
     "relative_path",
-    "photo_order_index",
-    "preview_path",
-    "model_name",
+    "row_index",
     "embedding_dim",
+    "model_name",
 ]
 MODEL_EMBED_DIMS = {
     "dinov2_vits14": 384,
@@ -62,7 +62,7 @@ def positive_int_arg(value: str) -> int:
     return parsed
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Embed stage-1 preview JPEG files with DINOv2 and write fixed feature outputs."
     )
@@ -91,11 +91,22 @@ def parse_args() -> argparse.Namespace:
         help=f"Number of preview JPEG files to embed per backend batch. Default: {DEFAULT_BATCH_SIZE}",
     )
     parser.add_argument(
+        "--device",
+        default=DEFAULT_DEVICE,
+        help=f"Device for DINOv2 inference. Default: {DEFAULT_DEVICE}",
+    )
+    parser.add_argument(
+        "--image-size",
+        type=positive_int_arg,
+        default=DEFAULT_IMAGE_SIZE,
+        help=f"Center crop image size for DINOv2 inputs. Default: {DEFAULT_IMAGE_SIZE}",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite existing feature outputs",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def validate_required_columns(
@@ -202,12 +213,10 @@ def build_embedding_index(
     for row_index, manifest_row in enumerate(manifest_rows):
         rows.append(
             {
-                "row_index": str(row_index),
                 "relative_path": str(manifest_row.get("relative_path") or "").strip(),
-                "photo_order_index": str(manifest_row.get("photo_order_index") or "").strip(),
-                "preview_path": str(manifest_row.get("preview_path") or "").strip(),
-                "model_name": model_name,
+                "row_index": str(row_index),
                 "embedding_dim": str(embedding_dim),
+                "model_name": model_name,
             }
         )
     return rows
@@ -232,12 +241,21 @@ def atomic_write_npy(path: Path, array: np.ndarray) -> None:
 
 
 class Dinov2TorchHubBackend:
-    def __init__(self, torch_module, image_module, model_name: str):
+    def __init__(self, torch_module, image_module, model_name: str, device: str, image_size: int):
         self._torch = torch_module
         self._image_module = image_module
         self.model_name = model_name
-        self._device = "cuda" if torch_module.cuda.is_available() else "cpu"
+        self._device = self._resolve_device(device)
+        self._image_size = image_size
         self._model = None
+
+    def _resolve_device(self, device: str) -> str:
+        requested = device.strip().lower()
+        if not requested:
+            raise ValueError("DINOv2 device must not be empty")
+        if requested == "auto":
+            return "cuda" if self._torch.cuda.is_available() else "cpu"
+        return requested
 
     @property
     def embedding_dim(self) -> int:
@@ -290,13 +308,14 @@ class Dinov2TorchHubBackend:
         width, height = image.size
         if width <= 0 or height <= 0:
             raise ValueError("Preview JPEG has invalid dimensions")
-        scale = 256.0 / float(min(width, height))
-        resized_width = max(224, int(round(width * scale)))
-        resized_height = max(224, int(round(height * scale)))
+        target_short_side = int(round(self._image_size * (256.0 / 224.0)))
+        scale = target_short_side / float(min(width, height))
+        resized_width = max(self._image_size, int(round(width * scale)))
+        resized_height = max(self._image_size, int(round(height * scale)))
         resized = image.resize((resized_width, resized_height), bicubic)
-        left = max(0, (resized_width - 224) // 2)
-        top = max(0, (resized_height - 224) // 2)
-        return resized.crop((left, top, left + 224, top + 224))
+        left = max(0, (resized_width - self._image_size) // 2)
+        top = max(0, (resized_height - self._image_size) // 2)
+        return resized.crop((left, top, left + self._image_size, top + self._image_size))
 
     def _normalize_output(self, output):
         if isinstance(output, dict):
@@ -316,13 +335,13 @@ class Dinov2TorchHubBackend:
         return tensor
 
 
-def load_backend(model_name: str) -> Optional[Dinov2TorchHubBackend]:
+def load_backend(model_name: str, device: str, image_size: int) -> Optional[Dinov2TorchHubBackend]:
     try:
         import torch
         from PIL import Image
     except ImportError:
         return None
-    return Dinov2TorchHubBackend(torch, Image, model_name)
+    return Dinov2TorchHubBackend(torch, Image, model_name, device, image_size)
 
 
 def require_backend(backend):
@@ -376,11 +395,13 @@ def embed_photo_previews_dinov2(
     features_dir: Path,
     model_name: str = DEFAULT_MODEL_NAME,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    device: str = DEFAULT_DEVICE,
+    image_size: int = DEFAULT_IMAGE_SIZE,
 ) -> int:
     manifest_rows = read_embedded_manifest(manifest_csv)
     preview_paths = resolve_preview_paths(workspace_dir, manifest_rows)
-    backend = require_backend(load_backend(model_name))
-    embeddings = compute_embeddings(preview_paths, backend, batch_size)
+    backend = require_backend(load_backend(model_name, device, image_size))
+    embeddings = compute_embeddings(preview_paths, backend, batch_size).astype(np.float16, copy=False)
     output_paths = resolve_feature_output_paths(features_dir)
     index_rows = build_embedding_index(manifest_rows, int(embeddings.shape[1]), model_name)
     atomic_write_npy(output_paths["embeddings_path"], embeddings)
@@ -409,6 +430,8 @@ def main() -> int:
         features_dir=features_dir,
         model_name=args.model_name,
         batch_size=args.batch_size,
+        device=args.device,
+        image_size=args.image_size,
     )
     console.print(f"Wrote {row_count} DINOv2 index rows to {output_paths['index_path']}")
     console.print(f"Wrote DINOv2 embeddings to {output_paths['embeddings_path']}")
