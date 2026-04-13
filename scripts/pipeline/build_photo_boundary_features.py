@@ -160,6 +160,8 @@ def resolve_feature_input_paths(features_dir: Path) -> Dict[str, Path]:
 
 def normalize_day_relative_path(relative_path: str, column_name: str) -> str:
     value = relative_path.strip()
+    if "\\" in value:
+        raise ValueError(f"{column_name} must be a normalized day-relative path: {relative_path}")
     candidate = PurePosixPath(value)
     if not value or not candidate.parts:
         raise ValueError(f"{column_name} is empty")

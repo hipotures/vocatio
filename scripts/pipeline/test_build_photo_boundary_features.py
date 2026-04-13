@@ -96,6 +96,14 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
             ],
         )
 
+    def test_normalize_day_relative_path_rejects_backslashes(self):
+        with self.assertRaises(ValueError) as ctx:
+            boundary.normalize_day_relative_path(
+                "hour10\\a.jpg",
+                "photo_manifest.csv relative_path",
+            )
+        self.assertIn("normalized day-relative path", str(ctx.exception))
+
     def test_build_photo_boundary_features_writes_n_minus_1_adjacent_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"
