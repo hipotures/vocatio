@@ -8,7 +8,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from rich.console import Console
@@ -118,8 +118,29 @@ def resolve_output_path(workspace_dir: Path, output_value: str) -> Path:
     return resolved_output_path
 
 
+def normalize_manifest_relative_path(relative_path: str) -> Path:
+    candidate = PurePosixPath(relative_path.strip())
+    if not candidate.parts:
+        raise ValueError("photo_manifest.csv relative_path is empty")
+    if candidate.is_absolute():
+        raise ValueError(f"photo_manifest.csv relative_path must stay under workspace: {relative_path}")
+    normalized_parts: List[str] = []
+    for part in candidate.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not normalized_parts:
+                raise ValueError(f"photo_manifest.csv relative_path must stay under workspace: {relative_path}")
+            normalized_parts.pop()
+            continue
+        normalized_parts.append(part)
+    if not normalized_parts:
+        raise ValueError(f"photo_manifest.csv relative_path must stay under workspace: {relative_path}")
+    return Path(*normalized_parts)
+
+
 def build_output_paths(workspace_dir: Path, relative_path: str) -> Dict[str, Path]:
-    relative_jpg = Path(relative_path).with_suffix(".jpg")
+    relative_jpg = normalize_manifest_relative_path(relative_path).with_suffix(".jpg")
     return {
         "thumb_path": workspace_dir / "embedded_jpg" / "thumb" / relative_jpg,
         "preview_path": workspace_dir / "embedded_jpg" / "preview" / relative_jpg,
@@ -315,7 +336,7 @@ def generate_resized_jpeg(source_path: Path, output_path: Path, max_edge: int) -
             "-frames:v",
             "1",
             "-vf",
-            f"scale=if(gt(iw\\,ih)\\,min(iw\\,{max_edge})\\,-2):if(gt(ih\\,iw)\\,min(ih\\,{max_edge})\\,-2)",
+            f"scale=if(gte(iw\\,ih)\\,min(iw\\,{max_edge})\\,-2):if(gte(ih\\,iw)\\,min(ih\\,{max_edge})\\,-2)",
             "-q:v",
             "2",
         ]

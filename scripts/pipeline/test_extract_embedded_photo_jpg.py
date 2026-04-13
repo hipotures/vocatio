@@ -41,6 +41,19 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
         self.assertEqual(paths["thumb_path"], workspace_dir / "embedded_jpg" / "thumb" / "hour10/camA/a.jpg")
         self.assertEqual(paths["preview_path"], workspace_dir / "embedded_jpg" / "preview" / "hour10/camA/a.jpg")
 
+    def test_build_output_paths_normalizes_relative_path_before_joining(self):
+        workspace_dir = Path("/tmp/day/_workspace")
+        paths = extract_jpg.build_output_paths(workspace_dir, "hour10/./camA/../a.arw")
+        self.assertEqual(paths["thumb_path"], workspace_dir / "embedded_jpg" / "thumb" / "hour10" / "a.jpg")
+        self.assertEqual(paths["preview_path"], workspace_dir / "embedded_jpg" / "preview" / "hour10" / "a.jpg")
+
+    def test_build_output_paths_rejects_absolute_and_escaping_relative_paths(self):
+        workspace_dir = Path("/tmp/day/_workspace")
+        with self.assertRaisesRegex(ValueError, "relative_path must stay under workspace"):
+            extract_jpg.build_output_paths(workspace_dir, "/tmp/outside.arw")
+        with self.assertRaisesRegex(ValueError, "relative_path must stay under workspace"):
+            extract_jpg.build_output_paths(workspace_dir, "../../../escape.arw")
+
     def test_resolve_output_path_rejects_paths_outside_workspace(self):
         workspace_dir = Path("/tmp/day/_workspace")
         with self.assertRaises(ValueError):
@@ -86,6 +99,31 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             self.assertEqual(len(seen_paths), 1)
             self.assertEqual(seen_paths[0].suffix, ".jpg")
             self.assertEqual(output_path.read_bytes(), MINIMAL_JPEG_BYTES)
+
+    def test_generate_resized_jpeg_ffmpeg_resizes_square_images_to_long_edge_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "source.arw"
+            output_path = Path(tmp) / "preview.jpg"
+            source_path.write_bytes(b"raw")
+            commands = []
+
+            def fake_replace(path_value, command):
+                self.assertEqual(path_value, output_path)
+                commands.append(command)
+                output_path.write_bytes(MINIMAL_JPEG_BYTES)
+
+            with mock.patch.object(extract_jpg, "detect_generation_backend", return_value="ffmpeg"):
+                with mock.patch.object(extract_jpg, "atomic_replace_from_command", side_effect=fake_replace):
+                    with mock.patch.object(extract_jpg, "auto_orient_jpeg", return_value=None):
+                        extract_jpg.generate_resized_jpeg(source_path, output_path, 160)
+
+            self.assertEqual(len(commands), 1)
+            self.assertIn("-vf", commands[0])
+            scale_value = commands[0][commands[0].index("-vf") + 1]
+            self.assertEqual(
+                scale_value,
+                "scale=if(gte(iw\\,ih)\\,min(iw\\,160)\\,-2):if(gte(ih\\,iw)\\,min(ih\\,160)\\,-2)",
+            )
 
     def test_ensure_thumb_jpg_handles_embedded_tuple_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
