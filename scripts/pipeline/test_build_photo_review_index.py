@@ -235,6 +235,104 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
                 str((day_dir / "cam_a" / "IMG_0003.ARW").resolve()),
             )
 
+    def test_build_photo_review_index_emits_boundary_label_reason_when_score_is_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            relative_paths = [
+                "cam_a/IMG_0001.ARW",
+                "cam_a/IMG_0002.ARW",
+                "cam_a/IMG_0003.ARW",
+                "cam_a/IMG_0004.ARW",
+                "cam_a/IMG_0005.ARW",
+            ]
+            manifest_csv = workspace_dir / "photo_manifest.csv"
+            embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            boundary_scores_csv = workspace_dir / "photo_boundary_scores.csv"
+            segments_csv = workspace_dir / "photo_segments.csv"
+            output_path = workspace_dir / "performance_proxy_index.image.json"
+
+            self.write_manifest(manifest_csv, day_dir, relative_paths)
+            self.write_embedded_manifest(embedded_manifest_csv, relative_paths)
+            self.write_boundary_scores(boundary_scores_csv, relative_paths)
+            self.write_segments(segments_csv, relative_paths)
+            self.create_preview_files(workspace_dir, relative_paths)
+
+            with boundary_scores_csv.open("r", newline="", encoding="utf-8") as handle:
+                boundary_rows = list(csv.DictReader(handle))
+            boundary_rows[1]["boundary_score"] = "0.970000"
+            self.write_csv(
+                boundary_scores_csv,
+                [
+                    "left_relative_path",
+                    "right_relative_path",
+                    "left_start_local",
+                    "right_start_local",
+                    "time_gap_seconds",
+                    "dino_cosine_distance",
+                    "distance_zscore",
+                    "smoothed_distance_zscore",
+                    "time_gap_boost",
+                    "boundary_score",
+                    "boundary_label",
+                    "boundary_reason",
+                    "model_source",
+                ],
+                boundary_rows,
+            )
+            self.write_csv(
+                segments_csv,
+                [
+                    "set_id",
+                    "performance_number",
+                    "segment_index",
+                    "start_relative_path",
+                    "end_relative_path",
+                    "start_local",
+                    "end_local",
+                    "photo_count",
+                    "segment_confidence",
+                ],
+                [
+                    {
+                        "set_id": "imgset-000001",
+                        "performance_number": "SEG0001",
+                        "segment_index": "0",
+                        "start_relative_path": relative_paths[0],
+                        "end_relative_path": relative_paths[1],
+                        "start_local": "2026-03-23T10:00:00",
+                        "end_local": "2026-03-23T10:00:05",
+                        "photo_count": "2",
+                        "segment_confidence": "0.970000",
+                    },
+                    {
+                        "set_id": "imgset-000002",
+                        "performance_number": "SEG0002",
+                        "segment_index": "1",
+                        "start_relative_path": relative_paths[2],
+                        "end_relative_path": relative_paths[4],
+                        "start_local": "2026-03-23T10:00:10",
+                        "end_local": "2026-03-23T10:00:20",
+                        "photo_count": "3",
+                        "segment_confidence": "0.970000",
+                    },
+                ],
+            )
+
+            build_index.build_photo_review_index(
+                workspace_dir=workspace_dir,
+                manifest_csv=manifest_csv,
+                segments_csv=segments_csv,
+                embedded_manifest_csv=embedded_manifest_csv,
+                boundary_scores_csv=boundary_scores_csv,
+                output_path=output_path,
+            )
+
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["performances"][0]["photos"][1]["assignment_reason"], "boundary_label")
+            self.assertEqual(payload["performances"][1]["photos"][0]["assignment_reason"], "boundary_label")
+
     def test_build_photo_review_index_rejects_embedded_manifest_order_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"

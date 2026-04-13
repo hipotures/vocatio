@@ -373,23 +373,25 @@ def read_segments(path: Path, manifest_rows: Sequence[Mapping[str, str]]) -> Lis
     return normalized_rows
 
 
-def boundary_is_uncertain(
+def boundary_review_reason(
     boundary_row: Mapping[str, str],
     left_segment_confidence: float,
     right_segment_confidence: float,
-) -> bool:
+) -> str:
     boundary_score = parse_float(
         str(boundary_row.get("boundary_score") or ""),
         "photo_boundary_scores.csv boundary_score",
     )
     boundary_label = str(boundary_row.get("boundary_label") or "")
     if boundary_score < UNCERTAIN_BOUNDARY_SCORE_THRESHOLD:
-        return True
+        return "boundary_score"
     if left_segment_confidence < UNCERTAIN_BOUNDARY_SCORE_THRESHOLD:
-        return True
+        return "segment_confidence"
     if right_segment_confidence < UNCERTAIN_BOUNDARY_SCORE_THRESHOLD:
-        return True
-    return boundary_label != "hard"
+        return "segment_confidence"
+    if boundary_label != "hard":
+        return "boundary_label"
+    return ""
 
 
 def nearest_boundary_seconds(
@@ -459,11 +461,11 @@ def build_performance_payloads(
             float(right_segment["segment_confidence_value"]),
         )
 
-    uncertain_cut_indexes = {
-        cut_index
+    uncertain_cut_reasons = {
+        cut_index: boundary_review_reason(boundary_rows[cut_index], left_confidence, right_confidence)
         for cut_index, (left_confidence, right_confidence) in segment_confidence_by_cut_index.items()
-        if boundary_is_uncertain(boundary_rows[cut_index], left_confidence, right_confidence)
     }
+    uncertain_cut_indexes = {cut_index for cut_index, reason in uncertain_cut_reasons.items() if reason}
 
     with Progress(
         SpinnerColumn(),
@@ -491,10 +493,12 @@ def build_performance_payloads(
                 assignment_reason = ""
                 if review_first_photo and photo_index == start_index:
                     assignment_status = "review"
-                    assignment_reason = "boundary_score"
+                    assignment_reason = uncertain_cut_reasons.get(left_cut_index, "") if left_cut_index is not None else ""
                 if review_last_photo and photo_index == end_index:
                     assignment_status = "review"
-                    assignment_reason = "boundary_score"
+                    assignment_reason = (
+                        uncertain_cut_reasons.get(right_cut_index, "") if right_cut_index is not None else ""
+                    )
                 photos.append(
                     build_photo_payload(
                         manifest_row,
