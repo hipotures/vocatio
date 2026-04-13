@@ -17,6 +17,7 @@ from rich.progress import (
     TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
+    TimeRemainingColumn,
 )
 
 from lib.image_pipeline_contracts import validate_required_columns
@@ -80,6 +81,18 @@ def parse_args() -> argparse.Namespace:
         help="Overwrite an existing photo_quality.csv output",
     )
     return parser.parse_args()
+
+
+def build_progress_columns() -> tuple[object, ...]:
+    return (
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        TimeElapsedColumn(),
+    )
 
 
 def resolve_manifest_path(workspace_dir: Path, manifest_value: Optional[str]) -> Path:
@@ -258,12 +271,7 @@ def build_quality_rows(
 ) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(bar_width=40),
-        MofNCompleteColumn(),
-        TaskProgressColumn(),
-        TimeElapsedColumn(),
+        *build_progress_columns(),
         expand=False,
         console=console,
     ) as progress:

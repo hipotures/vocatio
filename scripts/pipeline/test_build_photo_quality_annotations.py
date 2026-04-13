@@ -25,6 +25,11 @@ quality = load_module("build_photo_quality_annotations_test", "scripts/pipeline/
 
 
 class BuildPhotoQualityAnnotationsTests(unittest.TestCase):
+    def test_progress_columns_include_eta_and_elapsed(self):
+        columns = quality.build_progress_columns()
+        self.assertTrue(any(column.__class__.__name__ == "TimeRemainingColumn" for column in columns))
+        self.assertTrue(any(column.__class__.__name__ == "TimeElapsedColumn" for column in columns))
+
     def test_photo_quality_headers_match_stage1_contract(self):
         self.assertEqual(
             quality.PHOTO_QUALITY_HEADERS,
