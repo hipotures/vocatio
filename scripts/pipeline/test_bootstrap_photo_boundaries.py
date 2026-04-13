@@ -146,7 +146,7 @@ class BootstrapPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(rows[1]["time_gap_boost"], "1.000000")
             self.assertEqual(rows[1]["boundary_score"], "1.000000")
             self.assertEqual(rows[1]["boundary_label"], "hard")
-            self.assertEqual(rows[1]["boundary_reason"], "gap_and_distance")
+            self.assertEqual(rows[1]["boundary_reason"], "hard_gap")
             self.assertEqual(rows[1]["model_source"], "bootstrap_heuristic")
 
     def test_bootstrap_photo_boundaries_rejects_missing_required_columns(self):
@@ -179,6 +179,40 @@ class BootstrapPhotoBoundariesTests(unittest.TestCase):
                     output_path=output_csv,
                 )
             self.assertIn("missing required columns", str(ctx.exception))
+
+    def test_bootstrap_photo_boundaries_rejects_time_gap_timestamp_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            features_csv, output_csv = self.write_boundary_features(
+                workspace_dir,
+                rows=[
+                    {
+                        "left_relative_path": "hour10/a.jpg",
+                        "right_relative_path": "hour10/b.jpg",
+                        "left_start_local": "2026-03-23T10:00:00",
+                        "right_start_local": "2026-03-23T10:00:05",
+                        "time_gap_seconds": "15.000000",
+                        "dino_cosine_distance": "0.080000",
+                        "rolling_dino_distance_mean": "0.080000",
+                        "rolling_dino_distance_std": "0.000000",
+                        "distance_zscore": "0.000000",
+                        "left_flag_blurry": "0",
+                        "right_flag_blurry": "0",
+                        "left_flag_dark": "0",
+                        "right_flag_dark": "0",
+                        "brightness_delta": "0.010000",
+                        "contrast_delta": "0.010000",
+                    }
+                ],
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                bootstrap.bootstrap_photo_boundaries(
+                    workspace_dir=workspace_dir,
+                    boundary_features_csv=features_csv,
+                    output_path=output_csv,
+                )
+            self.assertIn("time_gap_seconds does not match adjacent timestamps", str(ctx.exception))
 
 
 if __name__ == "__main__":

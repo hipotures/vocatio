@@ -259,9 +259,15 @@ def read_boundary_scores(path: Path) -> List[Dict[str, str]]:
         parse_float(str(row.get("smoothed_distance_zscore") or ""), f"{path.name} smoothed_distance_zscore")
         parse_float(str(row.get("time_gap_boost") or ""), f"{path.name} time_gap_boost")
         boundary_score = parse_float(str(row.get("boundary_score") or ""), f"{path.name} boundary_score")
+        if not 0.0 <= boundary_score <= 1.0:
+            raise ValueError(f"{path.name} boundary_score must stay within [0, 1]: {boundary_score}")
         boundary_label = str(row.get("boundary_label") or "")
         if boundary_label not in {"none", "soft", "hard"}:
             raise ValueError(f"{path.name} boundary_label must be one of none, soft, hard: {boundary_label}")
+        if boundary_label == "none" and boundary_score >= 0.75:
+            raise ValueError(f"{path.name} boundary_label none cannot carry cut score {boundary_score}")
+        if boundary_label in {"soft", "hard"} and boundary_score < 0.75:
+            raise ValueError(f"{path.name} boundary_label {boundary_label} requires boundary_score >= 0.75")
         boundary_reason = str(row.get("boundary_reason") or "")
         if not boundary_reason:
             raise ValueError(f"{path.name} boundary_reason is empty")

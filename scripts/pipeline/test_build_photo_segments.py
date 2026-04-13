@@ -229,6 +229,30 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
                 )
             self.assertIn("relative_path mismatch", str(ctx.exception))
 
+    def test_build_photo_segments_rejects_inconsistent_boundary_label_and_score(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            manifest_csv = workspace_dir / "photo_manifest.csv"
+            scores_csv = workspace_dir / "photo_boundary_scores.csv"
+            output_csv = workspace_dir / "photo_segments.csv"
+            manifest_rows = self.build_manifest_rows(day_dir, 3, datetime(2026, 3, 23, 10, 0, 0))
+            score_rows = self.build_score_rows(manifest_rows, cut_indexes=set())
+            score_rows[0]["boundary_label"] = "soft"
+            score_rows[0]["boundary_score"] = "0.000000"
+            self.write_manifest(manifest_csv, manifest_rows)
+            self.write_scores(scores_csv, score_rows)
+
+            with self.assertRaises(ValueError) as ctx:
+                segments.build_photo_segments(
+                    workspace_dir=workspace_dir,
+                    manifest_csv=manifest_csv,
+                    boundary_scores_csv=scores_csv,
+                    output_path=output_csv,
+                )
+            self.assertIn("requires boundary_score >= 0.75", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

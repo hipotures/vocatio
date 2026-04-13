@@ -218,9 +218,15 @@ def read_boundary_features(path: Path) -> List[Dict[str, str]]:
         )
         left_start_local = str(row.get("left_start_local") or "")
         right_start_local = str(row.get("right_start_local") or "")
-        parse_local_datetime(left_start_local, f"{path.name} left_start_local")
-        parse_local_datetime(right_start_local, f"{path.name} right_start_local")
-        parse_float(str(row.get("time_gap_seconds") or ""), f"{path.name} time_gap_seconds")
+        left_dt = parse_local_datetime(left_start_local, f"{path.name} left_start_local")
+        right_dt = parse_local_datetime(right_start_local, f"{path.name} right_start_local")
+        time_gap_seconds = parse_float(str(row.get("time_gap_seconds") or ""), f"{path.name} time_gap_seconds")
+        expected_gap_seconds = float((right_dt - left_dt).total_seconds())
+        if abs(time_gap_seconds - expected_gap_seconds) > 0.0000005:
+            raise ValueError(
+                f"{path.name} time_gap_seconds does not match adjacent timestamps at row {row_number}: "
+                f"expected {format_float(expected_gap_seconds)}, got {format_float(time_gap_seconds)}"
+            )
         dino_cosine_distance = parse_float(
             str(row.get("dino_cosine_distance") or ""),
             f"{path.name} dino_cosine_distance",
@@ -252,9 +258,7 @@ def read_boundary_features(path: Path) -> List[Dict[str, str]]:
                 "right_relative_path": right_relative_path,
                 "left_start_local": left_start_local,
                 "right_start_local": right_start_local,
-                "time_gap_seconds": format_float(
-                    parse_float(str(row.get("time_gap_seconds") or ""), f"{path.name} time_gap_seconds")
-                ),
+                "time_gap_seconds": format_float(time_gap_seconds),
                 "dino_cosine_distance": format_float(dino_cosine_distance),
                 "distance_zscore": format_float(
                     parse_float(str(row.get("distance_zscore") or ""), f"{path.name} distance_zscore")
@@ -313,7 +317,7 @@ def compute_score_row(
     boundary_reason = "distance_only"
     if hard_cut:
         boundary_label = "hard"
-        boundary_reason = "gap_and_distance" if time_gap_seconds >= soft_gap_seconds else "hard_gap"
+        boundary_reason = "hard_gap"
     elif boundary_score >= 0.75:
         boundary_label = "soft"
         boundary_reason = "gap_and_distance" if time_gap_seconds >= soft_gap_seconds else "distance_zscore"
