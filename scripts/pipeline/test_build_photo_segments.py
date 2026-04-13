@@ -149,6 +149,37 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
                 ],
             )
 
+    def test_build_photo_segments_accepts_soft_cut_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            manifest_csv = workspace_dir / "photo_manifest.csv"
+            scores_csv = workspace_dir / "photo_boundary_scores.csv"
+            output_csv = workspace_dir / "photo_segments.csv"
+            manifest_rows = self.build_manifest_rows(day_dir, 18, datetime(2026, 3, 23, 10, 0, 0))
+            score_rows = self.build_score_rows(manifest_rows, cut_indexes={8}, hard_gap_indexes=set())
+            score_rows[8]["boundary_label"] = "soft"
+            score_rows[8]["boundary_reason"] = "distance_zscore"
+            score_rows[8]["boundary_score"] = "0.800000"
+            self.write_manifest(manifest_csv, manifest_rows)
+            self.write_scores(scores_csv, score_rows)
+
+            row_count = segments.build_photo_segments(
+                workspace_dir=workspace_dir,
+                manifest_csv=manifest_csv,
+                boundary_scores_csv=scores_csv,
+                output_path=output_csv,
+            )
+
+            self.assertEqual(row_count, 2)
+            with output_csv.open("r", newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["end_relative_path"], "hour10/img_0008.jpg")
+            self.assertEqual(rows[1]["start_relative_path"], "hour10/img_0009.jpg")
+            self.assertEqual(rows[0]["segment_confidence"], "0.800000")
+            self.assertEqual(rows[1]["segment_confidence"], "0.800000")
+
     def test_build_photo_segments_merges_small_segments_below_minimum_size(self):
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"

@@ -389,7 +389,9 @@ def apply_minimum_segment_safeguards(
     min_segment_seconds: float,
 ) -> List[int]:
     kept_cuts: Set[int] = {
-        index for index, row in enumerate(boundary_rows) if str(row["boundary_label"]) == "hard"
+        index
+        for index, row in enumerate(boundary_rows)
+        if str(row["boundary_label"]) in {"soft", "hard"}
     }
     while True:
         ranges = build_segment_ranges(len(manifest_rows), sorted(kept_cuts))
