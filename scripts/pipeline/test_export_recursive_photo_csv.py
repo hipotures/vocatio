@@ -22,6 +22,11 @@ export_csv = load_module("export_recursive_photo_csv_test", "scripts/pipeline/ex
 
 
 class ExportRecursivePhotoCsvTests(unittest.TestCase):
+    def test_resolve_output_path_defaults_to_photo_manifest_csv(self):
+        workspace_dir = Path("/tmp/day_workspace")
+        output_path = export_csv.resolve_output_path(workspace_dir, None, "p-main")
+        self.assertEqual(output_path, workspace_dir / "photo_manifest.csv")
+
     def test_collect_source_files_ignores_workspace_and_sorts_by_time_subsec_then_relative_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"

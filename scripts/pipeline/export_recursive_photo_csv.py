@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        help="Output CSV filename or absolute path. Default: WORKSPACE/<stream-id>.csv",
+        help="Output CSV filename or absolute path. Default: WORKSPACE/photo_manifest.csv",
     )
     parser.add_argument(
         "--stream-id",
@@ -172,7 +172,7 @@ def build_manifest_rows(
 
 def resolve_output_path(workspace_dir: Path, output_value: Optional[str], stream_id: str) -> Path:
     if not output_value:
-        return workspace_dir / f"{stream_id}.csv"
+        return workspace_dir / "photo_manifest.csv"
     candidate = Path(output_value)
     if candidate.is_absolute():
         return candidate
