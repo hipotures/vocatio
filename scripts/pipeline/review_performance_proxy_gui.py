@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
+from lib import review_index_loader
+
 
 def ensure_venv_python() -> None:
     if os.environ.get("SCRIPTOZA_VENV_BOOTSTRAPPED") == "1":
@@ -1717,7 +1719,11 @@ def main() -> int:
     if not state_path.is_absolute():
         state_path = workspace_dir / state_path
 
-    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    try:
+        payload = review_index_loader.load_review_index(index_path)
+    except ValueError as error:
+        print(f"Error: {error}")
+        return 1
 
     app = QApplication(sys.argv)
     window = MainWindow(index_path, state_path, payload, detect_ui_scale(app, args.ui_scale))
