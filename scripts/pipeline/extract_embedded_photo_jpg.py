@@ -48,8 +48,8 @@ MANIFEST_HEADERS = [
 ]
 PREVIEW_TAGS = ("PreviewImage", "JpgFromRaw")
 THUMB_TAGS = ("ThumbnailImage",)
-PREVIEW_MAX_EDGE = 1600
-THUMB_MAX_EDGE = 400
+DEFAULT_PREVIEW_LONG_EDGE = 1600
+DEFAULT_THUMB_LONG_EDGE = 160
 PHOTO_MANIFEST_NAME = "photo_manifest.csv"
 PREVIEW_SOURCE_EMBEDDED = "embedded_preview"
 PREVIEW_SOURCE_EMBEDDED_RAW = "embedded_jpg_from_raw"
@@ -84,7 +84,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         default="photo_embedded_manifest.csv",
-        help="Manifest filename inside workspace or absolute path. Default: photo_embedded_manifest.csv",
+        help="Manifest filename or relative path inside workspace. Default: photo_embedded_manifest.csv",
+    )
+    parser.add_argument(
+        "--thumb-long-edge",
+        type=int,
+        default=DEFAULT_THUMB_LONG_EDGE,
+        help="Resize thumbs so the longer edge fits within this size. Default: 160",
+    )
+    parser.add_argument(
+        "--preview-long-edge",
+        type=int,
+        default=DEFAULT_PREVIEW_LONG_EDGE,
+        help="Resize previews so the longer edge fits within this size. Default: 1600",
     )
     parser.add_argument(
         "--overwrite",
@@ -94,10 +106,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def resolve_output_path(workspace_dir: Path, output_value: str) -> Path:
+    workspace_dir = workspace_dir.resolve()
     candidate = Path(output_value)
-    if candidate.is_absolute():
-        return candidate
-    return workspace_dir / candidate
+    output_path = candidate if candidate.is_absolute() else workspace_dir / candidate
+    resolved_output_path = output_path.resolve()
+    try:
+        resolved_output_path.relative_to(workspace_dir)
+    except ValueError as exc:
+        raise ValueError(f"Output path must stay under {workspace_dir}") from exc
+    return resolved_output_path
 
 
 def build_output_paths(workspace_dir: Path, relative_path: str) -> Dict[str, Path]:
@@ -231,6 +248,38 @@ def detect_generation_backend() -> str:
     raise RuntimeError("Install ImageMagick or ffmpeg to generate JPG files.")
 
 
+def auto_orient_jpeg(jpeg_path: Path) -> None:
+    backend = detect_generation_backend()
+    if backend == "magick":
+        command = [
+            "magick",
+            str(jpeg_path),
+            "-auto-orient",
+            "-strip",
+            "-sampling-factor",
+            "4:4:4",
+            "-depth",
+            "8",
+            "-quality",
+            "90",
+        ]
+    else:
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(jpeg_path),
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+        ]
+    atomic_replace_from_command(jpeg_path, command)
+
+
 def generate_resized_jpeg(source_path: Path, output_path: Path, max_edge: int) -> None:
     backend = detect_generation_backend()
     if backend == "magick":
@@ -269,6 +318,7 @@ def generate_resized_jpeg(source_path: Path, output_path: Path, max_edge: int) -
             "2",
         ]
     atomic_replace_from_command(output_path, command)
+    auto_orient_jpeg(output_path)
 
 
 def extract_first_embedded_jpeg(source_path: Path, tag_names: Sequence[str]) -> Tuple[Optional[str], Optional[bytes]]:
@@ -319,15 +369,21 @@ def read_jpeg_dimensions(path: Path) -> Tuple[int, int]:
     return parse_jpeg_dimensions(path.read_bytes())
 
 
-def ensure_preview_jpg(source_path: Path, preview_path: Path, overwrite: bool) -> Tuple[str, Tuple[int, int]]:
+def ensure_preview_jpg(
+    source_path: Path,
+    preview_path: Path,
+    overwrite: bool,
+    long_edge: int = DEFAULT_PREVIEW_LONG_EDGE,
+) -> Tuple[str, Tuple[int, int]]:
     tag_name, payload = extract_first_embedded_jpeg(source_path, PREVIEW_TAGS)
     preview_source = normalize_preview_source(tag_name)
     if preview_path.exists() and not overwrite:
         return (preview_source, read_jpeg_dimensions(preview_path))
     if payload is not None:
         atomic_write_bytes(preview_path, payload)
-        return (preview_source, parse_jpeg_dimensions(payload))
-    generate_resized_jpeg(source_path, preview_path, PREVIEW_MAX_EDGE)
+        auto_orient_jpeg(preview_path)
+        return (preview_source, read_jpeg_dimensions(preview_path))
+    generate_resized_jpeg(source_path, preview_path, long_edge)
     return (PREVIEW_SOURCE_GENERATED, read_jpeg_dimensions(preview_path))
 
 
@@ -336,14 +392,16 @@ def ensure_thumb_jpg(
     thumb_path: Path,
     preview_path: Path,
     overwrite: bool,
+    long_edge: int = DEFAULT_THUMB_LONG_EDGE,
 ) -> Tuple[int, int]:
     if thumb_path.exists() and not overwrite:
         return read_jpeg_dimensions(thumb_path)
     _tag_name, payload = extract_first_embedded_jpeg(source_path, THUMB_TAGS)
     if payload is not None:
         atomic_write_bytes(thumb_path, payload)
-        return parse_jpeg_dimensions(payload)
-    generate_resized_jpeg(preview_path if preview_path.exists() else source_path, thumb_path, THUMB_MAX_EDGE)
+        auto_orient_jpeg(thumb_path)
+        return read_jpeg_dimensions(thumb_path)
+    generate_resized_jpeg(preview_path if preview_path.exists() else source_path, thumb_path, long_edge)
     return read_jpeg_dimensions(thumb_path)
 
 
@@ -351,6 +409,8 @@ def build_manifest_rows(
     day_dir: Path,
     workspace_dir: Path,
     overwrite: bool,
+    thumb_long_edge: int = DEFAULT_THUMB_LONG_EDGE,
+    preview_long_edge: int = DEFAULT_PREVIEW_LONG_EDGE,
 ) -> List[Dict[str, str]]:
     photo_rows = load_photo_manifest_rows(workspace_dir)
     rows: List[Dict[str, str]] = []
@@ -382,12 +442,14 @@ def build_manifest_rows(
                 source_path,
                 output_paths["preview_path"],
                 overwrite,
+                preview_long_edge,
             )
             thumb_dimensions = ensure_thumb_jpg(
                 source_path,
                 output_paths["thumb_path"],
                 output_paths["preview_path"],
                 overwrite,
+                thumb_long_edge,
             )
             rows.append(
                 build_manifest_row(
@@ -410,8 +472,10 @@ def extract_embedded_photo_jpg(
     workspace_dir: Path,
     output_path: Path,
     overwrite: bool,
+    thumb_long_edge: int = DEFAULT_THUMB_LONG_EDGE,
+    preview_long_edge: int = DEFAULT_PREVIEW_LONG_EDGE,
 ) -> int:
-    rows = build_manifest_rows(day_dir, workspace_dir, overwrite)
+    rows = build_manifest_rows(day_dir, workspace_dir, overwrite, thumb_long_edge, preview_long_edge)
     atomic_write_csv(output_path, MANIFEST_HEADERS, rows)
     return len(rows)
 
@@ -428,6 +492,8 @@ def main() -> int:
         workspace_dir=workspace_dir,
         output_path=output_path,
         overwrite=args.overwrite,
+        thumb_long_edge=args.thumb_long_edge,
+        preview_long_edge=args.preview_long_edge,
     )
     console.print(f"Wrote {row_count} embedded JPG rows to {output_path}")
     return 0

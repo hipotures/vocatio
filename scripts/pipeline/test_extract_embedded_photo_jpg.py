@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
@@ -28,11 +29,24 @@ MINIMAL_JPEG_BYTES = (
 
 
 class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
+    def test_parse_args_uses_stage1_long_edge_defaults(self):
+        with mock.patch.object(sys, "argv", ["extract_embedded_photo_jpg.py", "/tmp/day"]):
+            args = extract_jpg.parse_args()
+        self.assertEqual(args.thumb_long_edge, 160)
+        self.assertEqual(args.preview_long_edge, 1600)
+
     def test_build_output_paths_mirror_relative_tree(self):
         workspace_dir = Path("/tmp/day/_workspace")
         paths = extract_jpg.build_output_paths(workspace_dir, "hour10/camA/a.arw")
         self.assertEqual(paths["thumb_path"], workspace_dir / "embedded_jpg" / "thumb" / "hour10/camA/a.jpg")
         self.assertEqual(paths["preview_path"], workspace_dir / "embedded_jpg" / "preview" / "hour10/camA/a.jpg")
+
+    def test_resolve_output_path_rejects_paths_outside_workspace(self):
+        workspace_dir = Path("/tmp/day/_workspace")
+        with self.assertRaises(ValueError):
+            extract_jpg.resolve_output_path(workspace_dir, "/tmp/outside.csv")
+        with self.assertRaises(ValueError):
+            extract_jpg.resolve_output_path(workspace_dir, "../outside.csv")
 
     def test_build_manifest_row_serializes_contract_paths(self):
         workspace_dir = Path("/tmp/day/_workspace")
@@ -62,14 +76,88 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             source_path.write_bytes(b"raw")
 
             original_extract = extract_jpg.extract_first_embedded_jpeg
+            original_orient = extract_jpg.auto_orient_jpeg
             try:
                 extract_jpg.extract_first_embedded_jpeg = lambda _source, _tags: ("ThumbnailImage", MINIMAL_JPEG_BYTES)
+                extract_jpg.auto_orient_jpeg = lambda output_value: None
                 dimensions = extract_jpg.ensure_thumb_jpg(source_path, thumb_path, preview_path, overwrite=True)
             finally:
                 extract_jpg.extract_first_embedded_jpeg = original_extract
+                extract_jpg.auto_orient_jpeg = original_orient
 
             self.assertEqual(dimensions, (1, 1))
             self.assertEqual(thumb_path.read_bytes(), MINIMAL_JPEG_BYTES)
+
+    def test_ensure_preview_jpg_uses_configured_preview_long_edge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "a.arw"
+            preview_path = Path(tmp) / "preview.jpg"
+            source_path.write_bytes(b"raw")
+
+            original_extract = extract_jpg.extract_first_embedded_jpeg
+            original_generate = extract_jpg.generate_resized_jpeg
+            original_orient = extract_jpg.auto_orient_jpeg
+            try:
+                extract_jpg.extract_first_embedded_jpeg = lambda _source, _tags: (None, None)
+                calls = []
+
+                def fake_generate(source_value, output_value, max_edge):
+                    calls.append((source_value, output_value, max_edge))
+                    output_value.write_bytes(MINIMAL_JPEG_BYTES)
+
+                extract_jpg.generate_resized_jpeg = fake_generate
+                extract_jpg.auto_orient_jpeg = lambda output_value: None
+                preview_source, dimensions = extract_jpg.ensure_preview_jpg(
+                    source_path,
+                    preview_path,
+                    overwrite=True,
+                    long_edge=777,
+                )
+            finally:
+                extract_jpg.extract_first_embedded_jpeg = original_extract
+                extract_jpg.generate_resized_jpeg = original_generate
+                extract_jpg.auto_orient_jpeg = original_orient
+
+            self.assertEqual(preview_source, "generated_from_source")
+            self.assertEqual(dimensions, (1, 1))
+            self.assertEqual(calls[0][2], 777)
+
+    def test_ensure_thumb_jpg_uses_configured_thumb_long_edge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "a.arw"
+            thumb_path = Path(tmp) / "thumb.jpg"
+            preview_path = Path(tmp) / "preview.jpg"
+            source_path.write_bytes(b"raw")
+            preview_path.write_bytes(MINIMAL_JPEG_BYTES)
+
+            original_extract = extract_jpg.extract_first_embedded_jpeg
+            original_generate = extract_jpg.generate_resized_jpeg
+            original_orient = extract_jpg.auto_orient_jpeg
+            try:
+                extract_jpg.extract_first_embedded_jpeg = lambda _source, _tags: (None, None)
+                calls = []
+
+                def fake_generate(source_value, output_value, max_edge):
+                    calls.append((source_value, output_value, max_edge))
+                    output_value.write_bytes(MINIMAL_JPEG_BYTES)
+
+                extract_jpg.generate_resized_jpeg = fake_generate
+                extract_jpg.auto_orient_jpeg = lambda output_value: None
+                dimensions = extract_jpg.ensure_thumb_jpg(
+                    source_path,
+                    thumb_path,
+                    preview_path,
+                    overwrite=True,
+                    long_edge=155,
+                )
+            finally:
+                extract_jpg.extract_first_embedded_jpeg = original_extract
+                extract_jpg.generate_resized_jpeg = original_generate
+                extract_jpg.auto_orient_jpeg = original_orient
+
+            self.assertEqual(dimensions, (1, 1))
+            self.assertEqual(calls[0][0], preview_path)
+            self.assertEqual(calls[0][2], 155)
 
     def test_load_photo_manifest_rows_preserves_manifest_order(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -121,14 +209,20 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             original_preview = extract_jpg.ensure_preview_jpg
             original_thumb = extract_jpg.ensure_thumb_jpg
             try:
-                def fake_preview(source_path, preview_path, overwrite):
+                def fake_preview(source_path, preview_path, overwrite, long_edge=extract_jpg.DEFAULT_PREVIEW_LONG_EDGE):
                     preview_path.parent.mkdir(parents=True, exist_ok=True)
                     preview_path.write_bytes(MINIMAL_JPEG_BYTES)
                     if source_path.name == "b.jpg":
                         return ("embedded_preview", (1, 1))
                     return ("generated_from_source", (1, 1))
 
-                def fake_thumb(source_path, thumb_path, preview_path, overwrite):
+                def fake_thumb(
+                    source_path,
+                    thumb_path,
+                    preview_path,
+                    overwrite,
+                    long_edge=extract_jpg.DEFAULT_THUMB_LONG_EDGE,
+                ):
                     thumb_path.parent.mkdir(parents=True, exist_ok=True)
                     thumb_path.write_bytes(MINIMAL_JPEG_BYTES)
                     return (1, 1)
