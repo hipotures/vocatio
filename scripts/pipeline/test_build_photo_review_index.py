@@ -531,6 +531,81 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
 
             self.assertIn("workspace_dir must stay under day_dir", str(ctx.exception))
 
+    def test_build_photo_review_index_rejects_workspace_symlink_outside_day_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            day_dir = tmp_path / "20260323"
+            day_dir.mkdir(parents=True)
+            external_workspace = tmp_path / "external_workspace"
+            external_workspace.mkdir(parents=True)
+            workspace_link = day_dir / "_workspace"
+            workspace_link.symlink_to(external_workspace, target_is_directory=True)
+            relative_paths = [
+                "cam_a/IMG_0001.ARW",
+                "cam_a/IMG_0002.ARW",
+                "cam_a/IMG_0003.ARW",
+                "cam_a/IMG_0004.ARW",
+                "cam_a/IMG_0005.ARW",
+            ]
+            manifest_csv = external_workspace / "photo_manifest.csv"
+            embedded_manifest_csv = external_workspace / "photo_embedded_manifest.csv"
+            boundary_scores_csv = external_workspace / "photo_boundary_scores.csv"
+            segments_csv = external_workspace / "photo_segments.csv"
+            output_path = external_workspace / "performance_proxy_index.image.json"
+
+            self.write_manifest(manifest_csv, day_dir, relative_paths)
+            self.write_embedded_manifest(embedded_manifest_csv, relative_paths)
+            self.write_boundary_scores(boundary_scores_csv, relative_paths)
+            self.write_segments(segments_csv, relative_paths)
+            self.create_preview_files(external_workspace, relative_paths)
+
+            with self.assertRaises(ValueError) as ctx:
+                build_index.build_photo_review_index(
+                    day_dir=day_dir,
+                    workspace_dir=workspace_link,
+                    manifest_csv=manifest_csv,
+                    segments_csv=segments_csv,
+                    embedded_manifest_csv=embedded_manifest_csv,
+                    boundary_scores_csv=boundary_scores_csv,
+                    output_path=output_path,
+                )
+
+            self.assertIn("workspace_dir must stay under day_dir", str(ctx.exception))
+
+    def test_read_photo_manifest_accepts_equal_datetimes_with_different_fraction_precision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            manifest_csv = workspace_dir / "photo_manifest.csv"
+            self.write_csv(
+                manifest_csv,
+                ["relative_path", "path", "photo_order_index", "start_local", "stream_id", "device", "filename"],
+                [
+                    {
+                        "relative_path": "cam_a/IMG_0001.ARW",
+                        "path": str(day_dir / "cam_a" / "IMG_0001.ARW"),
+                        "photo_order_index": "0",
+                        "start_local": "2026-03-23T10:00:00.123000",
+                        "stream_id": "p-main",
+                        "device": "",
+                        "filename": "IMG_0001.ARW",
+                    },
+                    {
+                        "relative_path": "cam_a/IMG_0002.ARW",
+                        "path": str(day_dir / "cam_a" / "IMG_0002.ARW"),
+                        "photo_order_index": "1",
+                        "start_local": "2026-03-23T10:00:00.123",
+                        "stream_id": "p-main",
+                        "device": "",
+                        "filename": "IMG_0002.ARW",
+                    },
+                ],
+            )
+
+            rows = build_index.read_photo_manifest(day_dir, manifest_csv)
+            self.assertEqual([row["relative_path"] for row in rows], ["cam_a/IMG_0001.ARW", "cam_a/IMG_0002.ARW"])
+
 
 if __name__ == "__main__":
     unittest.main()

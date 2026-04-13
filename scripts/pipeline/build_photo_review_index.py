@@ -541,7 +541,8 @@ def build_photo_review_index(
     output_path: Path,
 ) -> int:
     declared_day_dir = day_dir if day_dir is not None else workspace_dir.parent
-    if workspace_dir.parent.resolve() != declared_day_dir.resolve():
+    resolved_day_dir = declared_day_dir.resolve()
+    if workspace_dir.parent.resolve() != resolved_day_dir or workspace_dir.resolve().parent != resolved_day_dir:
         raise ValueError(
             f"workspace_dir must stay under day_dir for image-only review index: {workspace_dir} vs {declared_day_dir}"
         )
