@@ -48,6 +48,7 @@ Rationale:
 - Recursive discovery must ignore `_workspace` completely.
 - The pipeline must never auto-delete, deduplicate, prune, or suppress photos.
 - Removing `_workspace` must allow a full deterministic rebuild from source photos.
+- Canonical photo order must match the best recoverable shot order from source metadata. This order is a hard correctness requirement because all boundary records are derived from adjacent photos.
 - DINOv2 is required in stage 1. Missing model or runtime prerequisites are hard failures for the embedding step.
 - The current audio-first pipeline remains behaviorally unchanged.
 
@@ -82,9 +83,18 @@ Artifacts:
 Contract rules:
 
 - `relative_path` is the primary photo key across all manifest-like artifacts
+- `relative_path` is also the durable application-level photo identifier for stage 1
 - `relative_path` is always relative to `DAY` and written in POSIX form
 - row ordering is deterministic and follows `photo_manifest.csv`
+- canonical sort order is a hard contract:
+  - primary: normalized capture timestamp in chronological order
+  - secondary: normalized capture subseconds where available
+  - tertiary: `relative_path`
+- `photo_manifest.csv` should materialize this canonical ordering as `photo_order_index` so downstream steps can preserve adjacency without re-sorting from scratch
+- if full EXIF timestamp precision is unavailable, the script must apply a documented fallback policy and still emit a deterministic total ordering
+- downstream artifacts must preserve manifest order rather than recomputing their own independent ordering
 - scripts validate required input columns before doing work
+- `stream_id` in the image-only pipeline is a logical day-level photo stream identifier, typically one value for the whole photo branch unless explicitly overridden, and must not be inferred from hour subdirectories or other recursive container folders
 
 ### Boundary Layer
 
@@ -114,6 +124,16 @@ Contract rules:
 - synthetic identifiers are stable and deterministic:
   - `performance_number`: `SEG0001`, `SEG0002`, ...
   - `set_id`: `imgset-000001`, `imgset-000002`, ...
+- `photo_segments.csv` must expose a minimum operational schema:
+  - `set_id`
+  - `performance_number`
+  - `segment_index`
+  - `start_relative_path`
+  - `end_relative_path`
+  - `start_local`
+  - `end_local`
+  - `photo_count`
+  - `segment_confidence`
 
 ## Script Responsibilities
 
@@ -195,9 +215,9 @@ The loader is responsible for:
 - reading the JSON payload
 - recognizing the payload variant
 - validating the minimum supported schema
-- normalizing the payload to one internal GUI model
+- normalizing the payload to one shared GUI input model that remains close to the current raw-performance shape
 
-The GUI continues to operate on normalized display sets rather than raw variant-specific payloads.
+The loader should not materialize final `display_sets`. Existing GUI logic should continue to build `display_sets` from normalized input payload data so that split/merge behavior changes stay narrowly scoped.
 
 ## Payload Strategy
 
@@ -225,9 +245,16 @@ Optional variant-specific fields:
 - `source_artifacts`
 - `build_metadata`
 
-## Minimum Normalized GUI Model
+Path policy for the image-only payload on disk:
 
-After loading, the GUI should be able to work with a normalized structure that provides these performance-level fields:
+- `source_path` should be stored relative to `DAY`
+- `proxy_path` should be stored relative to `workspace_dir`
+- the loader resolves these to absolute paths for GUI runtime use
+- normalized GUI input may contain resolved absolute paths even if the serialized payload stores relative ones
+
+## Minimum Normalized GUI Input
+
+After loading, the GUI should be able to work with a normalized raw-input structure that provides these performance-level fields:
 
 - `set_id`
 - `base_set_id`
@@ -249,6 +276,7 @@ After loading, the GUI should be able to work with a normalized structure that p
 
 And these photo-level fields:
 
+- `photo_id`
 - `filename`
 - `source_path`
 - `proxy_path`
@@ -263,9 +291,11 @@ And these photo-level fields:
 
 For stage 1 image-only payloads:
 
+- `photo_id == relative_path`
 - `adjusted_start_local == photo_start_local`
 - `proxy_path` points to the extracted preview JPEG
 - `assignment_status` marks review priority around uncertain or low-confidence boundaries
+- split and review references must use the durable photo identifier rather than basename-only filenames
 
 ## Boundary And Segmentation Strategy
 
@@ -331,6 +361,15 @@ Run a reduced chain:
 
 This catches integration breakage without requiring GUI interaction.
 
+### Level 2.5: Loader Contract Tests
+
+Validate the compatibility boundary directly:
+
+- audio-first payload in -> normalized GUI input out
+- image-only payload in -> normalized GUI input out
+- missing required fields -> clear validation error
+- relative path payload fields -> correctly resolved runtime paths
+
 ### Level 3: GUI Smoke Test
 
 Run a very small day fixture through:
@@ -359,4 +398,3 @@ Later stages can build on this design by adding:
 - reviewed index output
 - supervised boundary-label export
 - reusable boundary model training and prediction
-
