@@ -68,6 +68,25 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
         self.assertEqual(extract_jpg.normalize_preview_source("JpgFromRaw"), "embedded_jpg_from_raw")
         self.assertEqual(extract_jpg.normalize_preview_source(None), "generated_from_source")
 
+    def test_atomic_replace_from_command_preserves_output_extension_for_temp_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "preview.jpg"
+            seen_paths = []
+
+            def fake_run(command, capture_output, check):
+                self.assertTrue(capture_output)
+                self.assertTrue(check)
+                temp_path = Path(command[-1])
+                seen_paths.append(temp_path)
+                temp_path.write_bytes(MINIMAL_JPEG_BYTES)
+
+            with mock.patch.object(extract_jpg.subprocess, "run", side_effect=fake_run):
+                extract_jpg.atomic_replace_from_command(output_path, ["ffmpeg", "-i", "input.arw"])
+
+            self.assertEqual(len(seen_paths), 1)
+            self.assertEqual(seen_paths[0].suffix, ".jpg")
+            self.assertEqual(output_path.read_bytes(), MINIMAL_JPEG_BYTES)
+
     def test_ensure_thumb_jpg_handles_embedded_tuple_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             source_path = Path(tmp) / "a.arw"
@@ -121,6 +140,30 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             self.assertEqual(preview_source, "generated_from_source")
             self.assertEqual(dimensions, (1, 1))
             self.assertEqual(calls[0][2], 777)
+
+    def test_ensure_preview_jpg_reuses_existing_preview_without_relabeling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "a.arw"
+            preview_path = Path(tmp) / "preview.jpg"
+            source_path.write_bytes(b"raw")
+            preview_path.write_bytes(MINIMAL_JPEG_BYTES)
+
+            original_extract = extract_jpg.extract_first_embedded_jpeg
+            try:
+                def fail_extract(_source, _tags):
+                    raise AssertionError("existing preview should short-circuit before extraction")
+
+                extract_jpg.extract_first_embedded_jpeg = fail_extract
+                preview_source, dimensions = extract_jpg.ensure_preview_jpg(
+                    source_path,
+                    preview_path,
+                    overwrite=False,
+                )
+            finally:
+                extract_jpg.extract_first_embedded_jpeg = original_extract
+
+            self.assertEqual(preview_source, "existing_preview")
+            self.assertEqual(dimensions, (1, 1))
 
     def test_ensure_thumb_jpg_uses_configured_thumb_long_edge(self):
         with tempfile.TemporaryDirectory() as tmp:

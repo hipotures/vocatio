@@ -54,6 +54,7 @@ PHOTO_MANIFEST_NAME = "photo_manifest.csv"
 PREVIEW_SOURCE_EMBEDDED = "embedded_preview"
 PREVIEW_SOURCE_EMBEDDED_RAW = "embedded_jpg_from_raw"
 PREVIEW_SOURCE_GENERATED = "generated_from_source"
+PREVIEW_SOURCE_EXISTING = "existing_preview"
 JPEG_SOI = b"\xff\xd8"
 SOF_MARKERS = {
     0xC0,
@@ -212,7 +213,8 @@ def atomic_write_bytes(path: Path, payload: bytes) -> None:
 
 def atomic_replace_from_command(path: Path, command: Sequence[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_suffix = f".tmp{path.suffix}" if path.suffix else ".tmp"
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=tmp_suffix, dir=path.parent)
     os.close(fd)
     tmp_path = Path(tmp_name)
     try:
@@ -375,10 +377,10 @@ def ensure_preview_jpg(
     overwrite: bool,
     long_edge: int = DEFAULT_PREVIEW_LONG_EDGE,
 ) -> Tuple[str, Tuple[int, int]]:
+    if preview_path.exists() and not overwrite:
+        return (PREVIEW_SOURCE_EXISTING, read_jpeg_dimensions(preview_path))
     tag_name, payload = extract_first_embedded_jpeg(source_path, PREVIEW_TAGS)
     preview_source = normalize_preview_source(tag_name)
-    if preview_path.exists() and not overwrite:
-        return (preview_source, read_jpeg_dimensions(preview_path))
     if payload is not None:
         atomic_write_bytes(preview_path, payload)
         auto_orient_jpeg(preview_path)
