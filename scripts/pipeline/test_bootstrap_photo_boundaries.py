@@ -149,6 +149,45 @@ class BootstrapPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(rows[1]["boundary_reason"], "hard_gap")
             self.assertEqual(rows[1]["model_source"], "bootstrap_heuristic")
 
+    def test_bootstrap_photo_boundaries_emits_soft_cut_without_hard_gap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            features_csv, output_csv = self.write_boundary_features(
+                workspace_dir,
+                rows=[
+                    {
+                        "left_relative_path": "hour10/a.jpg",
+                        "right_relative_path": "hour10/b.jpg",
+                        "left_start_local": "2026-03-23T10:00:00",
+                        "right_start_local": "2026-03-23T10:00:05",
+                        "time_gap_seconds": "5.000000",
+                        "dino_cosine_distance": "0.300000",
+                        "rolling_dino_distance_mean": "0.300000",
+                        "rolling_dino_distance_std": "0.000000",
+                        "distance_zscore": "2.500000",
+                        "left_flag_blurry": "0",
+                        "right_flag_blurry": "0",
+                        "left_flag_dark": "0",
+                        "right_flag_dark": "0",
+                        "brightness_delta": "0.010000",
+                        "contrast_delta": "0.010000",
+                    }
+                ],
+            )
+
+            row_count = bootstrap.bootstrap_photo_boundaries(
+                workspace_dir=workspace_dir,
+                boundary_features_csv=features_csv,
+                output_path=output_csv,
+            )
+
+            self.assertEqual(row_count, 1)
+            with output_csv.open("r", newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["boundary_label"], "soft")
+            self.assertEqual(rows[0]["boundary_reason"], "distance_zscore")
+            self.assertEqual(rows[0]["model_source"], "bootstrap_heuristic")
+
     def test_bootstrap_photo_boundaries_rejects_missing_required_columns(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_dir = Path(tmp)
@@ -213,6 +252,40 @@ class BootstrapPhotoBoundariesTests(unittest.TestCase):
                     output_path=output_csv,
                 )
             self.assertIn("time_gap_seconds does not match adjacent timestamps", str(ctx.exception))
+
+    def test_bootstrap_photo_boundaries_rejects_reversed_timestamps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            features_csv, output_csv = self.write_boundary_features(
+                workspace_dir,
+                rows=[
+                    {
+                        "left_relative_path": "hour10/a.jpg",
+                        "right_relative_path": "hour10/b.jpg",
+                        "left_start_local": "2026-03-23T10:00:10",
+                        "right_start_local": "2026-03-23T10:00:05",
+                        "time_gap_seconds": "-5.000000",
+                        "dino_cosine_distance": "0.080000",
+                        "rolling_dino_distance_mean": "0.080000",
+                        "rolling_dino_distance_std": "0.000000",
+                        "distance_zscore": "0.000000",
+                        "left_flag_blurry": "0",
+                        "right_flag_blurry": "0",
+                        "left_flag_dark": "0",
+                        "right_flag_dark": "0",
+                        "brightness_delta": "0.010000",
+                        "contrast_delta": "0.010000",
+                    }
+                ],
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                bootstrap.bootstrap_photo_boundaries(
+                    workspace_dir=workspace_dir,
+                    boundary_features_csv=features_csv,
+                    output_path=output_csv,
+                )
+            self.assertIn("adjacent timestamps must be non-decreasing", str(ctx.exception))
 
 
 if __name__ == "__main__":

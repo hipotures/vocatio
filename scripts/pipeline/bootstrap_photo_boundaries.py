@@ -220,6 +220,11 @@ def read_boundary_features(path: Path) -> List[Dict[str, str]]:
         right_start_local = str(row.get("right_start_local") or "")
         left_dt = parse_local_datetime(left_start_local, f"{path.name} left_start_local")
         right_dt = parse_local_datetime(right_start_local, f"{path.name} right_start_local")
+        if right_dt < left_dt:
+            raise ValueError(
+                f"{path.name} adjacent timestamps must be non-decreasing at row {row_number}: "
+                f"{left_start_local} -> {right_start_local}"
+            )
         time_gap_seconds = parse_float(str(row.get("time_gap_seconds") or ""), f"{path.name} time_gap_seconds")
         expected_gap_seconds = float((right_dt - left_dt).total_seconds())
         if abs(time_gap_seconds - expected_gap_seconds) > 0.0000005:

@@ -205,6 +205,7 @@ def read_photo_manifest(path: Path) -> List[Dict[str, str]]:
     if not rows:
         raise ValueError(f"{path.name} contains no rows")
     normalized_rows: List[Dict[str, str]] = []
+    previous_start_dt: Optional[datetime] = None
     for row_number, row in enumerate(rows, start=1):
         relative_path = normalize_day_relative_path(
             str(row.get("relative_path") or ""),
@@ -220,7 +221,13 @@ def read_photo_manifest(path: Path) -> List[Dict[str, str]]:
                 f"expected {row_number - 1}, got {photo_order_index}"
             )
         start_local = str(row.get("start_local") or "")
-        parse_local_datetime(start_local, f"{path.name} start_local")
+        start_dt = parse_local_datetime(start_local, f"{path.name} start_local")
+        if previous_start_dt is not None and start_dt < previous_start_dt:
+            raise ValueError(
+                f"{path.name} start_local must be non-decreasing at row {row_number}: "
+                f"{start_local} is earlier than previous row"
+            )
+        previous_start_dt = start_dt
         normalized_rows.append(
             {
                 "relative_path": relative_path,

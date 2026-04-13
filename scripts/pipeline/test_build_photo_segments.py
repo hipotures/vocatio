@@ -22,6 +22,7 @@ def load_module(name: str, relative_path: str):
 
 
 segments = load_module("build_photo_segments_test", "scripts/pipeline/build_photo_segments.py")
+bootstrap = load_module("bootstrap_photo_boundaries_for_segments_test", "scripts/pipeline/bootstrap_photo_boundaries.py")
 
 
 class BuildPhotoSegmentsTests(unittest.TestCase):
@@ -76,7 +77,7 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
                     "time_gap_boost": "1.000000" if index in hard_gap_indexes else "0.000000",
                     "boundary_score": "1.000000" if index in cut_indexes else "0.050000",
                     "boundary_label": "hard" if index in cut_indexes else "none",
-                    "boundary_reason": "gap_and_distance" if index in cut_indexes else "distance_only",
+                    "boundary_reason": "hard_gap" if index in cut_indexes else "distance_only",
                     "model_source": "bootstrap_heuristic",
                 }
             )
@@ -252,6 +253,105 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
                     output_path=output_csv,
                 )
             self.assertIn("requires boundary_score >= 0.75", str(ctx.exception))
+
+    def test_build_photo_segments_consumes_bootstrap_output_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            manifest_csv = workspace_dir / "photo_manifest.csv"
+            features_csv = workspace_dir / "photo_boundary_features.csv"
+            scores_csv = workspace_dir / "photo_boundary_scores.csv"
+            output_csv = workspace_dir / "photo_segments.csv"
+            manifest_rows = self.build_manifest_rows(day_dir, 16, datetime(2026, 3, 23, 10, 0, 0))
+            for index in range(8, len(manifest_rows)):
+                manifest_rows[index]["start_local"] = (
+                    datetime(2026, 3, 23, 10, 0, 0) + timedelta(seconds=index + 119)
+                ).isoformat()
+            self.write_manifest(manifest_csv, manifest_rows)
+            with features_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "left_relative_path",
+                        "right_relative_path",
+                        "left_start_local",
+                        "right_start_local",
+                        "time_gap_seconds",
+                        "dino_cosine_distance",
+                        "rolling_dino_distance_mean",
+                        "rolling_dino_distance_std",
+                        "distance_zscore",
+                        "left_flag_blurry",
+                        "right_flag_blurry",
+                        "left_flag_dark",
+                        "right_flag_dark",
+                        "brightness_delta",
+                        "contrast_delta",
+                    ],
+                )
+                writer.writeheader()
+                for index in range(len(manifest_rows) - 1):
+                    writer.writerow(
+                        {
+                            "left_relative_path": manifest_rows[index]["relative_path"],
+                            "right_relative_path": manifest_rows[index + 1]["relative_path"],
+                            "left_start_local": manifest_rows[index]["start_local"],
+                            "right_start_local": manifest_rows[index + 1]["start_local"],
+                            "time_gap_seconds": "120.000000" if index == 7 else "1.000000",
+                            "dino_cosine_distance": "0.400000" if index == 7 else "0.050000",
+                            "rolling_dino_distance_mean": "0.400000" if index == 7 else "0.050000",
+                            "rolling_dino_distance_std": "0.000000",
+                            "distance_zscore": "2.000000" if index == 7 else "0.000000",
+                            "left_flag_blurry": "0",
+                            "right_flag_blurry": "0",
+                            "left_flag_dark": "0",
+                            "right_flag_dark": "0",
+                            "brightness_delta": "0.010000",
+                            "contrast_delta": "0.010000",
+                        }
+                    )
+
+            bootstrap.bootstrap_photo_boundaries(
+                workspace_dir=workspace_dir,
+                boundary_features_csv=features_csv,
+                output_path=scores_csv,
+            )
+            row_count = segments.build_photo_segments(
+                workspace_dir=workspace_dir,
+                manifest_csv=manifest_csv,
+                boundary_scores_csv=scores_csv,
+                output_path=output_csv,
+            )
+
+            self.assertEqual(row_count, 2)
+            with output_csv.open("r", newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["end_relative_path"], "hour10/img_0007.jpg")
+            self.assertEqual(rows[1]["start_relative_path"], "hour10/img_0008.jpg")
+
+    def test_build_photo_segments_rejects_reversed_manifest_timestamps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            manifest_csv = workspace_dir / "photo_manifest.csv"
+            scores_csv = workspace_dir / "photo_boundary_scores.csv"
+            output_csv = workspace_dir / "photo_segments.csv"
+            manifest_rows = self.build_manifest_rows(day_dir, 3, datetime(2026, 3, 23, 10, 0, 0))
+            manifest_rows[1]["start_local"] = "2026-03-23T09:59:59"
+            score_rows = self.build_score_rows(manifest_rows, cut_indexes=set())
+            self.write_manifest(manifest_csv, manifest_rows)
+            self.write_scores(scores_csv, score_rows)
+
+            with self.assertRaises(ValueError) as ctx:
+                segments.build_photo_segments(
+                    workspace_dir=workspace_dir,
+                    manifest_csv=manifest_csv,
+                    boundary_scores_csv=scores_csv,
+                    output_path=output_csv,
+                )
+            self.assertIn("start_local must be non-decreasing", str(ctx.exception))
 
 
 if __name__ == "__main__":
