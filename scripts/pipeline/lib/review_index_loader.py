@@ -26,13 +26,15 @@ def validate_required_fields(name: str, required: Iterable[str], payload: Mappin
 
 
 def load_review_index(index_path: Path | str) -> dict[str, Any]:
-    resolved_index_path = Path(index_path).resolve()
-    payload = json.loads(resolved_index_path.read_text(encoding="utf-8"))
+    index_file_path = Path(index_path).expanduser()
+    if not index_file_path.is_absolute():
+        index_file_path = Path.cwd() / index_file_path
+    payload = json.loads(index_file_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise ValueError(f"Review index payload must be a JSON object: {resolved_index_path}")
+        raise ValueError(f"Review index payload must be a JSON object: {index_file_path}")
     validate_required_fields("review index payload", REQUIRED_TOP_LEVEL_FIELDS, payload)
 
-    day_dir, workspace_dir = resolve_day_and_workspace_dir(payload, resolved_index_path)
+    day_dir, workspace_dir = resolve_day_and_workspace_dir(payload, index_file_path)
     source_mode = str(payload.get("source_mode", "") or "").strip()
     performances = payload["performances"]
     if not isinstance(performances, list):
