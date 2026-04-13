@@ -212,7 +212,7 @@ def read_photo_manifest(day_dir: Path, path: Path) -> List[Dict[str, str]]:
     if not rows:
         raise ValueError(f"{path.name} contains no rows")
     normalized_rows: List[Dict[str, str]] = []
-    previous_start_local = ""
+    previous_start_dt: Optional[datetime] = None
     for row_number, row in enumerate(rows, start=1):
         relative_path = normalize_day_relative_path(str(row.get("relative_path") or ""), f"{path.name} relative_path")
         photo_order_index = parse_non_negative_int(str(row.get("photo_order_index") or ""), f"{path.name} photo_order_index")
@@ -222,13 +222,13 @@ def read_photo_manifest(day_dir: Path, path: Path) -> List[Dict[str, str]]:
                 f"expected {row_number - 1}, got {photo_order_index}"
             )
         start_local = str(row.get("start_local") or "")
-        parse_local_datetime(start_local, f"{path.name} start_local")
-        if previous_start_local and start_local < previous_start_local:
+        start_dt = parse_local_datetime(start_local, f"{path.name} start_local")
+        if previous_start_dt is not None and start_dt < previous_start_dt:
             raise ValueError(
                 f"{path.name} start_local must be non-decreasing at row {row_number}: "
                 f"{start_local} is earlier than previous row"
             )
-        previous_start_local = start_local
+        previous_start_dt = start_dt
         source_value = str(row.get("path") or "").strip()
         if not source_value:
             raise ValueError(f"{path.name} row missing path for {relative_path}")
@@ -541,6 +541,10 @@ def build_photo_review_index(
     output_path: Path,
 ) -> int:
     declared_day_dir = day_dir if day_dir is not None else workspace_dir.parent
+    if workspace_dir.parent.resolve() != declared_day_dir.resolve():
+        raise ValueError(
+            f"workspace_dir must stay under day_dir for image-only review index: {workspace_dir} vs {declared_day_dir}"
+        )
     manifest_rows = read_photo_manifest(declared_day_dir, manifest_csv)
     preview_by_relative_path = read_embedded_manifest(workspace_dir, embedded_manifest_csv, manifest_rows)
     boundary_rows = read_boundary_scores(boundary_scores_csv)
@@ -564,7 +568,12 @@ def main() -> int:
     day_dir = Path(args.day_dir).resolve()
     if not day_dir.exists() or not day_dir.is_dir():
         raise SystemExit(f"Day directory does not exist: {day_dir}")
-    workspace_dir = Path(args.workspace_dir).expanduser().resolve() if args.workspace_dir else day_dir / "_workspace"
+    if args.workspace_dir:
+        workspace_dir = Path(args.workspace_dir).expanduser()
+        if not workspace_dir.is_absolute():
+            workspace_dir = Path.cwd() / workspace_dir
+    else:
+        workspace_dir = day_dir / "_workspace"
     manifest_csv = resolve_manifest_path(workspace_dir, args.manifest_csv)
     segments_csv = resolve_segments_path(workspace_dir, args.segments_csv)
     embedded_manifest_csv = resolve_embedded_manifest_path(workspace_dir, args.embedded_manifest_csv)

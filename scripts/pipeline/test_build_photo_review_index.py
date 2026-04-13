@@ -493,6 +493,44 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
 
             self.assertIn("photo_embedded_manifest.csv relative_path mismatch", str(ctx.exception))
 
+    def test_build_photo_review_index_rejects_workspace_outside_day_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = Path(tmp) / "external_workspace"
+            day_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+            relative_paths = [
+                "cam_a/IMG_0001.ARW",
+                "cam_a/IMG_0002.ARW",
+                "cam_a/IMG_0003.ARW",
+                "cam_a/IMG_0004.ARW",
+                "cam_a/IMG_0005.ARW",
+            ]
+            manifest_csv = workspace_dir / "photo_manifest.csv"
+            embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            boundary_scores_csv = workspace_dir / "photo_boundary_scores.csv"
+            segments_csv = workspace_dir / "photo_segments.csv"
+            output_path = workspace_dir / "performance_proxy_index.image.json"
+
+            self.write_manifest(manifest_csv, day_dir, relative_paths)
+            self.write_embedded_manifest(embedded_manifest_csv, relative_paths)
+            self.write_boundary_scores(boundary_scores_csv, relative_paths)
+            self.write_segments(segments_csv, relative_paths)
+            self.create_preview_files(workspace_dir, relative_paths)
+
+            with self.assertRaises(ValueError) as ctx:
+                build_index.build_photo_review_index(
+                    day_dir=day_dir,
+                    workspace_dir=workspace_dir,
+                    manifest_csv=manifest_csv,
+                    segments_csv=segments_csv,
+                    embedded_manifest_csv=embedded_manifest_csv,
+                    boundary_scores_csv=boundary_scores_csv,
+                    output_path=output_path,
+                )
+
+            self.assertIn("workspace_dir must stay under day_dir", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
