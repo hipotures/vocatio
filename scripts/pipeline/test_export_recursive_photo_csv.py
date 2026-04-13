@@ -100,6 +100,28 @@ class ExportRecursivePhotoCsvTests(unittest.TestCase):
             self.assertEqual(rows[0]["start_local"], "2026-03-23T10:00:00")
             self.assertEqual(rows[0]["start_epoch_ms"], "1774252800000")
 
+    def test_build_manifest_rows_uses_deterministic_epoch_for_no_offset_exif(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            (day_dir / "hour10").mkdir(parents=True)
+            photo_path = day_dir / "hour10" / "naive.jpg"
+            photo_path.write_bytes(b"a")
+
+            rows = export_csv.build_manifest_rows(
+                day_dir=day_dir,
+                stream_id="p-main",
+                device="",
+                metadata_by_path={
+                    str(photo_path): {
+                        "DateTimeOriginal": "2026:03:23 10:00:00",
+                    }
+                },
+            )
+
+            self.assertEqual(rows[0]["capture_time_local"], "2026-03-23T10:00:00")
+            self.assertEqual(rows[0]["start_local"], "2026-03-23T10:00:00")
+            self.assertEqual(rows[0]["start_epoch_ms"], "1774260000000")
+
     def test_build_manifest_rows_orders_mixed_explicit_offsets_by_true_chronology(self):
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"

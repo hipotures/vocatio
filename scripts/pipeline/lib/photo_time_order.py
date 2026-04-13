@@ -77,7 +77,7 @@ def format_start_local(value: datetime) -> str:
 
 
 def format_start_epoch_ms(value: datetime, aware_value: Optional[datetime]) -> str:
-    timestamp_value = aware_value if aware_value is not None else value
+    timestamp_value = aware_value if aware_value is not None else value.replace(tzinfo=timezone.utc)
     return str(int(timestamp_value.timestamp() * 1000))
 
 
