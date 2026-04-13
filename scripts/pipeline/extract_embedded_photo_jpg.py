@@ -1,0 +1,413 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+
+from lib.pipeline_io import atomic_write_csv
+
+
+console = Console()
+
+PHOTO_EXTENSIONS = {".arw", ".cr3", ".hif", ".heif", ".jpg", ".jpeg", ".nef"}
+MANIFEST_HEADERS = [
+    "relative_path",
+    "source_path",
+    "photo_id",
+    "filename",
+    "extension",
+    "thumb_path",
+    "preview_path",
+    "thumb_exists",
+    "preview_exists",
+    "thumb_width",
+    "thumb_height",
+    "preview_width",
+    "preview_height",
+    "preview_source",
+]
+PREVIEW_TAGS = ("PreviewImage", "JpgFromRaw")
+THUMB_TAGS = ("ThumbnailImage",)
+PREVIEW_MAX_EDGE = 1600
+THUMB_MAX_EDGE = 400
+JPEG_SOI = b"\xff\xd8"
+SOF_MARKERS = {
+    0xC0,
+    0xC1,
+    0xC2,
+    0xC3,
+    0xC5,
+    0xC6,
+    0xC7,
+    0xC9,
+    0xCA,
+    0xCB,
+    0xCD,
+    0xCE,
+    0xCF,
+}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Extract embedded preview and thumb JPG files into the day workspace."
+    )
+    parser.add_argument("day_dir", help="Path to a single day directory like /data/20260323")
+    parser.add_argument(
+        "--workspace-dir",
+        help="Override the workspace directory. Default: DAY/_workspace",
+    )
+    parser.add_argument(
+        "--output",
+        default="photo_embedded_manifest.csv",
+        help="Manifest filename inside workspace or absolute path. Default: photo_embedded_manifest.csv",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing preview and thumb JPG files",
+    )
+    return parser.parse_args()
+
+
+def collect_source_files(day_dir: Path) -> List[Path]:
+    files: List[Path] = []
+    for path in sorted(day_dir.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        if "_workspace" in path.relative_to(day_dir).parts:
+            continue
+        if path.suffix.lower() not in PHOTO_EXTENSIONS:
+            continue
+        files.append(path)
+    return files
+
+
+def resolve_output_path(workspace_dir: Path, output_value: str) -> Path:
+    candidate = Path(output_value)
+    if candidate.is_absolute():
+        return candidate
+    return workspace_dir / candidate
+
+
+def build_output_paths(workspace_dir: Path, relative_path: str) -> Dict[str, Path]:
+    relative_jpg = Path(relative_path).with_suffix(".jpg")
+    return {
+        "thumb_path": workspace_dir / "embedded_jpg" / "thumb" / relative_jpg,
+        "preview_path": workspace_dir / "embedded_jpg" / "preview" / relative_jpg,
+    }
+
+
+def serialize_workspace_path(workspace_dir: Path, path: Path) -> str:
+    return path.relative_to(workspace_dir).as_posix()
+
+
+def build_manifest_row(
+    workspace_dir: Path,
+    source_path: Path,
+    relative_path: str,
+    thumb_path: Path,
+    preview_path: Path,
+    preview_source: str,
+    thumb_dimensions: Optional[Tuple[int, int]] = None,
+    preview_dimensions: Optional[Tuple[int, int]] = None,
+) -> Dict[str, str]:
+    thumb_exists = thumb_path.exists()
+    preview_exists = preview_path.exists()
+    resolved_thumb_dimensions = thumb_dimensions if thumb_exists else None
+    resolved_preview_dimensions = preview_dimensions if preview_exists else None
+    if resolved_thumb_dimensions is None and thumb_exists:
+        resolved_thumb_dimensions = read_jpeg_dimensions(thumb_path)
+    if resolved_preview_dimensions is None and preview_exists:
+        resolved_preview_dimensions = read_jpeg_dimensions(preview_path)
+    row = {header: "" for header in MANIFEST_HEADERS}
+    row.update(
+        {
+            "relative_path": relative_path,
+            "source_path": relative_path,
+            "photo_id": relative_path,
+            "filename": source_path.name,
+            "extension": source_path.suffix.lower(),
+            "thumb_path": serialize_workspace_path(workspace_dir, thumb_path),
+            "preview_path": serialize_workspace_path(workspace_dir, preview_path),
+            "thumb_exists": "1" if thumb_exists else "0",
+            "preview_exists": "1" if preview_exists else "0",
+            "thumb_width": str(resolved_thumb_dimensions[0]) if resolved_thumb_dimensions else "",
+            "thumb_height": str(resolved_thumb_dimensions[1]) if resolved_thumb_dimensions else "",
+            "preview_width": str(resolved_preview_dimensions[0]) if resolved_preview_dimensions else "",
+            "preview_height": str(resolved_preview_dimensions[1]) if resolved_preview_dimensions else "",
+            "preview_source": preview_source,
+        }
+    )
+    return row
+
+
+def atomic_write_bytes(path: Path, payload: bytes) -> None:
+    if not payload:
+        raise ValueError(f"Refusing to write empty output for {path.name}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if tmp_path.stat().st_size <= 0:
+            raise ValueError(f"Refusing to replace {path.name} with empty output")
+        os.replace(tmp_path, path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def atomic_replace_from_command(path: Path, command: Sequence[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        full_command = list(command)
+        full_command.append(str(tmp_path))
+        subprocess.run(full_command, capture_output=True, check=True)
+        if tmp_path.stat().st_size <= 0:
+            raise ValueError(f"Refusing to replace {path.name} with empty output")
+        os.replace(tmp_path, path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def extract_exiftool_jpeg(source_path: Path, tag_name: str) -> bytes:
+    result = subprocess.run(
+        ["exiftool", "-b", f"-{tag_name}", str(source_path)],
+        capture_output=True,
+        check=True,
+    )
+    return result.stdout
+
+
+def looks_like_jpeg(payload: bytes) -> bool:
+    return payload.startswith(JPEG_SOI)
+
+
+def detect_generation_backend() -> str:
+    if shutil.which("magick"):
+        return "magick"
+    if shutil.which("ffmpeg"):
+        return "ffmpeg"
+    raise RuntimeError("Install ImageMagick or ffmpeg to generate JPG files.")
+
+
+def generate_resized_jpeg(source_path: Path, output_path: Path, max_edge: int) -> None:
+    backend = detect_generation_backend()
+    if backend == "magick":
+        command = [
+            "magick",
+            str(source_path),
+            "-auto-orient",
+            "-colorspace",
+            "sRGB",
+            "-filter",
+            "Lanczos",
+            "-resize",
+            f"{max_edge}x{max_edge}>",
+            "-sampling-factor",
+            "4:4:4",
+            "-strip",
+            "-depth",
+            "8",
+            "-quality",
+            "90",
+        ]
+    else:
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source_path),
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale=if(gt(iw\\,ih)\\,min(iw\\,{max_edge})\\,-2):if(gt(ih\\,iw)\\,min(ih\\,{max_edge})\\,-2)",
+            "-q:v",
+            "2",
+        ]
+    atomic_replace_from_command(output_path, command)
+
+
+def extract_first_embedded_jpeg(source_path: Path, tag_names: Sequence[str]) -> Optional[bytes]:
+    for tag_name in tag_names:
+        try:
+            payload = extract_exiftool_jpeg(source_path, tag_name)
+        except FileNotFoundError:
+            return None
+        except subprocess.CalledProcessError:
+            continue
+        if looks_like_jpeg(payload):
+            return payload
+    return None
+
+
+def parse_jpeg_dimensions(payload: bytes) -> Tuple[int, int]:
+    if not looks_like_jpeg(payload):
+        raise ValueError("Not a JPEG payload")
+    index = 2
+    payload_length = len(payload)
+    while index < payload_length:
+        while index < payload_length and payload[index] == 0xFF:
+            index += 1
+        if index >= payload_length:
+            break
+        marker = payload[index]
+        index += 1
+        if marker in {0x01, 0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
+            continue
+        if index + 2 > payload_length:
+            break
+        segment_length = int.from_bytes(payload[index:index + 2], "big")
+        if segment_length < 2 or index + segment_length > payload_length:
+            break
+        if marker in SOF_MARKERS:
+            if index + 7 > payload_length:
+                break
+            height = int.from_bytes(payload[index + 3:index + 5], "big")
+            width = int.from_bytes(payload[index + 5:index + 7], "big")
+            if width <= 0 or height <= 0:
+                break
+            return (width, height)
+        index += segment_length
+    raise ValueError("Could not parse JPEG dimensions")
+
+
+def read_jpeg_dimensions(path: Path) -> Tuple[int, int]:
+    return parse_jpeg_dimensions(path.read_bytes())
+
+
+def ensure_preview_jpg(source_path: Path, preview_path: Path, overwrite: bool) -> Tuple[str, Tuple[int, int]]:
+    if preview_path.exists() and not overwrite:
+        return ("existing", read_jpeg_dimensions(preview_path))
+    payload = extract_first_embedded_jpeg(source_path, PREVIEW_TAGS)
+    if payload is not None:
+        atomic_write_bytes(preview_path, payload)
+        return ("embedded_preview", parse_jpeg_dimensions(payload))
+    generate_resized_jpeg(source_path, preview_path, PREVIEW_MAX_EDGE)
+    return ("generated_preview", read_jpeg_dimensions(preview_path))
+
+
+def ensure_thumb_jpg(
+    source_path: Path,
+    thumb_path: Path,
+    preview_path: Path,
+    overwrite: bool,
+) -> Tuple[int, int]:
+    if thumb_path.exists() and not overwrite:
+        return read_jpeg_dimensions(thumb_path)
+    payload = extract_first_embedded_jpeg(source_path, THUMB_TAGS)
+    if payload is not None:
+        atomic_write_bytes(thumb_path, payload)
+        return parse_jpeg_dimensions(payload)
+    generate_resized_jpeg(preview_path if preview_path.exists() else source_path, thumb_path, THUMB_MAX_EDGE)
+    return read_jpeg_dimensions(thumb_path)
+
+
+def build_manifest_rows(
+    day_dir: Path,
+    workspace_dir: Path,
+    overwrite: bool,
+) -> List[Dict[str, str]]:
+    files = collect_source_files(day_dir)
+    if not files:
+        raise ValueError(f"No photo files found under {day_dir}")
+    rows: List[Dict[str, str]] = []
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        expand=False,
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("Extract embedded JPG".ljust(25), total=len(files))
+        for source_path in files:
+            relative_path = source_path.relative_to(day_dir).as_posix()
+            output_paths = build_output_paths(workspace_dir, relative_path)
+            preview_source, preview_dimensions = ensure_preview_jpg(
+                source_path,
+                output_paths["preview_path"],
+                overwrite,
+            )
+            thumb_dimensions = ensure_thumb_jpg(
+                source_path,
+                output_paths["thumb_path"],
+                output_paths["preview_path"],
+                overwrite,
+            )
+            rows.append(
+                build_manifest_row(
+                    workspace_dir=workspace_dir,
+                    source_path=source_path,
+                    relative_path=relative_path,
+                    thumb_path=output_paths["thumb_path"],
+                    preview_path=output_paths["preview_path"],
+                    preview_source=preview_source,
+                    thumb_dimensions=thumb_dimensions,
+                    preview_dimensions=preview_dimensions,
+                )
+            )
+            progress.advance(task_id)
+    return rows
+
+
+def extract_embedded_photo_jpg(
+    day_dir: Path,
+    workspace_dir: Path,
+    output_path: Path,
+    overwrite: bool,
+) -> int:
+    rows = build_manifest_rows(day_dir, workspace_dir, overwrite)
+    atomic_write_csv(output_path, MANIFEST_HEADERS, rows)
+    return len(rows)
+
+
+def main() -> int:
+    args = parse_args()
+    day_dir = Path(args.day_dir).resolve()
+    if not day_dir.exists() or not day_dir.is_dir():
+        raise SystemExit(f"Day directory does not exist: {day_dir}")
+    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    output_path = resolve_output_path(workspace_dir, args.output)
+    row_count = extract_embedded_photo_jpg(
+        day_dir=day_dir,
+        workspace_dir=workspace_dir,
+        output_path=output_path,
+        overwrite=args.overwrite,
+    )
+    console.print(f"Wrote {row_count} embedded JPG rows to {output_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
