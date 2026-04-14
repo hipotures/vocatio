@@ -76,43 +76,87 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             ],
         )
 
-    def test_build_user_prompt_mentions_single_cut_decisions_and_temporal_sequence(self):
+    def test_build_gap_hint_lines_uses_boundary_scores_when_available(self):
+        rows = [
+            {"relative_path": "cam/a.hif", "start_epoch_ms": "1000"},
+            {"relative_path": "cam/b.hif", "start_epoch_ms": "45000"},
+            {"relative_path": "cam/c.hif", "start_epoch_ms": "46000"},
+        ]
+        boundary_rows_by_pair = {
+            ("cam/a.hif", "cam/b.hif"): {
+                "dino_cosine_distance": "0.709211",
+                "boundary_score": "0.501221",
+            },
+            ("cam/b.hif", "cam/c.hif"): {
+                "dino_cosine_distance": "0.040000",
+                "boundary_score": "0.020000",
+            },
+        }
+        self.assertEqual(
+            probe.build_gap_hint_lines(rows, boundary_rows_by_pair),
+            [
+                "gap_01_02: time_gap_seconds=44 (medium), visual_distance=0.709 (high), heuristic_boundary_score=0.501 (medium)",
+                "gap_02_03: time_gap_seconds=1 (low), visual_distance=0.040 (low), heuristic_boundary_score=0.020 (low)",
+            ],
+        )
+
+    def test_build_gap_hint_lines_marks_missing_visual_hints_as_unknown(self):
+        rows = [
+            {"relative_path": "cam/a.hif", "start_epoch_ms": "1000"},
+            {"relative_path": "cam/b.hif", "start_epoch_ms": "2000"},
+        ]
+        self.assertEqual(
+            probe.build_gap_hint_lines(rows, {}),
+            [
+                "gap_01_02: time_gap_seconds=1 (low), visual_distance=unknown (unknown), heuristic_boundary_score=unknown (unknown)",
+            ],
+        )
+
+    def test_build_user_prompt_mentions_single_cut_decisions_and_heuristic_hints(self):
         prompt = probe.build_user_prompt(
             window_size=2,
-            temporal_lines=[
-                "frame_01: t_from_first=0s, delta_from_previous=0s",
-                "frame_02: t_from_first=5s, delta_from_previous=5s",
+            gap_hint_lines=[
+                "gap_01_02: time_gap_seconds=5 (low), visual_distance=0.150 (medium), heuristic_boundary_score=0.200 (low)",
             ],
         )
         self.assertIn('"no_cut"', prompt)
         self.assertIn('"cut_after_1"', prompt)
         self.assertNotIn('"cut_after_2"', prompt)
-        self.assertIn("You will receive 2 images", prompt)
-        self.assertIn("Temporal sequence", prompt)
+        self.assertIn("You will receive 2 consecutive stage-event photos", prompt)
+        self.assertIn("Decision priority", prompt)
+        self.assertIn("images", prompt)
+        self.assertIn("heuristic hints", prompt)
+        self.assertIn("Time and heuristic hints for consecutive gaps", prompt)
+        self.assertIn("gap_01_02: time_gap_seconds=5 (low)", prompt)
         self.assertIn("audience or backstage insert", prompt)
         self.assertIn("floor rehearsal / floor test / stage test", prompt)
-        self.assertIn("ceremony / award / result reading / host speaking segment", prompt)
+        self.assertIn("ceremony / award / host / result reading", prompt)
         self.assertIn("If more than one real boundary appears", prompt)
-        self.assertIn("briefly describe the costume or visual identity in every frame", prompt)
-        self.assertIn("Frame-by-frame notes", prompt)
+        self.assertIn('If there is no clear evidence for a boundary, choose "no_cut"', prompt)
+        self.assertIn("Keep frame notes short and concrete", prompt)
+        self.assertIn('"frame_notes"', prompt)
+        self.assertIn('"primary_evidence"', prompt)
+        self.assertIn('"summary"', prompt)
         self.assertNotIn("confidence", prompt.lower())
 
     def test_build_user_prompt_appends_extra_instructions(self):
         prompt = probe.build_user_prompt(
             window_size=1,
-            temporal_lines=["frame_01: t_from_first=0s, delta_from_previous=0s"],
+            gap_hint_lines=[],
             extra_instructions="Prefer strong performer identity changes over lighting changes.",
         )
         self.assertIn("Additional instructions", prompt)
         self.assertIn("Prefer strong performer identity changes", prompt)
 
-    def test_parse_model_response_accepts_json_decision_and_reason(self):
+    def test_parse_model_response_accepts_structured_json_response(self):
         parsed = probe.parse_model_response(
-            '{"decision":"cut_after_1","reason":"Different performers."}',
+            '{"decision":"cut_after_1","frame_notes":{"frame_01":"black-white solo","frame_02":"red-black solo"},"primary_evidence":["different performer","different costume identity"],"summary":"Frames 1 and 2 belong to different segments."}',
             window_size=2,
         )
         self.assertEqual(parsed["decision"], "cut_after_1")
-        self.assertEqual(parsed["reason"], "Different performers.")
+        self.assertIn("frame_01=black-white solo", parsed["reason"])
+        self.assertIn("different performer", parsed["reason"])
+        self.assertIn("Frames 1 and 2 belong to different segments.", parsed["reason"])
         self.assertEqual(parsed["response_status"], "ok")
 
     def test_parse_model_response_marks_invalid_json(self):
@@ -122,10 +166,21 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIn("JSON", parsed["reason"])
 
     def test_parse_model_response_marks_invalid_decision(self):
-        parsed = probe.parse_model_response('{"decision":"cut_after_2","reason":"Bad."}', window_size=2)
+        parsed = probe.parse_model_response(
+            '{"decision":"cut_after_2","frame_notes":{"frame_01":"a","frame_02":"b"},"primary_evidence":["bad"],"summary":"bad"}',
+            window_size=2,
+        )
         self.assertEqual(parsed["decision"], "invalid_response")
         self.assertEqual(parsed["response_status"], "invalid_response")
         self.assertIn("decision", parsed["reason"])
+
+    def test_parse_model_response_rejects_missing_frame_note(self):
+        parsed = probe.parse_model_response(
+            '{"decision":"no_cut","frame_notes":{"frame_01":"same"},"primary_evidence":["same performer"],"summary":"same segment"}',
+            window_size=2,
+        )
+        self.assertEqual(parsed["decision"], "invalid_response")
+        self.assertIn("frame_notes", parsed["reason"])
 
     def test_build_result_row_includes_cut_metadata(self):
         row = probe.build_result_row(
@@ -152,8 +207,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             ],
             window_size=10,
             overlap=2,
-            raw_response='{"decision":"cut_after_1","reason":"New act."}',
-            parsed_response={"decision": "cut_after_1", "reason": "New act.", "response_status": "ok"},
+            raw_response='{"decision":"cut_after_1","frame_notes":{"frame_01":"black-white","frame_02":"red-black"},"primary_evidence":["different performer"],"summary":"New act."}',
+            parsed_response={"decision": "cut_after_1", "reason": "Summary: New act.", "response_status": "ok"},
         )
         self.assertEqual(row["run_id"], "vlm-20260414033000")
         self.assertEqual(row["cut_after_local_index"], "1")
@@ -603,7 +658,15 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         observed_line_counts.append(sum(1 for _ in handle))
                 else:
                     observed_line_counts.append(0)
-                return {"message": {"content": '{"decision":"no_cut","reason":"Frame-by-frame notes: ok"}'}}
+                return {
+                    "message": {
+                        "content": (
+                            '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
+                            '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                            '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
+                        )
+                    }
+                }
 
             with mock.patch.object(probe, "ollama_post_json", side_effect=fake_ollama), mock.patch.object(
                 probe, "build_run_id", return_value="vlm-20260414060000"
@@ -642,7 +705,14 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 batch_index=3,
                 prompt="prompt body",
                 request_payload={"model": "qwen3.5:9b", "messages": [{"role": "user", "content": "x"}]},
-                response_payload={"message": {"content": "{\"decision\":\"no_cut\",\"reason\":\"same act\"}"}},
+                response_payload={
+                    "message": {
+                        "content": (
+                            '{"decision":"no_cut","frame_notes":{"frame_01":"same"},"primary_evidence":["same performer"],'
+                            '"summary":"same act"}'
+                        )
+                    }
+                },
                 error_text=None,
             )
             prompt_path = debug_dir / "vlm_probe_20260414_031500_batch_003_prompt.txt"
@@ -653,7 +723,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertTrue(response_path.exists())
             self.assertEqual(prompt_path.read_text(encoding="utf-8"), "prompt body")
             self.assertEqual(json.loads(request_path.read_text(encoding="utf-8"))["model"], "qwen3.5:9b")
-            self.assertEqual(json.loads(response_path.read_text(encoding="utf-8"))["message"]["content"], '{"decision":"no_cut","reason":"same act"}')
+            self.assertIn('"decision":"no_cut"', json.loads(response_path.read_text(encoding="utf-8"))["message"]["content"])
 
     def test_dump_debug_artifacts_writes_error_without_response(self):
         with tempfile.TemporaryDirectory() as tmp:

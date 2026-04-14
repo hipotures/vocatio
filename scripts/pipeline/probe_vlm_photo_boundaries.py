@@ -33,6 +33,7 @@ console = Console()
 
 PHOTO_EMBEDDED_MANIFEST_FILENAME = "photo_embedded_manifest.csv"
 PHOTO_MANIFEST_FILENAME = "photo_manifest.csv"
+PHOTO_BOUNDARY_SCORES_FILENAME = "photo_boundary_scores.csv"
 DEFAULT_OUTPUT_FILENAME = "vlm_boundary_test.csv"
 RUN_METADATA_DIRNAME = "vlm_runs"
 DEFAULT_IMAGE_VARIANT = "preview"
@@ -47,6 +48,15 @@ DEFAULT_TEMPERATURE = 0.0
 DEFAULT_OLLAMA_THINK = "inherit"
 EMBEDDED_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "thumb_path", "preview_path"})
 PHOTO_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "start_epoch_ms", "start_local", "photo_order_index"})
+PHOTO_BOUNDARY_SCORES_REQUIRED_COLUMNS = frozenset(
+    {
+        "left_relative_path",
+        "right_relative_path",
+        "time_gap_seconds",
+        "dino_cosine_distance",
+        "boundary_score",
+    }
+)
 OUTPUT_HEADERS = [
     "generated_at",
     "run_id",
@@ -95,7 +105,7 @@ RESUME_CONFIG_KEYS = (
 SYSTEM_PROMPT = (
     "You analyze consecutive stage performance photos. "
     "Choose at most one boundary between consecutive frames. "
-    "Return only valid JSON with keys decision and reason."
+    "Return only valid JSON with keys decision, frame_notes, primary_evidence, and summary."
 )
 
 
@@ -343,6 +353,85 @@ def build_temporal_lines(rows: Sequence[Mapping[str, str]]) -> List[str]:
     return lines
 
 
+def classify_time_gap_level(seconds: int) -> str:
+    if seconds < 10:
+        return "low"
+    if seconds < 60:
+        return "medium"
+    return "high"
+
+
+def classify_visual_distance_level(value: float) -> str:
+    if value < 0.10:
+        return "low"
+    if value < 0.35:
+        return "medium"
+    return "high"
+
+
+def classify_boundary_score_level(value: float) -> str:
+    if value < 0.33:
+        return "low"
+    if value < 0.66:
+        return "medium"
+    return "high"
+
+
+def format_prompt_float(value: float) -> str:
+    return f"{value:.3f}"
+
+
+def read_boundary_scores_by_pair(path: Path) -> Dict[tuple[str, str], Dict[str, str]]:
+    if not path.exists():
+        return {}
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        validate_required_columns(path.name, reader.fieldnames, tuple(PHOTO_BOUNDARY_SCORES_REQUIRED_COLUMNS))
+        rows = [dict(row) for row in reader]
+    return {
+        (
+            str(row.get("left_relative_path", "") or "").strip(),
+            str(row.get("right_relative_path", "") or "").strip(),
+        ): row
+        for row in rows
+    }
+
+
+def build_gap_hint_lines(
+    rows: Sequence[Mapping[str, str]],
+    boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
+) -> List[str]:
+    lines: List[str] = []
+    for index in range(1, len(rows)):
+        left_row = rows[index - 1]
+        right_row = rows[index]
+        time_gap_seconds = rounded_seconds(
+            int(str(right_row["start_epoch_ms"])) - int(str(left_row["start_epoch_ms"]))
+        )
+        time_level = classify_time_gap_level(time_gap_seconds)
+        pair = (str(left_row["relative_path"]), str(right_row["relative_path"]))
+        boundary_row = boundary_rows_by_pair.get(pair)
+        if boundary_row is None:
+            visual_distance_text = "unknown"
+            visual_distance_level = "unknown"
+            boundary_score_text = "unknown"
+            boundary_score_level = "unknown"
+        else:
+            visual_distance = float(str(boundary_row.get("dino_cosine_distance", "") or "0"))
+            boundary_score = float(str(boundary_row.get("boundary_score", "") or "0"))
+            visual_distance_text = format_prompt_float(visual_distance)
+            visual_distance_level = classify_visual_distance_level(visual_distance)
+            boundary_score_text = format_prompt_float(boundary_score)
+            boundary_score_level = classify_boundary_score_level(boundary_score)
+        lines.append(
+            f"gap_{index:02d}_{index + 1:02d}: "
+            f"time_gap_seconds={time_gap_seconds} ({time_level}), "
+            f"visual_distance={visual_distance_text} ({visual_distance_level}), "
+            f"heuristic_boundary_score={boundary_score_text} ({boundary_score_level})"
+        )
+    return lines
+
+
 def load_extra_instructions(inline_value: str, file_value: Optional[str]) -> str:
     parts: List[str] = []
     if inline_value.strip():
@@ -359,57 +448,73 @@ def build_valid_decisions(window_size: int) -> tuple[str, ...]:
     return tuple(["no_cut"] + [f"cut_after_{index}" for index in range(1, window_size)])
 
 
-def build_user_prompt(window_size: int, temporal_lines: Sequence[str], extra_instructions: str = "") -> str:
+def build_user_prompt(window_size: int, gap_hint_lines: Sequence[str], extra_instructions: str = "") -> str:
     frames_block = "\n".join([f"frame_{index:02d} = attached image {index}" for index in range(1, window_size + 1)])
-    temporal_block = "\n".join(temporal_lines)
+    hints_block = "\n".join(gap_hint_lines) if gap_hint_lines else "No heuristic gap hints are available."
     decisions_block = "\n".join([f'- "{decision}"' for decision in build_valid_decisions(window_size)])
-    last_cut_index = max(window_size - 1, 1)
     prompt = (
-        f"You will receive {window_size} images representing consecutive photos from a stage event.\n\n"
-        "Interpret them in this exact order:\n"
+        f"You will receive {window_size} consecutive stage-event photos.\n\n"
+        "Order:\n"
         f"{frames_block}\n\n"
-        "Temporal sequence:\n"
-        f"{temporal_block}\n\n"
         "Task:\n"
         "Choose at most one boundary between consecutive frames.\n\n"
-        "A boundary means that the photos before and after it most likely belong to different scene types or different performance segments.\n\n"
-        "Possible segment types include:\n"
-        "- a dance performance or act\n"
+        "A boundary means that the photos before and after it most likely belong to different segments.\n\n"
+        "Possible segment types:\n"
+        "- dance performance / act\n"
         "- audience or backstage insert\n"
-        "- floor rehearsal / floor test / stage test between performance groups\n"
-        "- ceremony / award / result reading / host speaking segment\n\n"
-        "Typical evidence for a true boundary:\n"
-        "- different performer or group\n"
+        "- floor rehearsal / floor test / stage test\n"
+        "- ceremony / award / host / result reading\n\n"
+        "True boundary signals:\n"
+        "- different performer or different group\n"
         "- clearly different costume identity\n"
         "- clearly different performance identity\n"
-        "- major scene change that strongly suggests a different act\n\n"
-        "Important:\n"
-        "- If performance X is interrupted by audience or backstage photos, that interruption is a real boundary.\n"
-        "- If audience or backstage photos are followed again by performance X, that return is also a real boundary.\n"
-        "- Floor rehearsal between groups is not part of a normal performance act and should be treated as a separate segment.\n"
-        "- Ceremony is not the same as a dance performance and should be treated as a separate segment.\n\n"
-        "Do NOT treat these alone as a boundary:\n"
+        "- clear switch to audience, backstage, rehearsal, or ceremony\n\n"
+        "Not a boundary by itself:\n"
         "- pose change\n"
         "- motion within the same act\n"
-        "- small framing change\n"
+        "- framing change\n"
         "- lighting change alone\n"
-        "- background change alone if the performer and costume still indicate the same act\n"
-        "- a few off-angle shots if they still clearly show the same ongoing performance and not a separate audience, backstage, rehearsal, or ceremony segment\n\n"
-        "You must choose exactly one of these decisions:\n"
+        "- background change alone\n\n"
+        "Decision priority:\n"
+        "1. images\n"
+        "2. time\n"
+        "3. heuristic hints\n\n"
+        "If images clearly contradict time or heuristics, trust the images first.\n\n"
+        "Hint interpretation:\n"
+        "- low = weak signal\n"
+        "- medium = ambiguous signal\n"
+        "- high = strong signal\n"
+        "- unknown = unavailable hint\n"
+        "- larger time_gap_seconds makes a boundary more plausible, but time alone never proves a boundary\n"
+        "- larger visual_distance means more visual change between adjacent frames\n"
+        "- heuristic_boundary_score near 0 suggests continuity, near 1 suggests a likely boundary\n\n"
+        "Time and heuristic hints for consecutive gaps:\n"
+        f"{hints_block}\n\n"
+        "Allowed decisions:\n"
         f"{decisions_block}\n\n"
         "Rules:\n"
-        f'- Choose "no_cut" if all {window_size} frames most likely belong to the same performance.\n'
-        f'- Choose "cut_after_N" only if frames 1..N and frames N+1..{window_size} most likely belong to different performances.\n'
+        f'- Choose "no_cut" if all {window_size} frames most likely belong to the same segment.\n'
+        '- If there is no clear evidence for a boundary, choose "no_cut".\n'
+        f'- Choose "cut_after_N" only if frames 1..N and frames N+1..{window_size} most likely belong to different segments.\n'
         f"- If more than one real boundary appears inside the {window_size}-frame window, choose the single strongest and clearest boundary.\n"
-        "- In the reason field, briefly describe the costume or visual identity in every frame before you explain the boundary decision.\n"
-        '- Start the reason with "Frame-by-frame notes:" and mention all frames in order.\n'
+        "- Keep frame notes short and concrete.\n"
+        '- If the decision is "no_cut", primary_evidence should describe continuity evidence.\n'
         "- Output only valid JSON.\n"
         "- Do not output markdown.\n"
         "- Do not output any text before or after JSON.\n\n"
-        "Return exactly this schema:\n"
+        "Return exactly one JSON object with this structure:\n"
         '{\n'
-        f'  "decision": "cut_after_{last_cut_index}",\n'
-        '  "reason": "Frame-by-frame notes: frame_01 red dress, frame_02 red dress, frame_03 blue suit, frame_04 blue suit. Boundary: the window changes from one segment to a clearly different segment."\n'
+        f'  "decision": "<one of: {", ".join(build_valid_decisions(window_size))}>",\n'
+        '  "frame_notes": {\n'
+        + ",\n".join(
+            [f'    "frame_{index:02d}": "<short note>"' for index in range(1, window_size + 1)]
+        )
+        + '\n  },\n'
+        '  "primary_evidence": [\n'
+        '    "<short evidence item>",\n'
+        '    "<short evidence item>"\n'
+        "  ],\n"
+        '  "summary": "<one short sentence>"\n'
         '}'
     )
     if extra_instructions.strip():
@@ -539,19 +644,56 @@ def parse_model_response(raw_response: str, *, window_size: int) -> Dict[str, st
             "response_status": "invalid_response",
         }
     decision = str(payload.get("decision", "") or "").strip()
-    reason = str(payload.get("reason", "") or "").strip()
     if decision not in valid_decisions:
         return {
             "decision": "invalid_response",
             "reason": f"Invalid decision value: {decision}",
             "response_status": "invalid_response",
         }
-    if not reason:
+    frame_notes = payload.get("frame_notes")
+    if not isinstance(frame_notes, Mapping):
         return {
             "decision": "invalid_response",
-            "reason": "Missing reason value",
+            "reason": "Missing frame_notes object",
             "response_status": "invalid_response",
         }
+    expected_keys = [f"frame_{index:02d}" for index in range(1, window_size + 1)]
+    normalized_frame_notes: List[str] = []
+    for key in expected_keys:
+        value = str(frame_notes.get(key, "") or "").strip()
+        if not value:
+            return {
+                "decision": "invalid_response",
+                "reason": f"Missing frame_notes value for {key}",
+                "response_status": "invalid_response",
+            }
+        normalized_frame_notes.append(f"{key}={value}")
+    primary_evidence = payload.get("primary_evidence")
+    if not isinstance(primary_evidence, list):
+        return {
+            "decision": "invalid_response",
+            "reason": "Missing primary_evidence list",
+            "response_status": "invalid_response",
+        }
+    normalized_evidence = [str(item).strip() for item in primary_evidence if str(item).strip()]
+    if not normalized_evidence:
+        return {
+            "decision": "invalid_response",
+            "reason": "Missing primary_evidence values",
+            "response_status": "invalid_response",
+        }
+    summary = str(payload.get("summary", "") or "").strip()
+    if not summary:
+        return {
+            "decision": "invalid_response",
+            "reason": "Missing summary value",
+            "response_status": "invalid_response",
+        }
+    reason = (
+        f"Frame notes: {'; '.join(normalized_frame_notes)} | "
+        f"Primary evidence: {'; '.join(normalized_evidence)} | "
+        f"Summary: {summary}"
+    )
     return {"decision": decision, "reason": reason, "response_status": "ok"}
 
 
@@ -651,11 +793,11 @@ def build_config_hash(args_payload: Mapping[str, Any]) -> str:
 
 
 def build_user_prompt_template(window_size: int, extra_instructions: str = "") -> str:
-    temporal_lines = [
-        f"frame_{index:02d}: t_from_first=<seconds>, delta_from_previous=<seconds>"
-        for index in range(1, window_size + 1)
+    gap_hint_lines = [
+        f"gap_{index:02d}_{index + 1:02d}: time_gap_seconds=<seconds> (<level>), visual_distance=<value> (<level>), heuristic_boundary_score=<value> (<level>)"
+        for index in range(1, window_size)
     ]
-    return build_user_prompt(window_size=window_size, temporal_lines=temporal_lines, extra_instructions=extra_instructions)
+    return build_user_prompt(window_size=window_size, gap_hint_lines=gap_hint_lines, extra_instructions=extra_instructions)
 
 
 def write_run_metadata(
@@ -969,6 +1111,7 @@ def probe_vlm_photo_boundaries(
         photo_manifest_csv=photo_manifest_csv,
         image_variant=image_variant,
     )
+    boundary_rows_by_pair = read_boundary_scores_by_pair(workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME)
     all_window_starts = build_window_start_indexes(len(joined_rows), window_size, overlap)
     run_state = resolve_run_state(
         workspace_dir=workspace_dir,
@@ -1035,8 +1178,8 @@ def probe_vlm_photo_boundaries(
             batch_index = completed_batches + batch_offset
             end_index = start_index + window_size
             window_rows = joined_rows[start_index:end_index]
-            temporal_lines = build_temporal_lines(window_rows)
-            prompt = build_user_prompt(window_size=window_size, temporal_lines=temporal_lines, extra_instructions=extra_instructions)
+            gap_hint_lines = build_gap_hint_lines(window_rows, boundary_rows_by_pair)
+            prompt = build_user_prompt(window_size=window_size, gap_hint_lines=gap_hint_lines, extra_instructions=extra_instructions)
             payload = build_ollama_payload(
                 model=model,
                 prompt=prompt,
