@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import hashlib
 import json
 import urllib.parse
 import urllib.request
@@ -49,6 +50,7 @@ PHOTO_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "start_epoch_ms", 
 OUTPUT_HEADERS = [
     "generated_at",
     "run_id",
+    "config_hash",
     "image_variant",
     "model",
     "temperature",
@@ -71,7 +73,24 @@ OUTPUT_HEADERS = [
     "response_status",
     "raw_response",
 ]
-LEGACY_OUTPUT_HEADERS = [header for header in OUTPUT_HEADERS if header != "run_id"]
+MID_OUTPUT_HEADERS = [header for header in OUTPUT_HEADERS if header != "config_hash"]
+LEGACY_OUTPUT_HEADERS = [header for header in OUTPUT_HEADERS if header not in {"run_id", "config_hash"}]
+RESUME_CONFIG_KEYS = (
+    "embedded_manifest_csv",
+    "photo_manifest_csv",
+    "image_variant",
+    "window_size",
+    "overlap",
+    "model",
+    "ollama_base_url",
+    "ollama_num_ctx",
+    "ollama_num_predict",
+    "ollama_keep_alive",
+    "timeout_seconds",
+    "temperature",
+    "ollama_think",
+    "effective_extra_instructions",
+)
 
 SYSTEM_PROMPT = (
     "You analyze consecutive stage performance photos. "
@@ -204,6 +223,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--dump-debug-dir",
         help="Optional directory for per-batch prompt/request/response debug dumps.",
+    )
+    parser.add_argument(
+        "--new-run",
+        action="store_true",
+        help="Start a new VLM run instead of continuing the latest compatible run.",
     )
     return parser.parse_args(argv)
 
@@ -535,6 +559,7 @@ def build_result_row(
     *,
     generated_at: str,
     run_id: str,
+    config_hash: str,
     image_variant: str,
     batch_index: int,
     start_row: int,
@@ -570,6 +595,7 @@ def build_result_row(
     return {
         "generated_at": generated_at,
         "run_id": run_id,
+        "config_hash": config_hash,
         "image_variant": image_variant,
         "model": model,
         "temperature": str(temperature),
@@ -618,6 +644,12 @@ def build_run_id(datetime_text: Optional[str] = None) -> str:
     return f"vlm-{moment.strftime('%Y%m%d%H%M%S')}"
 
 
+def build_config_hash(args_payload: Mapping[str, Any]) -> str:
+    filtered_payload = {key: args_payload.get(key) for key in RESUME_CONFIG_KEYS}
+    encoded = json.dumps(filtered_payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.md5(encoded.encode("utf-8")).hexdigest()
+
+
 def build_user_prompt_template(window_size: int, extra_instructions: str = "") -> str:
     temporal_lines = [
         f"frame_{index:02d}: t_from_first=<seconds>, delta_from_previous=<seconds>"
@@ -631,6 +663,7 @@ def write_run_metadata(
     workspace_dir: Path,
     run_id: str,
     generated_at: str,
+    config_hash: str,
     embedded_manifest_csv: Path,
     photo_manifest_csv: Path,
     output_csv: Path,
@@ -644,6 +677,7 @@ def write_run_metadata(
     metadata = {
         "run_id": run_id,
         "generated_at": generated_at,
+        "config_hash": config_hash,
         "embedded_manifest_csv": str(embedded_manifest_csv),
         "photo_manifest_csv": str(photo_manifest_csv),
         "output_csv": str(output_csv),
@@ -653,6 +687,16 @@ def write_run_metadata(
     }
     atomic_write_json(metadata_path, metadata)
     return metadata
+
+
+def read_latest_run_metadata(workspace_dir: Path) -> Optional[Dict[str, Any]]:
+    runs_dir = workspace_dir / RUN_METADATA_DIRNAME
+    if not runs_dir.exists():
+        return None
+    metadata_paths = sorted(runs_dir.glob("vlm-*.json"))
+    if not metadata_paths:
+        return None
+    return json.loads(metadata_paths[-1].read_text(encoding="utf-8"))
 
 
 def dump_debug_artifacts(
@@ -804,23 +848,94 @@ def read_result_rows(output_csv: Path) -> List[Dict[str, str]]:
                 padded = list(row) + [""] * max(0, len(OUTPUT_HEADERS) - len(row))
                 rows.append({key: padded[index] for index, key in enumerate(OUTPUT_HEADERS)})
             return rows
+        if header == MID_OUTPUT_HEADERS:
+            for row in reader:
+                if not row:
+                    continue
+                if len(row) == len(MID_OUTPUT_HEADERS):
+                    rows.append({key: row[index] for index, key in enumerate(MID_OUTPUT_HEADERS)} | {"config_hash": ""})
+                    continue
+                if len(row) == len(OUTPUT_HEADERS):
+                    rows.append({key: row[index] for index, key in enumerate(OUTPUT_HEADERS)})
+                    continue
+                raise ValueError(
+                    f"{output_csv.name} has unsupported row width {len(row)} for mid header; expected "
+                    f"{len(MID_OUTPUT_HEADERS)} or {len(OUTPUT_HEADERS)} columns"
+                )
+            return rows
         if header == LEGACY_OUTPUT_HEADERS:
             for row in reader:
                 if not row:
                     continue
                 if len(row) == len(LEGACY_OUTPUT_HEADERS):
-                    rows.append({key: row[index] for index, key in enumerate(LEGACY_OUTPUT_HEADERS)} | {"run_id": ""})
+                    rows.append(
+                        {key: row[index] for index, key in enumerate(LEGACY_OUTPUT_HEADERS)}
+                        | {"run_id": "", "config_hash": ""}
+                    )
+                    continue
+                if len(row) == len(MID_OUTPUT_HEADERS):
+                    rows.append(
+                        {key: row[index] for index, key in enumerate(MID_OUTPUT_HEADERS)}
+                        | {"config_hash": ""}
+                    )
                     continue
                 if len(row) == len(OUTPUT_HEADERS):
                     rows.append({key: row[index] for index, key in enumerate(OUTPUT_HEADERS)})
                     continue
                 raise ValueError(
                     f"{output_csv.name} has unsupported row width {len(row)} for legacy header; expected "
-                    f"{len(LEGACY_OUTPUT_HEADERS)} or {len(OUTPUT_HEADERS)} columns"
+                    f"{len(LEGACY_OUTPUT_HEADERS)}, {len(MID_OUTPUT_HEADERS)} or {len(OUTPUT_HEADERS)} columns"
                 )
             return rows
     raise ValueError(
         f"{output_csv.name} has unsupported header; expected current or legacy VLM probe columns"
+    )
+
+
+def resolve_run_state(
+    *,
+    workspace_dir: Path,
+    output_csv: Path,
+    config_hash: str,
+    new_run: bool,
+) -> Dict[str, Any]:
+    if new_run:
+        return {"run_id": None, "completed_batches": 0, "metadata": None}
+    latest_metadata = read_latest_run_metadata(workspace_dir)
+    if latest_metadata is None:
+        return {"run_id": None, "completed_batches": 0, "metadata": None}
+    latest_hash = str(latest_metadata.get("config_hash", "") or "")
+    if latest_hash != config_hash:
+        raise ValueError(
+            f"Parameter mismatch for resume: latest run {latest_metadata.get('run_id', '')} has "
+            f"config_hash={latest_hash}, current config_hash={config_hash}. Use --new-run to start a fresh run."
+        )
+    completed_batches = 0
+    if output_csv.exists():
+        completed_batches = sum(
+            1
+            for row in read_result_rows(output_csv)
+            if str(row.get("run_id", "") or "") == str(latest_metadata.get("run_id", "") or "")
+        )
+    return {
+        "run_id": str(latest_metadata.get("run_id", "") or ""),
+        "completed_batches": completed_batches,
+        "metadata": latest_metadata,
+    }
+
+
+def build_resume_message(
+    *,
+    run_id: str,
+    completed_batches: int,
+    total_batches: int,
+    requested_batches: int,
+) -> str:
+    next_batch = completed_batches + 1
+    remaining_batches = max(0, total_batches - completed_batches)
+    return (
+        f"Continuing VLM run {run_id} from batch {next_batch}; "
+        f"{remaining_batches} remaining, running up to {requested_batches} more batch(es)."
     )
 
 
@@ -845,28 +960,58 @@ def probe_vlm_photo_boundaries(
     extra_instructions: str,
     dump_debug_dir: Optional[Path],
     args_payload: Mapping[str, Any],
+    new_run: bool,
 ) -> int:
+    config_hash = build_config_hash(args_payload)
     joined_rows = read_joined_rows(
         workspace_dir=workspace_dir,
         embedded_manifest_csv=embedded_manifest_csv,
         photo_manifest_csv=photo_manifest_csv,
         image_variant=image_variant,
     )
-    window_starts = build_window_start_indexes(len(joined_rows), window_size, overlap)[:max_batches]
-    result_rows: List[Dict[str, str]] = []
-    generated_at = current_timestamp()
-    run_id = build_run_id(generated_at)
-    write_run_metadata(
+    all_window_starts = build_window_start_indexes(len(joined_rows), window_size, overlap)
+    run_state = resolve_run_state(
         workspace_dir=workspace_dir,
-        run_id=run_id,
-        generated_at=generated_at,
-        embedded_manifest_csv=embedded_manifest_csv,
-        photo_manifest_csv=photo_manifest_csv,
         output_csv=output_csv,
-        args_payload=args_payload,
-        system_prompt=SYSTEM_PROMPT,
-        user_prompt_template=build_user_prompt_template(window_size=window_size, extra_instructions=extra_instructions),
+        config_hash=config_hash,
+        new_run=new_run,
     )
+    completed_batches = int(run_state["completed_batches"])
+    if completed_batches > len(all_window_starts):
+        raise ValueError(
+            f"Run {run_state['run_id']} already has {completed_batches} batches, but only {len(all_window_starts)} windows exist"
+        )
+    window_starts = all_window_starts[completed_batches : completed_batches + max_batches]
+    if not window_starts:
+        console.print(
+            f"No remaining VLM windows for run {run_state['run_id'] or '<new>'}; already processed {completed_batches} batch(es)."
+        )
+        return 0
+    if run_state["run_id"]:
+        console.print(
+            build_resume_message(
+                run_id=str(run_state["run_id"]),
+                completed_batches=completed_batches,
+                total_batches=len(all_window_starts),
+                requested_batches=max_batches,
+            )
+        )
+    generated_at = current_timestamp()
+    run_id = str(run_state["run_id"] or "")
+    if not run_id:
+        run_id = build_run_id(generated_at)
+        write_run_metadata(
+            workspace_dir=workspace_dir,
+            run_id=run_id,
+            generated_at=generated_at,
+            config_hash=config_hash,
+            embedded_manifest_csv=embedded_manifest_csv,
+            photo_manifest_csv=photo_manifest_csv,
+            output_csv=output_csv,
+            args_payload=args_payload,
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt_template=build_user_prompt_template(window_size=window_size, extra_instructions=extra_instructions),
+        )
     request_args = argparse.Namespace(
         ollama_base_url=ollama_base_url,
         ollama_think=ollama_think,
@@ -886,7 +1031,8 @@ def probe_vlm_photo_boundaries(
         console=console,
     ) as progress:
         task = progress.add_task("Probe VLM windows".ljust(25), total=len(window_starts))
-        for batch_index, start_index in enumerate(window_starts, start=1):
+        for batch_offset, start_index in enumerate(window_starts, start=1):
+            batch_index = completed_batches + batch_offset
             end_index = start_index + window_size
             window_rows = joined_rows[start_index:end_index]
             temporal_lines = build_temporal_lines(window_rows)
@@ -925,26 +1071,25 @@ def probe_vlm_photo_boundaries(
                 )
             raw_response = extract_response_text(response_payload)
             parsed_response = parse_model_response(raw_response, window_size=window_size)
-            result_rows.append(
-                build_result_row(
-                    generated_at=generated_at,
-                    run_id=run_id,
-                    image_variant=image_variant,
-                    batch_index=batch_index,
-                    start_row=start_index + 1,
-                    end_row=end_index,
-                    rows=window_rows,
-                    window_size=window_size,
-                    overlap=overlap,
-                    raw_response=raw_response,
-                    parsed_response=parsed_response,
-                    model=model,
-                    temperature=temperature,
-                )
+            result_row = build_result_row(
+                generated_at=generated_at,
+                run_id=run_id,
+                config_hash=config_hash,
+                image_variant=image_variant,
+                batch_index=batch_index,
+                start_row=start_index + 1,
+                end_row=end_index,
+                rows=window_rows,
+                window_size=window_size,
+                overlap=overlap,
+                raw_response=raw_response,
+                parsed_response=parsed_response,
+                model=model,
+                temperature=temperature,
             )
+            append_result_rows(output_csv, [result_row])
             progress.advance(task)
-    append_result_rows(output_csv, result_rows)
-    return len(result_rows)
+    return len(window_starts)
 
 
 def main() -> int:
@@ -980,6 +1125,7 @@ def main() -> int:
         "ollama_think": args.ollama_think,
         "extra_instructions": args.extra_instructions,
         "extra_instructions_file": args.extra_instructions_file,
+        "effective_extra_instructions": load_extra_instructions(args.extra_instructions, args.extra_instructions_file),
         "dump_debug_dir": args.dump_debug_dir,
     }
     row_count = probe_vlm_photo_boundaries(
@@ -999,9 +1145,10 @@ def main() -> int:
         timeout_seconds=args.timeout_seconds,
         temperature=args.temperature,
         ollama_think=args.ollama_think,
-        extra_instructions=load_extra_instructions(args.extra_instructions, args.extra_instructions_file),
+        extra_instructions=str(args_payload["effective_extra_instructions"]),
         dump_debug_dir=Path(args.dump_debug_dir).expanduser().resolve() if args.dump_debug_dir else None,
         args_payload=args_payload,
+        new_run=bool(args.new_run),
     )
     console.print(f"Wrote {row_count} VLM probe rows to {output_csv}")
     return 0

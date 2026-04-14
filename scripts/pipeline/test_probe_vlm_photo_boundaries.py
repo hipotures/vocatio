@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -130,6 +131,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         row = probe.build_result_row(
             generated_at="2026-04-14T03:30:00+02:00",
             run_id="vlm-20260414033000",
+            config_hash="abc123",
             image_variant="thumb",
             batch_index=2,
             start_row=9,
@@ -257,6 +259,48 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         run_id = probe.build_run_id(datetime_text="2026-04-14T05:30:12+02:00")
         self.assertEqual(run_id, "vlm-20260414053012")
 
+    def test_build_config_hash_is_stable(self):
+        first = probe.build_config_hash(
+            {
+                "embedded_manifest_csv": "/tmp/a.csv",
+                "image_variant": "thumb",
+                "window_size": 5,
+                "overlap": 2,
+                "max_batches": 100,
+                "model": "qwen3.5:9b",
+                "ollama_base_url": "http://127.0.0.1:11434",
+                "ollama_num_ctx": 16384,
+                "ollama_num_predict": None,
+                "ollama_keep_alive": "15m",
+                "timeout_seconds": 300.0,
+                "temperature": 0.0,
+                "ollama_think": "false",
+                "extra_instructions": "",
+                "extra_instructions_file": None,
+            }
+        )
+        second = probe.build_config_hash(
+            {
+                "temperature": 0.0,
+                "ollama_num_predict": None,
+                "ollama_num_ctx": 16384,
+                "image_variant": "thumb",
+                "embedded_manifest_csv": "/tmp/a.csv",
+                "window_size": 5,
+                "overlap": 2,
+                "max_batches": 100,
+                "model": "qwen3.5:9b",
+                "ollama_base_url": "http://127.0.0.1:11434",
+                "ollama_keep_alive": "15m",
+                "timeout_seconds": 300.0,
+                "ollama_think": "false",
+                "extra_instructions": "",
+                "extra_instructions_file": None,
+            }
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 32)
+
     def test_write_run_metadata_json_includes_prompt_and_cli_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_dir = Path(tmp) / "_workspace"
@@ -265,6 +309,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 workspace_dir=workspace_dir,
                 run_id="vlm-20260414053012",
                 generated_at="2026-04-14T05:30:12+02:00",
+                config_hash="abc123",
                 embedded_manifest_csv=workspace_dir / "photo_embedded_manifest.csv",
                 photo_manifest_csv=workspace_dir / "photo_manifest.csv",
                 output_csv=workspace_dir / "vlm_boundary_test.csv",
@@ -280,6 +325,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             )
             metadata_path = workspace_dir / "vlm_runs" / "vlm-20260414053012.json"
             self.assertEqual(metadata["run_id"], "vlm-20260414053012")
+            self.assertEqual(metadata["config_hash"], "abc123")
             self.assertTrue(metadata_path.exists())
             stored = json.loads(metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(stored["user_prompt_template"], "user-template")
@@ -299,6 +345,293 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(rows[0]["generated_at"], "legacy")
             self.assertEqual(rows[1]["run_id"], "current")
             self.assertEqual(rows[1]["generated_at"], "current")
+
+    def test_append_result_rows_writes_config_hash_column(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_csv = Path(tmp) / "vlm_boundary_test.csv"
+            row = {header: "" for header in probe.OUTPUT_HEADERS}
+            row["run_id"] = "vlm-20260414033000"
+            row["config_hash"] = "abc123"
+            probe.append_result_rows(output_csv, [row])
+            rows = probe.read_result_rows(output_csv)
+            self.assertEqual(rows[0]["config_hash"], "abc123")
+
+    def test_resolve_run_state_uses_latest_matching_run_for_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
+            runs_dir.mkdir(parents=True)
+            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            with output_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=probe.OUTPUT_HEADERS)
+                writer.writeheader()
+                first = {header: "" for header in probe.OUTPUT_HEADERS}
+                first["run_id"] = "vlm-20260414053012"
+                first["batch_index"] = "1"
+                first["config_hash"] = "samehash"
+                writer.writerow(first)
+                second = {header: "" for header in probe.OUTPUT_HEADERS}
+                second["run_id"] = "vlm-20260414053113"
+                second["batch_index"] = "2"
+                second["config_hash"] = "samehash"
+                writer.writerow(second)
+            for run_id in ("vlm-20260414053012", "vlm-20260414053113"):
+                (runs_dir / f"{run_id}.json").write_text(
+                    json.dumps({"run_id": run_id, "config_hash": "samehash", "args": {}}),
+                    encoding="utf-8",
+                )
+            state = probe.resolve_run_state(
+                workspace_dir=workspace_dir,
+                output_csv=output_csv,
+                config_hash="samehash",
+                new_run=False,
+            )
+            self.assertEqual(state["run_id"], "vlm-20260414053113")
+            self.assertEqual(state["completed_batches"], 1)
+
+    def test_resolve_run_state_rejects_parameter_mismatch_on_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
+            runs_dir.mkdir(parents=True)
+            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            (runs_dir / "vlm-20260414053113.json").write_text(
+                json.dumps({"run_id": "vlm-20260414053113", "config_hash": "oldhash", "args": {"window_size": 5}}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Parameter mismatch"):
+                probe.resolve_run_state(
+                    workspace_dir=workspace_dir,
+                    output_csv=output_csv,
+                    config_hash="newhash",
+                    new_run=False,
+                )
+
+    def test_resolve_run_state_new_run_ignores_latest_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
+            runs_dir.mkdir(parents=True)
+            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            (runs_dir / "vlm-20260414053113.json").write_text(
+                json.dumps({"run_id": "vlm-20260414053113", "config_hash": "oldhash", "args": {}}),
+                encoding="utf-8",
+            )
+            state = probe.resolve_run_state(
+                workspace_dir=workspace_dir,
+                output_csv=output_csv,
+                config_hash="newhash",
+                new_run=True,
+            )
+            self.assertIsNone(state["run_id"])
+            self.assertEqual(state["completed_batches"], 0)
+
+    def test_build_resume_message_reports_next_batch_and_remaining(self):
+        message = probe.build_resume_message(
+            run_id="vlm-20260414053113",
+            completed_batches=100,
+            total_batches=250,
+            requested_batches=25,
+        )
+        self.assertIn("Continuing VLM run vlm-20260414053113", message)
+        self.assertIn("batch 101", message)
+        self.assertIn("150 remaining", message)
+        self.assertIn("running up to 25 more", message)
+
+    def test_probe_vlm_photo_boundaries_returns_zero_at_end_of_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            thumb_dir = workspace_dir / "embedded_jpg" / "thumb" / "cam"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "cam"
+            thumb_dir.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            for name in ("a", "b", "c", "d", "e"):
+                (thumb_dir / f"{name}.jpg").write_bytes(b"x")
+                (preview_dir / f"{name}.jpg").write_bytes(b"x")
+            embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            with embedded_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "thumb_path", "preview_path"])
+                writer.writeheader()
+                for name in ("a", "b", "c", "d", "e"):
+                    writer.writerow(
+                        {
+                            "relative_path": f"cam/{name}.hif",
+                            "thumb_path": f"embedded_jpg/thumb/cam/{name}.jpg",
+                            "preview_path": f"embedded_jpg/preview/cam/{name}.jpg",
+                        }
+                    )
+            photo_manifest_csv = workspace_dir / "photo_manifest.csv"
+            with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "start_epoch_ms", "start_local", "photo_order_index"])
+                writer.writeheader()
+                for index, name in enumerate(("a", "b", "c", "d", "e")):
+                    writer.writerow(
+                        {
+                            "relative_path": f"cam/{name}.hif",
+                            "start_epoch_ms": str(1000 + index),
+                            "start_local": f"2026-03-23T10:00:0{index}",
+                            "photo_order_index": str(index),
+                        }
+                    )
+            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            args_payload = {
+                "embedded_manifest_csv": str(embedded_manifest_csv),
+                "photo_manifest_csv": str(photo_manifest_csv),
+                "image_variant": "thumb",
+                "window_size": 5,
+                "overlap": 2,
+                "max_batches": 100,
+                "model": "qwen3.5:9b",
+                "ollama_base_url": "http://127.0.0.1:11434",
+                "ollama_num_ctx": 16384,
+                "ollama_num_predict": None,
+                "ollama_keep_alive": "15m",
+                "timeout_seconds": 300.0,
+                "temperature": 0.0,
+                "ollama_think": "false",
+                "extra_instructions": "",
+                "extra_instructions_file": None,
+                "effective_extra_instructions": "",
+            }
+            config_hash = probe.build_config_hash(args_payload)
+            with output_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=probe.OUTPUT_HEADERS)
+                writer.writeheader()
+                row = {header: "" for header in probe.OUTPUT_HEADERS}
+                row["run_id"] = "vlm-20260414053113"
+                row["config_hash"] = config_hash
+                row["batch_index"] = "1"
+                writer.writerow(row)
+            runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
+            runs_dir.mkdir(parents=True)
+            (runs_dir / "vlm-20260414053113.json").write_text(
+                json.dumps({"run_id": "vlm-20260414053113", "config_hash": config_hash, "args": {}}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(probe, "build_run_id", return_value="vlm-20260414053113"), mock.patch.object(
+                probe, "ollama_post_json"
+            ) as ollama_mock:
+                row_count = probe.probe_vlm_photo_boundaries(
+                    workspace_dir=workspace_dir,
+                    embedded_manifest_csv=embedded_manifest_csv,
+                    photo_manifest_csv=photo_manifest_csv,
+                    output_csv=output_csv,
+                    image_variant="thumb",
+                    window_size=5,
+                    overlap=2,
+                    max_batches=100,
+                    model="qwen3.5:9b",
+                    ollama_base_url="http://127.0.0.1:11434",
+                    ollama_num_ctx=16384,
+                    ollama_num_predict=None,
+                    ollama_keep_alive="15m",
+                    timeout_seconds=300.0,
+                    temperature=0.0,
+                    ollama_think="false",
+                    extra_instructions="",
+                    dump_debug_dir=None,
+                    args_payload=args_payload,
+                    new_run=False,
+                )
+            self.assertEqual(row_count, 0)
+            ollama_mock.assert_not_called()
+
+    def test_probe_vlm_photo_boundaries_appends_each_batch_immediately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            thumb_dir = workspace_dir / "embedded_jpg" / "thumb" / "cam"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "cam"
+            thumb_dir.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            for name in ("a", "b", "c", "d", "e", "f", "g", "h"):
+                (thumb_dir / f"{name}.jpg").write_bytes(b"x")
+                (preview_dir / f"{name}.jpg").write_bytes(b"x")
+            embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            with embedded_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "thumb_path", "preview_path"])
+                writer.writeheader()
+                for name in ("a", "b", "c", "d", "e", "f", "g", "h"):
+                    writer.writerow(
+                        {
+                            "relative_path": f"cam/{name}.hif",
+                            "thumb_path": f"embedded_jpg/thumb/cam/{name}.jpg",
+                            "preview_path": f"embedded_jpg/preview/cam/{name}.jpg",
+                        }
+                    )
+            photo_manifest_csv = workspace_dir / "photo_manifest.csv"
+            with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "start_epoch_ms", "start_local", "photo_order_index"])
+                writer.writeheader()
+                for index, name in enumerate(("a", "b", "c", "d", "e", "f", "g", "h")):
+                    writer.writerow(
+                        {
+                            "relative_path": f"cam/{name}.hif",
+                            "start_epoch_ms": str(1000 + index),
+                            "start_local": f"2026-03-23T10:00:{index:02d}",
+                            "photo_order_index": str(index),
+                        }
+                    )
+            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            args_payload = {
+                "embedded_manifest_csv": str(embedded_manifest_csv),
+                "photo_manifest_csv": str(photo_manifest_csv),
+                "image_variant": "thumb",
+                "window_size": 5,
+                "overlap": 2,
+                "max_batches": 2,
+                "model": "qwen3.5:9b",
+                "ollama_base_url": "http://127.0.0.1:11434",
+                "ollama_num_ctx": 16384,
+                "ollama_num_predict": None,
+                "ollama_keep_alive": "15m",
+                "timeout_seconds": 300.0,
+                "temperature": 0.0,
+                "ollama_think": "false",
+                "extra_instructions": "",
+                "extra_instructions_file": None,
+                "effective_extra_instructions": "",
+            }
+            observed_line_counts: list[int] = []
+
+            def fake_ollama(*_args, **_kwargs):
+                if output_csv.exists():
+                    with output_csv.open("r", encoding="utf-8") as handle:
+                        observed_line_counts.append(sum(1 for _ in handle))
+                else:
+                    observed_line_counts.append(0)
+                return {"message": {"content": '{"decision":"no_cut","reason":"Frame-by-frame notes: ok"}'}}
+
+            with mock.patch.object(probe, "ollama_post_json", side_effect=fake_ollama), mock.patch.object(
+                probe, "build_run_id", return_value="vlm-20260414060000"
+            ):
+                row_count = probe.probe_vlm_photo_boundaries(
+                    workspace_dir=workspace_dir,
+                    embedded_manifest_csv=embedded_manifest_csv,
+                    photo_manifest_csv=photo_manifest_csv,
+                    output_csv=output_csv,
+                    image_variant="thumb",
+                    window_size=5,
+                    overlap=2,
+                    max_batches=2,
+                    model="qwen3.5:9b",
+                    ollama_base_url="http://127.0.0.1:11434",
+                    ollama_num_ctx=16384,
+                    ollama_num_predict=None,
+                    ollama_keep_alive="15m",
+                    timeout_seconds=300.0,
+                    temperature=0.0,
+                    ollama_think="false",
+                    extra_instructions="",
+                    dump_debug_dir=None,
+                    args_payload=args_payload,
+                    new_run=True,
+                )
+            self.assertEqual(row_count, 2)
+            self.assertEqual(observed_line_counts, [0, 2])
 
     def test_dump_debug_artifacts_writes_prompt_request_and_response(self):
         with tempfile.TemporaryDirectory() as tmp:

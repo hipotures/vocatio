@@ -120,15 +120,29 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
-            payload = builder.build_gui_index_for_run(
+            payload, run_row_count = builder.build_gui_index_for_run(
                 workspace_dir=workspace_dir,
                 run_metadata={"run_id": "vlm-20260414053012", "args": {"image_variant": "thumb"}, "embedded_manifest_csv": str(embedded_manifest_csv), "photo_manifest_csv": str(photo_manifest_csv), "output_csv": str(output_csv)},
                 output_csv=output_csv,
             )
+            self.assertEqual(run_row_count, 1)
             self.assertEqual(payload["performance_count"], 2)
             self.assertEqual([photo["relative_path"] for photo in payload["performances"][0]["photos"]], ["cam/a.hif", "cam/b.hif"])
             self.assertEqual([photo["relative_path"] for photo in payload["performances"][1]["photos"]], ["cam/c.hif", "cam/d.hif"])
             self.assertEqual(payload["performances"][0]["photos"][0]["proxy_path"], "embedded_jpg/preview/cam/a.jpg")
+
+    def test_build_summary_message_includes_run_rows_photos_and_sets(self):
+        message = builder.build_summary_message(
+            run_id="vlm-20260414124712",
+            run_row_count=200,
+            payload={"photo_count": 602, "performance_count": 37},
+            gui_index_output=Path("/tmp/performance_proxy_index.image.vlm.json"),
+        )
+        self.assertIn("vlm-20260414124712", message)
+        self.assertIn("200 VLM rows", message)
+        self.assertIn("602 photos", message)
+        self.assertIn("37 set", message)
+        self.assertIn("/tmp/performance_proxy_index.image.vlm.json", message)
 
 
 if __name__ == "__main__":

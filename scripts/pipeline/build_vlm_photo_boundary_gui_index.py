@@ -69,7 +69,7 @@ def build_gui_index_for_run(
     workspace_dir: Path,
     run_metadata: Mapping[str, Any],
     output_csv: Path,
-) -> Dict[str, Any]:
+) -> tuple[Dict[str, Any], int]:
     image_variant = str(run_metadata["args"]["image_variant"])
     embedded_manifest_csv = Path(str(run_metadata["embedded_manifest_csv"]))
     photo_manifest_csv = Path(str(run_metadata["photo_manifest_csv"]))
@@ -96,13 +96,28 @@ def build_gui_index_for_run(
     ordered_rows = [row for row in joined_rows if str(row["relative_path"]) in covered_path_set]
     if not ordered_rows:
         raise ValueError(f"No joined manifest rows matched run_id={run_id}")
-    return probe.build_gui_index_payload(
+    payload = probe.build_gui_index_payload(
         day_name=workspace_dir.parent.name,
         workspace_dir=workspace_dir,
         image_variant=image_variant,
         run_id=run_id,
         ordered_rows=ordered_rows,
         result_rows=run_rows,
+    )
+    return payload, len(run_rows)
+
+
+def build_summary_message(
+    *,
+    run_id: str,
+    run_row_count: int,
+    payload: Mapping[str, Any],
+    gui_index_output: Path,
+) -> str:
+    return (
+        f"Wrote GUI index for {run_id} to {gui_index_output} "
+        f"from {run_row_count} VLM rows, {int(payload.get('photo_count', 0))} photos, "
+        f"{int(payload.get('performance_count', 0))} set(s)."
     )
 
 
@@ -117,13 +132,20 @@ def main() -> int:
     if not output_csv.exists():
         raise SystemExit(f"Probe CSV does not exist: {output_csv}")
     run_metadata = select_run_metadata(workspace_dir=workspace_dir, run_id=args.run_id)
-    payload = build_gui_index_for_run(
+    payload, run_row_count = build_gui_index_for_run(
         workspace_dir=workspace_dir,
         run_metadata=run_metadata,
         output_csv=output_csv,
     )
     atomic_write_json(gui_index_output, payload)
-    console.print(f"Wrote GUI index for {run_metadata['run_id']} to {gui_index_output}")
+    console.print(
+        build_summary_message(
+            run_id=str(run_metadata["run_id"]),
+            run_row_count=run_row_count,
+            payload=payload,
+            gui_index_output=gui_index_output,
+        )
+    )
     return 0
 
 
