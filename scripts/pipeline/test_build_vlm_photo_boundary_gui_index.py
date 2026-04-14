@@ -55,9 +55,12 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
             photo_manifest_csv = workspace_dir / "photo_manifest.csv"
             embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
             thumb_dir = workspace_dir / "embedded_jpg" / "thumb" / "cam"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "cam"
             thumb_dir.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
             for name in ("a", "b", "c", "d"):
                 (thumb_dir / f"{name}.jpg").write_bytes(f"jpg-{name}".encode("utf-8"))
+                (preview_dir / f"{name}.jpg").write_bytes(f"preview-{name}".encode("utf-8"))
             with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(
                     handle,
@@ -125,6 +128,7 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
             self.assertEqual(payload["performance_count"], 2)
             self.assertEqual([photo["relative_path"] for photo in payload["performances"][0]["photos"]], ["cam/a.hif", "cam/b.hif"])
             self.assertEqual([photo["relative_path"] for photo in payload["performances"][1]["photos"]], ["cam/c.hif", "cam/d.hif"])
+            self.assertEqual(payload["performances"][0]["photos"][0]["proxy_path"], "embedded_jpg/preview/cam/a.jpg")
 
 
 if __name__ == "__main__":

@@ -184,11 +184,17 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             workspace_dir = day_dir / "_workspace"
             workspace_dir.mkdir(parents=True)
             thumb_dir = workspace_dir / "embedded_jpg" / "thumb" / "cam"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "cam"
             thumb_dir.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
             thumb_a = thumb_dir / "a.jpg"
             thumb_b = thumb_dir / "b.jpg"
+            preview_a = preview_dir / "a.jpg"
+            preview_b = preview_dir / "b.jpg"
             thumb_a.write_bytes(b"jpg-a")
             thumb_b.write_bytes(b"jpg-b")
+            preview_a.write_bytes(b"preview-a")
+            preview_b.write_bytes(b"preview-b")
             embedded_manifest = workspace_dir / "photo_embedded_manifest.csv"
             photo_manifest = workspace_dir / "photo_manifest.csv"
             with embedded_manifest.open("w", newline="", encoding="utf-8") as handle:
@@ -279,6 +285,21 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(stored["user_prompt_template"], "user-template")
             self.assertEqual(stored["args"]["window_size"], 5)
 
+    def test_read_result_rows_accepts_legacy_header_with_new_run_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_csv = Path(tmp) / "vlm_boundary_test.csv"
+            with output_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(probe.LEGACY_OUTPUT_HEADERS)
+                writer.writerow(["legacy"] * len(probe.LEGACY_OUTPUT_HEADERS))
+                writer.writerow(["current"] * len(probe.OUTPUT_HEADERS))
+            rows = probe.read_result_rows(output_csv)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["run_id"], "")
+            self.assertEqual(rows[0]["generated_at"], "legacy")
+            self.assertEqual(rows[1]["run_id"], "current")
+            self.assertEqual(rows[1]["generated_at"], "current")
+
     def test_dump_debug_artifacts_writes_prompt_request_and_response(self):
         with tempfile.TemporaryDirectory() as tmp:
             debug_dir = Path(tmp)
@@ -332,6 +353,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     "filename": "a.hif",
                     "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/a.jpg",
                     "image_relative_path": "embedded_jpg/thumb/cam/a.jpg",
+                    "preview_relative_path": "embedded_jpg/preview/cam/a.jpg",
                     "start_local": "2026-03-23T10:00:00",
                     "stream_id": "cam",
                     "device": "cam",
@@ -342,6 +364,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     "filename": "b.hif",
                     "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/b.jpg",
                     "image_relative_path": "embedded_jpg/thumb/cam/b.jpg",
+                    "preview_relative_path": "embedded_jpg/preview/cam/b.jpg",
                     "start_local": "2026-03-23T10:00:01",
                     "stream_id": "cam",
                     "device": "cam",
@@ -352,6 +375,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     "filename": "c.hif",
                     "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/c.jpg",
                     "image_relative_path": "embedded_jpg/thumb/cam/c.jpg",
+                    "preview_relative_path": "embedded_jpg/preview/cam/c.jpg",
                     "start_local": "2026-03-23T10:00:02",
                     "stream_id": "cam",
                     "device": "cam",
@@ -362,6 +386,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     "filename": "d.hif",
                     "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/d.jpg",
                     "image_relative_path": "embedded_jpg/thumb/cam/d.jpg",
+                    "preview_relative_path": "embedded_jpg/preview/cam/d.jpg",
                     "start_local": "2026-03-23T10:00:03",
                     "stream_id": "cam",
                     "device": "cam",
@@ -392,7 +417,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(payload["performances"][0]["timeline_status"], "vlm_probe:2_hits")
         self.assertEqual([photo["relative_path"] for photo in payload["performances"][0]["photos"]], ["cam/a.hif", "cam/b.hif"])
         self.assertEqual([photo["relative_path"] for photo in payload["performances"][1]["photos"]], ["cam/c.hif", "cam/d.hif"])
-        self.assertEqual(payload["performances"][0]["photos"][0]["proxy_path"], "embedded_jpg/thumb/cam/a.jpg")
+        self.assertEqual(payload["performances"][0]["photos"][0]["proxy_path"], "embedded_jpg/preview/cam/a.jpg")
         self.assertIn("same cut repeated in overlap", payload["performances"][0]["vlm_boundary_reasons"])
 
 

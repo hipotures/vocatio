@@ -71,6 +71,7 @@ OUTPUT_HEADERS = [
     "response_status",
     "raw_response",
 ]
+LEGACY_OUTPUT_HEADERS = [header for header in OUTPUT_HEADERS if header != "run_id"]
 
 SYSTEM_PROMPT = (
     "You analyze consecutive stage performance photos. "
@@ -256,9 +257,15 @@ def read_joined_rows(
         image_value = str(embedded_row.get(image_column, "") or "").strip()
         if not image_value:
             raise ValueError(f"{embedded_manifest_csv.name} row missing {image_column} for {relative_path}")
+        preview_value = str(embedded_row.get("preview_path", "") or "").strip()
+        if not preview_value:
+            raise ValueError(f"{embedded_manifest_csv.name} row missing preview_path for {relative_path}")
         image_path = resolve_path(workspace_dir, image_value).resolve()
         if not image_path.exists():
             raise ValueError(f"Image variant file does not exist: {image_path}")
+        preview_path = resolve_path(workspace_dir, preview_value).resolve()
+        if not preview_path.exists():
+            raise ValueError(f"Preview image file does not exist: {preview_path}")
         joined_rows.append(
             {
                 "relative_path": relative_path,
@@ -266,6 +273,8 @@ def read_joined_rows(
                 "filename": Path(relative_path).name,
                 "image_path": str(image_path),
                 "image_relative_path": image_value,
+                "preview_path": str(preview_path),
+                "preview_relative_path": preview_value,
                 "start_epoch_ms": str(photo_row.get("start_epoch_ms", "") or "").strip(),
                 "start_local": str(photo_row.get("start_local", "") or "").strip(),
                 "photo_order_index": str(photo_row.get("photo_order_index", "") or "").strip(),
@@ -737,7 +746,7 @@ def build_gui_index_payload(
                 {
                     "relative_path": str(row["relative_path"]),
                     "source_path": str(row["source_path"]),
-                    "proxy_path": str(row["image_relative_path"]),
+                    "proxy_path": str(row["preview_relative_path"]),
                     "proxy_exists": True,
                     "filename": str(row["filename"]),
                     "photo_start_local": str(row.get("start_local", "") or ""),
@@ -780,10 +789,39 @@ def build_gui_index_payload(
 
 
 def read_result_rows(output_csv: Path) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
     with output_csv.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        validate_required_columns(output_csv.name, reader.fieldnames, tuple(OUTPUT_HEADERS))
-        return [dict(row) for row in reader]
+        reader = csv.reader(handle)
+        try:
+            header_row = next(reader)
+        except StopIteration:
+            return rows
+        header = [str(value) for value in header_row]
+        if header == OUTPUT_HEADERS:
+            for row in reader:
+                if not row:
+                    continue
+                padded = list(row) + [""] * max(0, len(OUTPUT_HEADERS) - len(row))
+                rows.append({key: padded[index] for index, key in enumerate(OUTPUT_HEADERS)})
+            return rows
+        if header == LEGACY_OUTPUT_HEADERS:
+            for row in reader:
+                if not row:
+                    continue
+                if len(row) == len(LEGACY_OUTPUT_HEADERS):
+                    rows.append({key: row[index] for index, key in enumerate(LEGACY_OUTPUT_HEADERS)} | {"run_id": ""})
+                    continue
+                if len(row) == len(OUTPUT_HEADERS):
+                    rows.append({key: row[index] for index, key in enumerate(OUTPUT_HEADERS)})
+                    continue
+                raise ValueError(
+                    f"{output_csv.name} has unsupported row width {len(row)} for legacy header; expected "
+                    f"{len(LEGACY_OUTPUT_HEADERS)} or {len(OUTPUT_HEADERS)} columns"
+                )
+            return rows
+    raise ValueError(
+        f"{output_csv.name} has unsupported header; expected current or legacy VLM probe columns"
+    )
 
 
 def probe_vlm_photo_boundaries(
