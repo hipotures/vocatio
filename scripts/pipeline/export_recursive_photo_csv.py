@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import os
@@ -35,6 +36,13 @@ EXIFTOOL_BATCH_SIZE = 1000
 EXIFTOOL_PROGRESS_RE = re.compile(r"\[(?P<current>\d+)/(?P<total>\d+)\]\s*$")
 
 
+def positive_int_arg(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Export a recursive photo manifest for one day directory into a single logical photo stream CSV."
@@ -57,6 +65,12 @@ def parse_args() -> argparse.Namespace:
         "--device",
         default="",
         help="Optional device label to store in the manifest.",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=positive_int_arg,
+        default=4,
+        help="Number of EXIF batches to process in parallel. Default: 4",
     )
     return parser.parse_args()
 
@@ -313,6 +327,19 @@ def build_manifest_rows(
     return finalize_manifest_rows(rows_with_sort)
 
 
+def process_exif_batch(
+    day_dir: Path,
+    stream_id: str,
+    device: str,
+    batch_start: int,
+    batch: Sequence[Path],
+) -> tuple[int, List[tuple[tuple[object, str, str], Dict[str, str]]]]:
+    metadata_items = run_exiftool_batch(batch)
+    batch_metadata_by_path = metadata_by_source_path(metadata_items)
+    batch_rows_with_sort = build_batch_manifest_rows(day_dir, stream_id, device, batch, batch_metadata_by_path)
+    return batch_start, batch_rows_with_sort
+
+
 def resolve_output_path(workspace_dir: Path, output_value: Optional[str], stream_id: str) -> Path:
     if not output_value:
         return workspace_dir / "photo_manifest.csv"
@@ -327,6 +354,7 @@ def export_recursive_photo_csv(
     output_path: Path,
     stream_id: str,
     device: str,
+    jobs: int,
 ) -> int:
     files = collect_source_files(day_dir)
     if not files:
@@ -345,24 +373,46 @@ def export_recursive_photo_csv(
         rows_task = progress.add_task("Build manifest rows".ljust(25), total=len(files))
         partial_handle, partial_writer = open_partial_manifest_csv(partial_path)
         try:
-            for batch_start in range(0, len(files), EXIFTOOL_BATCH_SIZE):
-                batch = files[batch_start:batch_start + EXIFTOOL_BATCH_SIZE]
-                metadata_items = run_exiftool_batch(
-                    batch,
-                    progress_callback=lambda current, total: progress.update(
-                        metadata_task,
-                        completed=batch_start + current,
-                    ),
-                )
-                batch_metadata_by_path = metadata_by_source_path(metadata_items)
-                batch_rows_with_sort = build_batch_manifest_rows(day_dir, stream_id, device, batch, batch_metadata_by_path)
-                rows_with_sort.extend(batch_rows_with_sort)
-                append_partial_manifest_rows(
-                    partial_handle,
-                    partial_writer,
-                    [row for _sort_key, row in batch_rows_with_sort],
-                )
-                progress.update(metadata_task, completed=batch_start + len(batch))
+            batches = [
+                (batch_start, files[batch_start:batch_start + EXIFTOOL_BATCH_SIZE])
+                for batch_start in range(0, len(files), EXIFTOOL_BATCH_SIZE)
+            ]
+            if jobs <= 1 or len(batches) <= 1:
+                for batch_start, batch in batches:
+                    metadata_items = run_exiftool_batch(
+                        batch,
+                        progress_callback=lambda current, total: progress.update(
+                            metadata_task,
+                            completed=batch_start + current,
+                        ),
+                    )
+                    batch_metadata_by_path = metadata_by_source_path(metadata_items)
+                    batch_rows_with_sort = build_batch_manifest_rows(day_dir, stream_id, device, batch, batch_metadata_by_path)
+                    rows_with_sort.extend(batch_rows_with_sort)
+                    append_partial_manifest_rows(
+                        partial_handle,
+                        partial_writer,
+                        [row for _sort_key, row in batch_rows_with_sort],
+                    )
+                    progress.update(metadata_task, completed=batch_start + len(batch))
+            else:
+                max_workers = min(jobs, max(1, len(batches)))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_batch_size = {
+                        executor.submit(process_exif_batch, day_dir, stream_id, device, batch_start, batch): len(batch)
+                        for batch_start, batch in batches
+                    }
+                    metadata_completed = 0
+                    for future in concurrent.futures.as_completed(future_to_batch_size):
+                        _batch_start, batch_rows_with_sort = future.result()
+                        rows_with_sort.extend(batch_rows_with_sort)
+                        append_partial_manifest_rows(
+                            partial_handle,
+                            partial_writer,
+                            [row for _sort_key, row in batch_rows_with_sort],
+                        )
+                        metadata_completed += future_to_batch_size[future]
+                        progress.update(metadata_task, completed=metadata_completed)
             rows = finalize_manifest_rows(rows_with_sort)
             rewrite_partial_manifest_csv(partial_path, rows)
             progress.update(rows_task, completed=len(files))
@@ -384,6 +434,7 @@ def main() -> int:
         output_path=output_path,
         stream_id=args.stream_id,
         device=args.device,
+        jobs=args.jobs,
     )
     console.print(f"Wrote {row_count} photo rows to {output_path}")
     return 0

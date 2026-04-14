@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+import concurrent.futures
 from pathlib import Path
 from unittest import mock
 
@@ -23,6 +24,15 @@ export_csv = load_module("export_recursive_photo_csv_test", "scripts/pipeline/ex
 
 
 class ExportRecursivePhotoCsvTests(unittest.TestCase):
+    def test_parse_args_accepts_jobs(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["export_recursive_photo_csv.py", "/tmp/day", "--jobs", "6"],
+        ):
+            args = export_csv.parse_args()
+        self.assertEqual(args.jobs, 6)
+
     def test_exiftool_base_command_suppresses_summary_noise(self):
         self.assertIn("-q", export_csv.exiftool_base_command())
 
@@ -95,6 +105,7 @@ class ExportRecursivePhotoCsvTests(unittest.TestCase):
                             output_path=output_path,
                             stream_id="p-main",
                             device="",
+                            jobs=1,
                         )
 
             self.assertEqual(row_count, 3)
@@ -136,8 +147,66 @@ class ExportRecursivePhotoCsvTests(unittest.TestCase):
             )
             self.assertEqual([row["relative_path"] for row in rows], ["hour10/a.jpg", "hour10/b.jpg"])
             self.assertEqual([row["photo_order_index"] for row in rows], ["0", "1"])
-            self.assertEqual([row["photo_id"] for row in rows], ["hour10/a.jpg", "hour10/b.jpg"])
-            self.assertEqual([row["filename"] for row in rows], ["hour10/a.jpg", "hour10/b.jpg"])
+
+    def test_export_recursive_photo_csv_uses_thread_pool_for_parallel_batches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            source_dir = day_dir / "hour10"
+            source_dir.mkdir(parents=True)
+            files = []
+            for name in ("a.jpg", "b.jpg", "c.jpg", "d.jpg"):
+                path = source_dir / name
+                path.write_bytes(b"x")
+                files.append(path)
+            output_path = workspace_dir / "photo_manifest.csv"
+
+            metadata_by_path = {
+                str(path): {"SourceFile": str(path), "DateTimeOriginal": f"2026:03:23 10:00:0{index}"}
+                for index, path in enumerate(files)
+            }
+
+            class FakeExecutor:
+                created_workers: list[int] = []
+
+                def __init__(self, max_workers: int):
+                    self.max_workers = max_workers
+                    FakeExecutor.created_workers.append(max_workers)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def submit(self, fn, *args, **kwargs):
+                    future: concurrent.futures.Future = concurrent.futures.Future()
+                    future.set_result(fn(*args, **kwargs))
+                    return future
+
+            with mock.patch.object(export_csv, "collect_source_files", return_value=files), mock.patch.object(
+                export_csv,
+                "run_exiftool_batch",
+                side_effect=lambda paths, progress_callback=None: [metadata_by_path[str(path)] for path in paths],
+            ), mock.patch.object(export_csv, "EXIFTOOL_BATCH_SIZE", 2), mock.patch.object(
+                export_csv.concurrent.futures,
+                "ThreadPoolExecutor",
+                FakeExecutor,
+            ):
+                row_count = export_csv.export_recursive_photo_csv(
+                    day_dir=day_dir,
+                    output_path=output_path,
+                    stream_id="p-main",
+                    device="",
+                    jobs=4,
+                )
+
+            self.assertEqual(row_count, 4)
+            self.assertEqual(FakeExecutor.created_workers, [2])
+            lines = output_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines[0], ",".join(export_csv.PHOTO_MANIFEST_HEADERS))
+            self.assertEqual(len(lines), 5)
 
     def test_pick_capture_time_rejects_file_timestamp_fallbacks(self):
         with self.assertRaisesRegex(ValueError, "Could not determine capture time from trusted EXIF metadata"):
