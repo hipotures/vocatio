@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, List, Mapping, Optional
@@ -58,6 +59,13 @@ HIGHLIGHT_CLIP_THRESHOLD = 0.02
 SHADOW_CLIP_THRESHOLD = 0.02
 
 
+def positive_int_arg(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build photo quality annotations for image-only stage 1 without excluding any photos."
@@ -79,6 +87,12 @@ def parse_args() -> argparse.Namespace:
         "--overwrite",
         action="store_true",
         help="Overwrite an existing photo_quality.csv output",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=positive_int_arg,
+        default=4,
+        help="Number of photos to process in parallel. Default: 4",
     )
     return parser.parse_args()
 
@@ -264,11 +278,29 @@ def compute_quality_row(
     }
 
 
+def compute_quality_row_from_manifest_row(
+    workspace_dir: Path,
+    manifest_row: Mapping[str, str],
+    image_loader: Callable[[Path], np.ndarray],
+) -> Dict[str, str]:
+    relative_path = str(manifest_row.get("relative_path") or "").strip()
+    preview_path = str(manifest_row.get("preview_path") or "").strip()
+    if not relative_path:
+        raise ValueError("photo_embedded_manifest.csv row missing relative_path")
+    if not preview_path:
+        raise ValueError(f"photo_embedded_manifest.csv row missing preview_path for {relative_path}")
+    image = image_loader(resolve_preview_path(workspace_dir, relative_path, preview_path))
+    return compute_quality_row(relative_path, image)
+
+
 def build_quality_rows(
     workspace_dir: Path,
     manifest_rows: List[Mapping[str, str]],
     image_loader: Callable[[Path], np.ndarray] = load_grayscale_image,
+    jobs: int = 4,
 ) -> List[Dict[str, str]]:
+    if jobs < 1:
+        raise ValueError("jobs must be at least 1")
     rows: List[Dict[str, str]] = []
     with Progress(
         *build_progress_columns(),
@@ -276,22 +308,36 @@ def build_quality_rows(
         console=console,
     ) as progress:
         task = progress.add_task("Annotate quality".ljust(25), total=len(manifest_rows))
-        for manifest_row in manifest_rows:
-            relative_path = str(manifest_row.get("relative_path") or "").strip()
-            preview_path = str(manifest_row.get("preview_path") or "").strip()
-            if not relative_path:
-                raise ValueError("photo_embedded_manifest.csv row missing relative_path")
-            if not preview_path:
-                raise ValueError(f"photo_embedded_manifest.csv row missing preview_path for {relative_path}")
-            image = image_loader(resolve_preview_path(workspace_dir, relative_path, preview_path))
-            rows.append(compute_quality_row(relative_path, image))
-            progress.advance(task)
+        if jobs <= 1 or len(manifest_rows) <= 1:
+            for manifest_row in manifest_rows:
+                rows.append(compute_quality_row_from_manifest_row(workspace_dir, manifest_row, image_loader))
+                progress.advance(task)
+        else:
+            max_workers = min(jobs, max(1, len(manifest_rows)))
+            future_to_index: Dict[concurrent.futures.Future, int] = {}
+            pending_rows: Dict[int, Dict[str, str]] = {}
+            next_write_index = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for index, manifest_row in enumerate(manifest_rows):
+                    future = executor.submit(
+                        compute_quality_row_from_manifest_row,
+                        workspace_dir,
+                        manifest_row,
+                        image_loader,
+                    )
+                    future_to_index[future] = index
+                for future in concurrent.futures.as_completed(future_to_index):
+                    pending_rows[future_to_index[future]] = future.result()
+                    progress.advance(task)
+                    while next_write_index in pending_rows:
+                        rows.append(pending_rows.pop(next_write_index))
+                        next_write_index += 1
     return rows
 
 
-def build_photo_quality_annotations(workspace_dir: Path, manifest_csv: Path, output_path: Path) -> int:
+def build_photo_quality_annotations(workspace_dir: Path, manifest_csv: Path, output_path: Path, jobs: int = 4) -> int:
     manifest_rows = read_photo_manifest(manifest_csv)
-    quality_rows = build_quality_rows(workspace_dir, manifest_rows)
+    quality_rows = build_quality_rows(workspace_dir, manifest_rows, jobs=jobs)
     atomic_write_csv(output_path, PHOTO_QUALITY_HEADERS, quality_rows)
     return len(quality_rows)
 
@@ -308,7 +354,7 @@ def main() -> int:
         raise SystemExit(f"Manifest CSV does not exist: {manifest_csv}")
     if output_path.exists() and not args.overwrite:
         raise SystemExit(f"Output CSV already exists: {output_path}. Use --overwrite to replace it.")
-    row_count = build_photo_quality_annotations(workspace_dir, manifest_csv, output_path)
+    row_count = build_photo_quality_annotations(workspace_dir, manifest_csv, output_path, jobs=args.jobs)
     console.print(f"Wrote {row_count} photo quality rows to {output_path}")
     return 0
 

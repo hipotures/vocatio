@@ -1,4 +1,5 @@
 import importlib.util
+import concurrent.futures
 import sys
 import tempfile
 import unittest
@@ -25,6 +26,15 @@ quality = load_module("build_photo_quality_annotations_test", "scripts/pipeline/
 
 
 class BuildPhotoQualityAnnotationsTests(unittest.TestCase):
+    def test_parse_args_accepts_jobs(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["build_photo_quality_annotations.py", "/tmp/day", "--jobs", "6"],
+        ):
+            args = quality.parse_args()
+        self.assertEqual(args.jobs, 6)
+
     def test_progress_columns_include_eta_and_elapsed(self):
         columns = quality.build_progress_columns()
         self.assertTrue(any(column.__class__.__name__ == "TimeRemainingColumn" for column in columns))
@@ -106,7 +116,7 @@ class BuildPhotoQualityAnnotationsTests(unittest.TestCase):
                 with mock.patch.object(quality, "build_photo_quality_annotations", return_value=3) as build_mock:
                     exit_code = quality.main()
             self.assertEqual(exit_code, 0)
-            build_mock.assert_called_once_with(workspace_dir, manifest_csv, output_csv)
+            build_mock.assert_called_once_with(workspace_dir, manifest_csv, output_csv, jobs=4)
 
     def test_build_photo_quality_annotations_reads_preview_jpegs_from_embedded_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -126,6 +136,55 @@ class BuildPhotoQualityAnnotationsTests(unittest.TestCase):
 
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["relative_path"], "hour10/a.jpg")
+
+    def test_build_quality_rows_uses_thread_pool_when_jobs_gt_1(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "hour10"
+            preview_dir.mkdir(parents=True)
+            manifest_rows = []
+            for name in ("a", "b", "c"):
+                preview_path = preview_dir / f"{name}.jpg"
+                preview_path.write_bytes(b"jpg")
+                manifest_rows.append(
+                    {
+                        "relative_path": f"hour10/{name}.jpg",
+                        "preview_path": f"embedded_jpg/preview/hour10/{name}.jpg",
+                    }
+                )
+
+            class FakeExecutor:
+                created_workers: list[int] = []
+
+                def __init__(self, max_workers: int):
+                    self.max_workers = max_workers
+                    FakeExecutor.created_workers.append(max_workers)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def submit(self, fn, *args, **kwargs):
+                    future: concurrent.futures.Future = concurrent.futures.Future()
+                    future.set_result(fn(*args, **kwargs))
+                    return future
+
+            with mock.patch.object(
+                quality.concurrent.futures,
+                "ThreadPoolExecutor",
+                FakeExecutor,
+            ):
+                rows = quality.build_quality_rows(
+                    workspace_dir,
+                    manifest_rows,
+                    image_loader=lambda _path: np.zeros((4, 4), dtype=np.uint8),
+                    jobs=4,
+                )
+
+            self.assertEqual(len(rows), 3)
+            self.assertEqual(FakeExecutor.created_workers, [3])
 
     def test_build_photo_quality_annotations_rejects_preview_path_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:
