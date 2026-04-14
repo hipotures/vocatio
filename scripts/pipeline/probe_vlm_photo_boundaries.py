@@ -48,6 +48,7 @@ DEFAULT_TIMEOUT_SECONDS = 300.0
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_OLLAMA_THINK = "inherit"
 DEFAULT_RESPONSE_SCHEMA_MODE = "off"
+SEGMENT_TYPES = ("dance", "ceremony", "audience", "rehearsal", "other")
 EMBEDDED_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "thumb_path", "preview_path"})
 PHOTO_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "start_epoch_ms", "start_local", "photo_order_index"})
 PHOTO_BOUNDARY_SCORES_REQUIRED_COLUMNS = frozenset(
@@ -118,7 +119,8 @@ def build_system_prompt(response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE
         return (
             "You analyze consecutive stage performance photos. "
             "Choose at most one boundary between consecutive frames. "
-            "Return only valid JSON with keys boundary_after_frame, frame_notes, primary_evidence, and summary."
+            "Return only valid JSON with keys boundary_after_frame, left_segment_type, right_segment_type, "
+            "frame_notes, primary_evidence, and summary."
         )
     return SYSTEM_PROMPT
 
@@ -547,6 +549,14 @@ def build_response_schema(window_size: int) -> Dict[str, Any]:
                 "type": ["string", "null"],
                 "enum": build_boundary_after_frame_values(window_size),
             },
+            "left_segment_type": {
+                "type": "string",
+                "enum": list(SEGMENT_TYPES),
+            },
+            "right_segment_type": {
+                "type": "string",
+                "enum": list(SEGMENT_TYPES),
+            },
             "frame_notes": {
                 "type": "object",
                 "additionalProperties": False,
@@ -561,7 +571,14 @@ def build_response_schema(window_size: int) -> Dict[str, Any]:
             },
             "summary": {"type": "string"},
         },
-        "required": ["boundary_after_frame", "frame_notes", "primary_evidence", "summary"],
+        "required": [
+            "boundary_after_frame",
+            "left_segment_type",
+            "right_segment_type",
+            "frame_notes",
+            "primary_evidence",
+            "summary",
+        ],
     }
 
 
@@ -584,6 +601,8 @@ def build_user_prompt(
         response_object = (
             '{\n'
             f'  "boundary_after_frame": "{response_schema_hint}",\n'
+            f'  "left_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
+            f'  "right_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
             '  "frame_notes": {\n'
             + ",\n".join(
                 [f'    "frame_{index:02d}": "<short note>"' for index in range(1, window_size + 1)]
@@ -631,6 +650,12 @@ def build_user_prompt(
         "- audience or backstage insert\n"
         "- floor rehearsal / floor test / stage test\n"
         "- ceremony / award / host / result reading\n\n"
+        "Segment type labels:\n"
+        "- dance = active staged dance performance\n"
+        "- ceremony = awards, medals, result reading, host speaking, formal presentation\n"
+        "- audience = viewers, crowd, or audience-facing non-performance shots\n"
+        "- rehearsal = floor test, stage test, or non-performance rehearsal\n"
+        "- other = does not clearly fit the categories above\n\n"
         "True boundary signals:\n"
         "- different performer or different group\n"
         "- clearly different costume identity\n"
@@ -642,13 +667,15 @@ def build_user_prompt(
         "- framing change\n"
         "- lighting change alone\n"
         "- background change alone\n"
+        "- a background change caused by camera angle, shooting direction, crop, or zoom on the same stage\n"
         "- a group shot followed by a solo shot of one dancer from the same group\n"
         "- a solo shot followed by a wider group shot from the same ongoing act\n"
         "- a change in visible performer count caused only by framing, crop, zoom, or partial visibility\n\n"
         "Continuity reminders:\n"
         "- Group performance -> single dancer from the same group can still be the same segment.\n"
         "- Single dancer -> wider group view can still be the same segment.\n"
-        "- If costume identity and act identity still match, do not create a boundary only because fewer or more dancers are visible.\n\n"
+        "- If costume identity and act identity still match, do not create a boundary only because fewer or more dancers are visible.\n"
+        "- Ignore background differences if they can be explained by camera direction, framing, crop, zoom, or a different shooting angle on the same stage.\n\n"
         "Decision priority:\n"
         "1. images\n"
         "2. time\n"
@@ -673,6 +700,7 @@ def build_user_prompt(
         "Rules:\n"
         f"{response_rules}"
         f"- If more than one real boundary appears inside the {window_size}-frame window, choose the single strongest and clearest boundary.\n"
+        f"- Always assign left_segment_type and right_segment_type using only these values: {'|'.join(SEGMENT_TYPES)}.\n"
         "- Keep frame notes short and concrete.\n"
         '- If there is no boundary, primary_evidence should describe continuity evidence.\n'
         "- Output only valid JSON.\n"
@@ -829,6 +857,15 @@ def parse_model_response(raw_response: str, *, window_size: int) -> Dict[str, st
             "reason": f"Invalid decision value: {decision}",
             "response_status": "invalid_response",
         }
+    left_segment_type = str(payload.get("left_segment_type", "") or "").strip()
+    right_segment_type = str(payload.get("right_segment_type", "") or "").strip()
+    if boundary_after_frame != "__missing__":
+        if left_segment_type not in SEGMENT_TYPES or right_segment_type not in SEGMENT_TYPES:
+            return {
+                "decision": "invalid_response",
+                "reason": "Missing or invalid segment type value",
+                "response_status": "invalid_response",
+            }
     frame_notes = payload.get("frame_notes")
     if not isinstance(frame_notes, Mapping):
         return {
@@ -868,7 +905,13 @@ def parse_model_response(raw_response: str, *, window_size: int) -> Dict[str, st
             "reason": "Missing summary value",
             "response_status": "invalid_response",
         }
+    segment_type_reason = ""
+    if boundary_after_frame != "__missing__":
+        segment_type_reason = (
+            f"Left segment type: {left_segment_type} | Right segment type: {right_segment_type} | "
+        )
     reason = (
+        f"{segment_type_reason}"
         f"Frame notes: {'; '.join(normalized_frame_notes)} | "
         f"Primary evidence: {'; '.join(normalized_evidence)} | "
         f"Summary: {summary}"
@@ -1300,6 +1343,15 @@ def build_run_start_message(*, run_id: str, total_batches: int, boundary_gap_sec
     )
 
 
+def format_start_local_time(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "T" in text:
+        return text.split("T", 1)[1]
+    return text
+
+
 def build_candidate_batch_message(
     *,
     batch_index: int,
@@ -1312,7 +1364,7 @@ def build_candidate_batch_message(
 ) -> str:
     return (
         f"Batch {batch_index}/{total_batches} | gap {time_gap_seconds}s | rows {start_row}..{end_row} | "
-        f"{left_start_local[-8:]} -> {right_start_local[-8:]}"
+        f"{format_start_local_time(left_start_local)} -> {format_start_local_time(right_start_local)}"
     )
 
 
@@ -1331,7 +1383,7 @@ def build_batch_result_message(
     if cut_after_global_row:
         outcome = (
             f"{decision} -> global row {cut_after_global_row} "
-            f"({cut_left_start_local[-8:]} -> {cut_right_start_local[-8:]})"
+            f"({format_start_local_time(cut_left_start_local)} -> {format_start_local_time(cut_right_start_local)})"
         )
     return (
         f"Result batch {batch_index}: {outcome} | "

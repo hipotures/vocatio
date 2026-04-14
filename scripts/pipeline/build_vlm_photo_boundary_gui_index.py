@@ -78,24 +78,15 @@ def build_gui_index_for_run(
     run_rows = [row for row in all_result_rows if str(row.get("run_id", "")) == run_id]
     if not run_rows:
         raise ValueError(f"No probe CSV rows found for run_id={run_id}")
-    covered_relative_paths: List[str] = []
-    seen_relative_paths: set[str] = set()
-    for row in run_rows:
-        for relative_path in json.loads(str(row.get("relative_paths_json", "[]") or "[]")):
-            relative_path_text = str(relative_path)
-            if relative_path_text not in seen_relative_paths:
-                seen_relative_paths.add(relative_path_text)
-                covered_relative_paths.append(relative_path_text)
     joined_rows = probe.read_joined_rows(
         workspace_dir=workspace_dir,
         embedded_manifest_csv=embedded_manifest_csv,
         photo_manifest_csv=photo_manifest_csv,
         image_variant=image_variant,
     )
-    covered_path_set = set(covered_relative_paths)
-    ordered_rows = [row for row in joined_rows if str(row["relative_path"]) in covered_path_set]
+    ordered_rows = joined_rows
     if not ordered_rows:
-        raise ValueError(f"No joined manifest rows matched run_id={run_id}")
+        raise ValueError(f"No joined manifest rows found for run_id={run_id}")
     payload = probe.build_gui_index_payload(
         day_name=workspace_dir.parent.name,
         workspace_dir=workspace_dir,

@@ -73,12 +73,27 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             [None, "frame_01", "frame_02"],
         )
         self.assertEqual(
+            schema["properties"]["left_segment_type"]["enum"],
+            ["dance", "ceremony", "audience", "rehearsal", "other"],
+        )
+        self.assertEqual(
+            schema["properties"]["right_segment_type"]["enum"],
+            ["dance", "ceremony", "audience", "rehearsal", "other"],
+        )
+        self.assertEqual(
             list(schema["properties"]["frame_notes"]["properties"].keys()),
             ["frame_01", "frame_02", "frame_03"],
         )
         self.assertEqual(
             schema["required"],
-            ["boundary_after_frame", "frame_notes", "primary_evidence", "summary"],
+            [
+                "boundary_after_frame",
+                "left_segment_type",
+                "right_segment_type",
+                "frame_notes",
+                "primary_evidence",
+                "summary",
+            ],
         )
 
     def test_build_window_start_indexes_uses_overlap_and_aligned_tail(self):
@@ -248,11 +263,15 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             response_schema_mode="on",
         )
         self.assertIn('"boundary_after_frame"', prompt)
+        self.assertIn('"left_segment_type"', prompt)
+        self.assertIn('"right_segment_type"', prompt)
+        self.assertIn("dance|ceremony|audience|rehearsal|other", prompt)
         self.assertNotIn('"decision"', prompt)
         self.assertIn("<one of: null, frame_01, frame_02>", prompt)
 
     def test_build_system_prompt_mentions_boundary_after_frame_in_schema_mode(self):
         self.assertIn("boundary_after_frame", probe.build_system_prompt("on"))
+        self.assertIn("left_segment_type", probe.build_system_prompt("on"))
         self.assertIn("decision", probe.build_system_prompt("off"))
 
     def test_parse_model_response_accepts_structured_json_response(self):
@@ -268,16 +287,18 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
 
     def test_parse_model_response_accepts_boundary_after_frame_schema_response(self):
         parsed = probe.parse_model_response(
-            '{"boundary_after_frame":"frame_01","frame_notes":{"frame_01":"black-white solo","frame_02":"red-black solo"},"primary_evidence":["different performer"],"summary":"Boundary after frame 1."}',
+            '{"boundary_after_frame":"frame_01","left_segment_type":"dance","right_segment_type":"ceremony","frame_notes":{"frame_01":"black-white solo","frame_02":"red-black solo"},"primary_evidence":["different performer"],"summary":"Boundary after frame 1."}',
             window_size=2,
         )
         self.assertEqual(parsed["decision"], "cut_after_1")
+        self.assertIn("Left segment type: dance", parsed["reason"])
+        self.assertIn("Right segment type: ceremony", parsed["reason"])
         self.assertIn("Boundary after frame 1.", parsed["reason"])
         self.assertEqual(parsed["response_status"], "ok")
 
     def test_parse_model_response_accepts_boundary_after_frame_null_as_no_cut(self):
         parsed = probe.parse_model_response(
-            '{"boundary_after_frame":null,"frame_notes":{"frame_01":"same solo","frame_02":"same solo"},"primary_evidence":["same performer"],"summary":"Same segment."}',
+            '{"boundary_after_frame":null,"left_segment_type":"dance","right_segment_type":"dance","frame_notes":{"frame_01":"same solo","frame_02":"same solo"},"primary_evidence":["same performer"],"summary":"Same segment."}',
             window_size=2,
         )
         self.assertEqual(parsed["decision"], "no_cut")
@@ -285,11 +306,19 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
 
     def test_parse_model_response_accepts_boundary_after_frame_string_null_as_no_cut(self):
         parsed = probe.parse_model_response(
-            '{"boundary_after_frame":"null","frame_notes":{"frame_01":"same solo","frame_02":"same solo"},"primary_evidence":["same performer"],"summary":"Same segment."}',
+            '{"boundary_after_frame":"null","left_segment_type":"dance","right_segment_type":"dance","frame_notes":{"frame_01":"same solo","frame_02":"same solo"},"primary_evidence":["same performer"],"summary":"Same segment."}',
             window_size=2,
         )
         self.assertEqual(parsed["decision"], "no_cut")
         self.assertEqual(parsed["response_status"], "ok")
+
+    def test_parse_model_response_rejects_missing_segment_type(self):
+        parsed = probe.parse_model_response(
+            '{"boundary_after_frame":"frame_01","frame_notes":{"frame_01":"black-white solo","frame_02":"red-black solo"},"primary_evidence":["different performer"],"summary":"Boundary after frame 1."}',
+            window_size=2,
+        )
+        self.assertEqual(parsed["decision"], "invalid_response")
+        self.assertIn("segment type", parsed["reason"])
 
     def test_parse_model_response_marks_invalid_json(self):
         parsed = probe.parse_model_response("not json", window_size=2)

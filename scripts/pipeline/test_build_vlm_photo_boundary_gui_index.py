@@ -131,6 +131,87 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
             self.assertEqual([photo["relative_path"] for photo in payload["performances"][1]["photos"]], ["cam/c.hif", "cam/d.hif"])
             self.assertEqual(payload["performances"][0]["photos"][0]["proxy_path"], "embedded_jpg/preview/cam/a.jpg")
 
+    def test_build_gui_index_for_run_keeps_rows_not_sent_to_vlm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            runs_dir = workspace_dir / "vlm_runs"
+            runs_dir.mkdir()
+            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            photo_manifest_csv = workspace_dir / "photo_manifest.csv"
+            embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            thumb_dir = workspace_dir / "embedded_jpg" / "thumb" / "cam"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "cam"
+            thumb_dir.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            for name in ("a", "b", "c", "d", "e", "f"):
+                (thumb_dir / f"{name}.jpg").write_bytes(f"jpg-{name}".encode("utf-8"))
+                (preview_dir / f"{name}.jpg").write_bytes(f"preview-{name}".encode("utf-8"))
+            with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=["relative_path", "start_epoch_ms", "start_local", "photo_order_index"],
+                )
+                writer.writeheader()
+                for index, name in enumerate(("a", "b", "c", "d", "e", "f")):
+                    writer.writerow(
+                        {
+                            "relative_path": f"cam/{name}.hif",
+                            "start_epoch_ms": str(1000 + index * 1000),
+                            "start_local": f"2026-03-23T10:00:0{index}",
+                            "photo_order_index": str(index),
+                        }
+                    )
+            with embedded_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "thumb_path", "preview_path"])
+                writer.writeheader()
+                for name in ("a", "b", "c", "d", "e", "f"):
+                    writer.writerow(
+                        {
+                            "relative_path": f"cam/{name}.hif",
+                            "thumb_path": f"embedded_jpg/thumb/cam/{name}.jpg",
+                            "preview_path": f"embedded_jpg/preview/cam/{name}.jpg",
+                        }
+                    )
+            with output_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=builder.probe.OUTPUT_HEADERS)
+                writer.writeheader()
+                row = {header: "" for header in builder.probe.OUTPUT_HEADERS}
+                row["run_id"] = "vlm-20260414053012"
+                row["generated_at"] = "2026-04-14T05:30:12+02:00"
+                row["image_variant"] = "thumb"
+                row["decision"] = "cut_after_2"
+                row["cut_left_relative_path"] = "cam/c.hif"
+                row["cut_right_relative_path"] = "cam/d.hif"
+                row["reason"] = "boundary"
+                row["response_status"] = "ok"
+                row["relative_paths_json"] = json.dumps(["cam/b.hif", "cam/c.hif", "cam/d.hif", "cam/e.hif"])
+                writer.writerow(row)
+            run_metadata = {
+                "run_id": "vlm-20260414053012",
+                "args": {"image_variant": "thumb"},
+                "embedded_manifest_csv": str(embedded_manifest_csv),
+                "photo_manifest_csv": str(photo_manifest_csv),
+                "output_csv": str(output_csv),
+            }
+            payload, run_row_count = builder.build_gui_index_for_run(
+                workspace_dir=workspace_dir,
+                run_metadata=run_metadata,
+                output_csv=output_csv,
+            )
+            self.assertEqual(run_row_count, 1)
+            self.assertEqual(payload["photo_count"], 6)
+            self.assertEqual(payload["performance_count"], 2)
+            self.assertEqual(
+                [photo["relative_path"] for photo in payload["performances"][0]["photos"]],
+                ["cam/a.hif", "cam/b.hif", "cam/c.hif"],
+            )
+            self.assertEqual(
+                [photo["relative_path"] for photo in payload["performances"][1]["photos"]],
+                ["cam/d.hif", "cam/e.hif", "cam/f.hif"],
+            )
+
     def test_build_summary_message_includes_run_rows_photos_and_sets(self):
         message = builder.build_summary_message(
             run_id="vlm-20260414124712",
