@@ -21,6 +21,7 @@ from rich.progress import (
     TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
+    TimeRemainingColumn,
 )
 
 from lib.image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1
@@ -375,13 +376,15 @@ def build_user_prompt(temporal_lines: Sequence[str], extra_instructions: str = "
         '- Choose "no_cut" if all 10 frames most likely belong to the same performance.\n'
         '- Choose "cut_after_N" only if frames 1..N and frames N+1..10 most likely belong to different performances.\n'
         "- If more than one real boundary appears inside the 10-frame window, choose the single strongest and clearest boundary.\n"
+        "- In the reason field, briefly describe the costume or visual identity in every frame before you explain the boundary decision.\n"
+        '- Start the reason with "Frame-by-frame notes:" and mention all frames in order.\n'
         "- Output only valid JSON.\n"
         "- Do not output markdown.\n"
         "- Do not output any text before or after JSON.\n\n"
         "Return exactly this schema:\n"
         '{\n'
         '  "decision": "cut_after_6",\n'
-        '  "reason": "Frames 1-6 show one performer and costume, while frames 7-10 show a different performer and a different act."\n'
+        '  "reason": "Frame-by-frame notes: frame_01 red dress, frame_02 red dress, frame_03 red dress, frame_04 blue suit, frame_05 blue suit, frame_06 blue suit. Boundary: frames 1-3 show one segment, while frames 4-6 show a clearly different segment."\n'
         '}'
     )
     if extra_instructions.strip():
@@ -796,6 +799,7 @@ def probe_vlm_photo_boundaries(
         BarColumn(bar_width=40),
         MofNCompleteColumn(),
         TaskProgressColumn(),
+        TimeRemainingColumn(),
         TimeElapsedColumn(),
         expand=False,
         console=console,

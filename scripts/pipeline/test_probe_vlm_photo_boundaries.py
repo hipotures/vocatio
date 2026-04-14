@@ -89,6 +89,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIn("floor rehearsal / floor test / stage test", prompt)
         self.assertIn("ceremony / award / result reading / host speaking segment", prompt)
         self.assertIn("If more than one real boundary appears", prompt)
+        self.assertIn("briefly describe the costume or visual identity in every frame", prompt)
+        self.assertIn("Frame-by-frame notes", prompt)
         self.assertNotIn("confidence", prompt.lower())
 
     def test_build_user_prompt_appends_extra_instructions(self):
