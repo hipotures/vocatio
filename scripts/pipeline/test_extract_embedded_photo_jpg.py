@@ -536,6 +536,65 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not match relative_path"):
                 extract_jpg.build_manifest_rows(day_dir, workspace_dir, overwrite=False)
 
+    def test_extract_embedded_photo_jpg_writes_partial_manifest_and_replaces_final_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            source_dir = day_dir / "hour10"
+            workspace_dir.mkdir(parents=True)
+            source_dir.mkdir(parents=True)
+            source_a = source_dir / "a.arw"
+            source_b = source_dir / "b.arw"
+            source_a.write_bytes(b"a")
+            source_b.write_bytes(b"b")
+
+            manifest_path = workspace_dir / "photo_manifest.csv"
+            with manifest_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "path", "photo_order_index"])
+                writer.writeheader()
+                writer.writerow({"relative_path": "hour10/a.arw", "path": str(source_a), "photo_order_index": "0"})
+                writer.writerow({"relative_path": "hour10/b.arw", "path": str(source_b), "photo_order_index": "1"})
+
+            output_path = workspace_dir / "photo_embedded_manifest.csv"
+            output_path.write_text("old manifest\n", encoding="utf-8")
+            partial_path = Path(f"{output_path}.partial")
+            partial_path.write_text("stale partial\n", encoding="utf-8")
+
+            call_count = 0
+            original_preview = extract_jpg.ensure_preview_jpg
+            original_thumb = extract_jpg.ensure_thumb_jpg
+            try:
+                def fake_preview(source_path, preview_path, overwrite, long_edge=extract_jpg.DEFAULT_PREVIEW_LONG_EDGE):
+                    nonlocal call_count
+                    call_count += 1
+                    preview_path.parent.mkdir(parents=True, exist_ok=True)
+                    preview_path.write_bytes(MINIMAL_JPEG_BYTES)
+                    if call_count == 2:
+                        self.assertTrue(partial_path.exists())
+                        partial_lines = partial_path.read_text(encoding="utf-8").splitlines()
+                        self.assertEqual(partial_lines[0], ",".join(extract_jpg.MANIFEST_HEADERS))
+                        self.assertEqual(len(partial_lines), 2)
+                        self.assertEqual(output_path.read_text(encoding="utf-8"), "old manifest\n")
+                    return ("existing_preview", (1, 1))
+
+                def fake_thumb(source_path, thumb_path, preview_path, overwrite, long_edge=extract_jpg.DEFAULT_THUMB_LONG_EDGE):
+                    thumb_path.parent.mkdir(parents=True, exist_ok=True)
+                    thumb_path.write_bytes(MINIMAL_JPEG_BYTES)
+                    return (1, 1)
+
+                extract_jpg.ensure_preview_jpg = fake_preview
+                extract_jpg.ensure_thumb_jpg = fake_thumb
+                row_count = extract_jpg.extract_embedded_photo_jpg(day_dir, workspace_dir, output_path, overwrite=False)
+            finally:
+                extract_jpg.ensure_preview_jpg = original_preview
+                extract_jpg.ensure_thumb_jpg = original_thumb
+
+            self.assertEqual(row_count, 2)
+            self.assertFalse(partial_path.exists())
+            output_lines = output_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(output_lines[0], ",".join(extract_jpg.MANIFEST_HEADERS))
+            self.assertEqual(len(output_lines), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, TextIO, Tuple
 
 from rich.console import Console
 from rich.progress import (
@@ -24,9 +24,6 @@ from rich.progress import (
 )
 
 from lib.image_pipeline_contracts import PHOTO_MANIFEST_REQUIRED_COLUMNS, validate_required_columns
-from lib.pipeline_io import atomic_write_csv
-
-
 console = Console()
 
 PHOTO_EXTENSIONS = {".arw", ".cr3", ".hif", ".heif", ".jpg", ".jpeg", ".nef"}
@@ -126,6 +123,46 @@ def build_progress_columns() -> tuple[object, ...]:
         TimeRemainingColumn(),
         TimeElapsedColumn(),
     )
+
+
+def partial_output_path(output_path: Path) -> Path:
+    return Path(f"{output_path}.partial")
+
+
+def flush_and_sync(handle: TextIO) -> None:
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def fsync_directory(path: Path) -> None:
+    directory_fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def remove_stale_partial_output(partial_path: Path) -> None:
+    partial_path.unlink(missing_ok=True)
+
+
+def open_partial_manifest_csv(path: Path) -> tuple[TextIO, csv.DictWriter]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("w", newline="", encoding="utf-8")
+    writer = csv.DictWriter(handle, fieldnames=MANIFEST_HEADERS)
+    writer.writeheader()
+    flush_and_sync(handle)
+    return handle, writer
+
+
+def append_partial_manifest_row(handle: TextIO, writer: csv.DictWriter, row: Dict[str, str]) -> None:
+    writer.writerow(row)
+    flush_and_sync(handle)
+
+
+def replace_output_from_partial(partial_path: Path, output_path: Path) -> None:
+    os.replace(partial_path, output_path)
+    fsync_directory(output_path.parent)
 
 
 def resolve_output_path(workspace_dir: Path, output_value: str) -> Path:
@@ -540,43 +577,28 @@ def build_manifest_rows(
     ) as progress:
         task_id = progress.add_task("Extract embedded JPG".ljust(25), total=len(photo_rows))
         for photo_row in photo_rows:
-            relative_path = photo_row["relative_path"]
-            photo_order_index = str(photo_row.get("photo_order_index") or "").strip()
-            source_value = photo_row.get("path", "").strip()
-            if not photo_order_index:
-                raise ValueError(f"photo_manifest.csv row missing photo_order_index for {relative_path}")
-            if not source_value:
-                raise ValueError(f"photo_manifest.csv row missing path for {relative_path}")
-            source_path = resolve_manifest_source_path(day_dir, relative_path, source_value)
-            if not source_path.exists() or not source_path.is_file():
-                raise ValueError(f"Source photo listed in photo_manifest.csv does not exist: {source_path}")
-            if source_path.suffix.lower() not in PHOTO_EXTENSIONS:
-                raise ValueError(f"Unsupported photo extension for {source_path}")
-            output_paths = build_output_paths(workspace_dir, relative_path)
-            preview_source, preview_dimensions = ensure_preview_jpg(
-                source_path,
-                output_paths["preview_path"],
-                overwrite,
-                preview_long_edge,
-            )
-            thumb_dimensions = ensure_thumb_jpg(
-                source_path,
-                output_paths["thumb_path"],
-                output_paths["preview_path"],
-                overwrite,
-                thumb_long_edge,
-            )
             rows.append(
                 build_manifest_row(
                     workspace_dir=workspace_dir,
-                    source_path=source_path,
-                    relative_path=relative_path,
-                    photo_order_index=photo_order_index,
-                    thumb_path=output_paths["thumb_path"],
-                    preview_path=output_paths["preview_path"],
-                    preview_source=preview_source,
-                    thumb_dimensions=thumb_dimensions,
-                    preview_dimensions=preview_dimensions,
+                    source_path=resolve_manifest_source_path(day_dir, photo_row["relative_path"], str(photo_row.get("path") or "").strip()),
+                    relative_path=photo_row["relative_path"],
+                    photo_order_index=str(photo_row.get("photo_order_index") or "").strip(),
+                    thumb_path=build_output_paths(workspace_dir, photo_row["relative_path"])["thumb_path"],
+                    preview_path=build_output_paths(workspace_dir, photo_row["relative_path"])["preview_path"],
+                    preview_source=ensure_preview_jpg(
+                        resolve_manifest_source_path(day_dir, photo_row["relative_path"], str(photo_row.get("path") or "").strip()),
+                        build_output_paths(workspace_dir, photo_row["relative_path"])["preview_path"],
+                        overwrite,
+                        preview_long_edge,
+                    )[0],
+                    thumb_dimensions=ensure_thumb_jpg(
+                        resolve_manifest_source_path(day_dir, photo_row["relative_path"], str(photo_row.get("path") or "").strip()),
+                        build_output_paths(workspace_dir, photo_row["relative_path"])["thumb_path"],
+                        build_output_paths(workspace_dir, photo_row["relative_path"])["preview_path"],
+                        overwrite,
+                        thumb_long_edge,
+                    ),
+                    preview_dimensions=read_jpeg_dimensions(build_output_paths(workspace_dir, photo_row["relative_path"])["preview_path"]),
                 )
             )
             progress.advance(task_id)
@@ -591,9 +613,64 @@ def extract_embedded_photo_jpg(
     thumb_long_edge: int = DEFAULT_THUMB_LONG_EDGE,
     preview_long_edge: int = DEFAULT_PREVIEW_LONG_EDGE,
 ) -> int:
-    rows = build_manifest_rows(day_dir, workspace_dir, overwrite, thumb_long_edge, preview_long_edge)
-    atomic_write_csv(output_path, MANIFEST_HEADERS, rows)
-    return len(rows)
+    photo_rows = load_photo_manifest_rows(workspace_dir)
+    validate_unique_output_paths(workspace_dir, photo_rows)
+    partial_path = partial_output_path(output_path)
+    remove_stale_partial_output(partial_path)
+    row_count = 0
+    with Progress(
+        *build_progress_columns(),
+        expand=False,
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("Extract embedded JPG".ljust(25), total=len(photo_rows))
+        partial_handle, partial_writer = open_partial_manifest_csv(partial_path)
+        try:
+            for photo_row in photo_rows:
+                relative_path = photo_row["relative_path"]
+                photo_order_index = str(photo_row.get("photo_order_index") or "").strip()
+                source_value = str(photo_row.get("path") or "").strip()
+                if not photo_order_index:
+                    raise ValueError(f"photo_manifest.csv row missing photo_order_index for {relative_path}")
+                if not source_value:
+                    raise ValueError(f"photo_manifest.csv row missing path for {relative_path}")
+                source_path = resolve_manifest_source_path(day_dir, relative_path, source_value)
+                if not source_path.exists() or not source_path.is_file():
+                    raise ValueError(f"Source photo listed in photo_manifest.csv does not exist: {source_path}")
+                if source_path.suffix.lower() not in PHOTO_EXTENSIONS:
+                    raise ValueError(f"Unsupported photo extension for {source_path}")
+                output_paths = build_output_paths(workspace_dir, relative_path)
+                preview_source, preview_dimensions = ensure_preview_jpg(
+                    source_path,
+                    output_paths["preview_path"],
+                    overwrite,
+                    preview_long_edge,
+                )
+                thumb_dimensions = ensure_thumb_jpg(
+                    source_path,
+                    output_paths["thumb_path"],
+                    output_paths["preview_path"],
+                    overwrite,
+                    thumb_long_edge,
+                )
+                row = build_manifest_row(
+                    workspace_dir=workspace_dir,
+                    source_path=source_path,
+                    relative_path=relative_path,
+                    photo_order_index=photo_order_index,
+                    thumb_path=output_paths["thumb_path"],
+                    preview_path=output_paths["preview_path"],
+                    preview_source=preview_source,
+                    thumb_dimensions=thumb_dimensions,
+                    preview_dimensions=preview_dimensions,
+                )
+                append_partial_manifest_row(partial_handle, partial_writer, row)
+                row_count += 1
+                progress.advance(task_id)
+        finally:
+            partial_handle.close()
+    replace_output_from_partial(partial_path, output_path)
+    return row_count
 
 
 def main() -> int:
