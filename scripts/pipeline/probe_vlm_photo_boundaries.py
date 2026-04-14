@@ -39,6 +39,7 @@ RUN_METADATA_DIRNAME = "vlm_runs"
 DEFAULT_IMAGE_VARIANT = "preview"
 DEFAULT_WINDOW_SIZE = 10
 DEFAULT_OVERLAP = 2
+DEFAULT_BOUNDARY_GAP_SECONDS = 10
 DEFAULT_MAX_BATCHES = 10
 DEFAULT_MODEL_NAME = "qwen3.5:9b"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
@@ -92,6 +93,7 @@ RESUME_CONFIG_KEYS = (
     "image_variant",
     "window_size",
     "overlap",
+    "boundary_gap_seconds",
     "model",
     "ollama_base_url",
     "ollama_num_ctx",
@@ -177,6 +179,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=non_negative_int_arg,
         default=DEFAULT_OVERLAP,
         help=f"Number of images shared between adjacent windows. Default: {DEFAULT_OVERLAP}",
+    )
+    parser.add_argument(
+        "--boundary-gap-seconds",
+        type=non_negative_int_arg,
+        default=DEFAULT_BOUNDARY_GAP_SECONDS,
+        help=(
+            "Only evaluate candidate boundaries where the time gap between consecutive photos "
+            f"exceeds this many seconds. Default: {DEFAULT_BOUNDARY_GAP_SECONDS}"
+        ),
     )
     parser.add_argument(
         "--max-batches",
@@ -343,6 +354,37 @@ def build_window_start_indexes(total_rows: int, window_size: int, overlap: int) 
     final_start = total_rows - window_size
     if not starts or starts[-1] != final_start:
         starts.append(final_start)
+    return starts
+
+
+def build_candidate_window_start_indexes(
+    rows: Sequence[Mapping[str, str]],
+    window_size: int,
+    overlap: int,
+    boundary_gap_seconds: int,
+) -> List[int]:
+    total_rows = len(rows)
+    if total_rows < window_size:
+        raise ValueError(f"Need at least {window_size} rows, got {total_rows}")
+    if overlap >= window_size:
+        raise ValueError("overlap must be smaller than window_size")
+    final_start = total_rows - window_size
+    starts: List[int] = []
+    seen: set[int] = set()
+    for cut_index in range(total_rows - 1):
+        left_epoch_ms = int(str(rows[cut_index]["start_epoch_ms"]))
+        right_epoch_ms = int(str(rows[cut_index + 1]["start_epoch_ms"]))
+        time_gap_seconds = rounded_seconds(right_epoch_ms - left_epoch_ms)
+        if time_gap_seconds <= boundary_gap_seconds:
+            continue
+        start_index = cut_index - overlap + 1
+        if start_index < 0:
+            start_index = 0
+        if start_index > final_start:
+            start_index = final_start
+        if start_index not in seen:
+            seen.add(start_index)
+            starts.append(start_index)
     return starts
 
 
@@ -1226,6 +1268,7 @@ def probe_vlm_photo_boundaries(
     image_variant: str,
     window_size: int,
     overlap: int,
+    boundary_gap_seconds: int,
     max_batches: int,
     model: str,
     ollama_base_url: str,
@@ -1248,7 +1291,12 @@ def probe_vlm_photo_boundaries(
         image_variant=image_variant,
     )
     boundary_rows_by_pair = read_boundary_scores_by_pair(workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME)
-    all_window_starts = build_window_start_indexes(len(joined_rows), window_size, overlap)
+    all_window_starts = build_candidate_window_start_indexes(
+        joined_rows,
+        window_size=window_size,
+        overlap=overlap,
+        boundary_gap_seconds=boundary_gap_seconds,
+    )
     run_state = resolve_run_state(
         workspace_dir=workspace_dir,
         output_csv=output_csv,
@@ -1408,6 +1456,7 @@ def main() -> int:
         "image_variant": args.image_variant,
         "window_size": args.window_size,
         "overlap": args.overlap,
+        "boundary_gap_seconds": args.boundary_gap_seconds,
         "max_batches": args.max_batches,
         "model": args.model,
         "ollama_base_url": args.ollama_base_url,
@@ -1431,6 +1480,7 @@ def main() -> int:
         image_variant=args.image_variant,
         window_size=args.window_size,
         overlap=args.overlap,
+        boundary_gap_seconds=args.boundary_gap_seconds,
         max_batches=args.max_batches,
         model=args.model,
         ollama_base_url=args.ollama_base_url,

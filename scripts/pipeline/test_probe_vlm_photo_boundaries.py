@@ -38,6 +38,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "10",
                 "--overlap",
                 "2",
+                "--boundary-gap-seconds",
+                "12",
                 "--temperature",
                 "0.25",
                 "--response-schema-mode",
@@ -52,12 +54,17 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(args.image_variant, "thumb")
         self.assertEqual(args.window_size, 10)
         self.assertEqual(args.overlap, 2)
+        self.assertEqual(args.boundary_gap_seconds, 12)
         self.assertEqual(args.temperature, 0.25)
         self.assertEqual(args.response_schema_mode, "on")
         self.assertEqual(args.ollama_think, "false")
         self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
         self.assertFalse(hasattr(args, "write_gui_index"))
         self.assertFalse(hasattr(args, "overwrite"))
+
+    def test_parse_args_defaults_boundary_gap_seconds_to_10(self):
+        args = probe.parse_args(["/tmp/day"])
+        self.assertEqual(args.boundary_gap_seconds, 10)
 
     def test_build_response_schema_uses_boundary_after_frame_and_dynamic_notes(self):
         schema = probe.build_response_schema(window_size=3)
@@ -81,6 +88,45 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
     def test_build_window_start_indexes_rejects_overlap_equal_to_window_size(self):
         with self.assertRaises(ValueError):
             probe.build_window_start_indexes(total_rows=20, window_size=10, overlap=10)
+
+    def test_build_candidate_window_start_indexes_returns_only_large_time_gaps(self):
+        rows = [
+            {"start_epoch_ms": "0"},
+            {"start_epoch_ms": "1000"},
+            {"start_epoch_ms": "2000"},
+            {"start_epoch_ms": "3000"},
+            {"start_epoch_ms": "20000"},
+            {"start_epoch_ms": "21000"},
+            {"start_epoch_ms": "22000"},
+            {"start_epoch_ms": "23000"},
+        ]
+        self.assertEqual(
+            probe.build_candidate_window_start_indexes(
+                rows,
+                window_size=5,
+                overlap=2,
+                boundary_gap_seconds=10,
+            ),
+            [2],
+        )
+
+    def test_build_candidate_window_start_indexes_returns_empty_without_large_gaps(self):
+        rows = [
+            {"start_epoch_ms": "0"},
+            {"start_epoch_ms": "1000"},
+            {"start_epoch_ms": "2000"},
+            {"start_epoch_ms": "3000"},
+            {"start_epoch_ms": "4000"},
+        ]
+        self.assertEqual(
+            probe.build_candidate_window_start_indexes(
+                rows,
+                window_size=5,
+                overlap=2,
+                boundary_gap_seconds=10,
+            ),
+            [],
+        )
 
     def test_build_temporal_lines_uses_rounded_second_deltas(self):
         rows = [
@@ -683,7 +729,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     writer.writerow(
                         {
                             "relative_path": f"cam/{name}.hif",
-                            "start_epoch_ms": str(1000 + index),
+                            "start_epoch_ms": str(index * 1000),
                             "start_local": f"2026-03-23T10:00:0{index}",
                             "photo_order_index": str(index),
                         }
@@ -695,6 +741,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "image_variant": "thumb",
                 "window_size": 5,
                 "overlap": 2,
+                "boundary_gap_seconds": 0,
                 "max_batches": 100,
                 "model": "qwen3.5:9b",
                 "ollama_base_url": "http://127.0.0.1:11434",
@@ -734,6 +781,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     image_variant="thumb",
                     window_size=5,
                     overlap=2,
+                    boundary_gap_seconds=0,
                     max_batches=100,
                     model="qwen3.5:9b",
                     ollama_base_url="http://127.0.0.1:11434",
@@ -783,7 +831,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     writer.writerow(
                         {
                             "relative_path": f"cam/{name}.hif",
-                            "start_epoch_ms": str(1000 + index),
+                            "start_epoch_ms": str(index * 1000),
                             "start_local": f"2026-03-23T10:00:{index:02d}",
                             "photo_order_index": str(index),
                         }
@@ -795,6 +843,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "image_variant": "thumb",
                 "window_size": 5,
                 "overlap": 2,
+                "boundary_gap_seconds": 0,
                 "max_batches": 2,
                 "model": "qwen3.5:9b",
                 "ollama_base_url": "http://127.0.0.1:11434",
@@ -837,6 +886,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     image_variant="thumb",
                     window_size=5,
                     overlap=2,
+                    boundary_gap_seconds=0,
                     max_batches=2,
                     model="qwen3.5:9b",
                     ollama_base_url="http://127.0.0.1:11434",
@@ -853,6 +903,111 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 )
             self.assertEqual(row_count, 2)
             self.assertEqual(observed_line_counts, [0, 2])
+
+    def test_probe_vlm_photo_boundaries_only_evaluates_candidate_gaps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            thumb_dir = workspace_dir / "embedded_jpg" / "thumb" / "cam"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "cam"
+            thumb_dir.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            names = ("a", "b", "c", "d", "e", "f", "g", "h")
+            for name in names:
+                (thumb_dir / f"{name}.jpg").write_bytes(b"x")
+                (preview_dir / f"{name}.jpg").write_bytes(b"x")
+            embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            with embedded_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "thumb_path", "preview_path"])
+                writer.writeheader()
+                for name in names:
+                    writer.writerow(
+                        {
+                            "relative_path": f"cam/{name}.hif",
+                            "thumb_path": f"embedded_jpg/thumb/cam/{name}.jpg",
+                            "preview_path": f"embedded_jpg/preview/cam/{name}.jpg",
+                        }
+                    )
+            photo_manifest_csv = workspace_dir / "photo_manifest.csv"
+            with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "start_epoch_ms", "start_local", "photo_order_index"])
+                writer.writeheader()
+                epoch_values = (0, 1000, 2000, 3000, 20000, 21000, 22000, 23000)
+                for index, (name, epoch_ms) in enumerate(zip(names, epoch_values)):
+                    writer.writerow(
+                        {
+                            "relative_path": f"cam/{name}.hif",
+                            "start_epoch_ms": str(epoch_ms),
+                            "start_local": f"2026-03-23T10:00:{index:02d}",
+                            "photo_order_index": str(index),
+                        }
+                    )
+            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            args_payload = {
+                "embedded_manifest_csv": str(embedded_manifest_csv),
+                "photo_manifest_csv": str(photo_manifest_csv),
+                "image_variant": "thumb",
+                "window_size": 5,
+                "overlap": 2,
+                "boundary_gap_seconds": 10,
+                "max_batches": 10,
+                "model": "qwen3.5:9b",
+                "ollama_base_url": "http://127.0.0.1:11434",
+                "ollama_num_ctx": 16384,
+                "ollama_num_predict": None,
+                "ollama_keep_alive": "15m",
+                "timeout_seconds": 300.0,
+                "temperature": 0.0,
+                "ollama_think": "false",
+                "extra_instructions": "",
+                "extra_instructions_file": None,
+                "effective_extra_instructions": "",
+                "response_schema_mode": "off",
+            }
+
+            with mock.patch.object(
+                probe,
+                "ollama_post_json",
+                return_value={
+                    "message": {
+                        "content": (
+                            '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
+                            '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                            '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
+                        )
+                    }
+                },
+            ) as ollama_mock, mock.patch.object(probe, "build_run_id", return_value="vlm-20260414070000"):
+                row_count = probe.probe_vlm_photo_boundaries(
+                    workspace_dir=workspace_dir,
+                    embedded_manifest_csv=embedded_manifest_csv,
+                    photo_manifest_csv=photo_manifest_csv,
+                    output_csv=output_csv,
+                    image_variant="thumb",
+                    window_size=5,
+                    overlap=2,
+                    boundary_gap_seconds=10,
+                    max_batches=10,
+                    model="qwen3.5:9b",
+                    ollama_base_url="http://127.0.0.1:11434",
+                    ollama_num_ctx=16384,
+                    ollama_num_predict=None,
+                    ollama_keep_alive="15m",
+                    timeout_seconds=300.0,
+                    temperature=0.0,
+                    ollama_think="false",
+                    extra_instructions="",
+                    dump_debug_dir=None,
+                    args_payload=args_payload,
+                    new_run=True,
+                )
+            self.assertEqual(row_count, 1)
+            ollama_mock.assert_called_once()
+            rows = probe.read_result_rows(output_csv)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["start_row"], "3")
+            self.assertEqual(rows[0]["end_row"], "7")
 
     def test_dump_debug_artifacts_writes_prompt_request_and_response(self):
         with tempfile.TemporaryDirectory() as tmp:
