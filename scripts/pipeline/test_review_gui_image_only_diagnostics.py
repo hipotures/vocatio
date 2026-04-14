@@ -1,0 +1,320 @@
+import csv
+import importlib.util
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
+
+
+def load_module(module_name: str, relative_path: str):
+    path = REPO_ROOT / relative_path
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+review_gui = load_module("review_performance_proxy_gui_image_diagnostics_test", "scripts/pipeline/review_performance_proxy_gui.py")
+
+
+class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
+    def write_csv(self, path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def create_workspace_with_diagnostics(self, workspace_dir: Path) -> None:
+        self.write_csv(
+            workspace_dir / "photo_boundary_scores.csv",
+            [
+                "left_relative_path",
+                "right_relative_path",
+                "left_start_local",
+                "right_start_local",
+                "left_start_epoch_ms",
+                "right_start_epoch_ms",
+                "time_gap_seconds",
+                "dino_cosine_distance",
+                "distance_zscore",
+                "smoothed_distance_zscore",
+                "time_gap_boost",
+                "boundary_score",
+                "boundary_label",
+                "boundary_reason",
+                "model_source",
+            ],
+            [
+                {
+                    "left_relative_path": "cam/a.jpg",
+                    "right_relative_path": "cam/b.jpg",
+                    "left_start_local": "2026-03-23T10:00:00",
+                    "right_start_local": "2026-03-23T10:00:05",
+                    "left_start_epoch_ms": "1",
+                    "right_start_epoch_ms": "2",
+                    "time_gap_seconds": "5.000000",
+                    "dino_cosine_distance": "0.450000",
+                    "distance_zscore": "2.500000",
+                    "smoothed_distance_zscore": "2.100000",
+                    "time_gap_boost": "0.000000",
+                    "boundary_score": "0.910000",
+                    "boundary_label": "hard",
+                    "boundary_reason": "distance_zscore",
+                    "model_source": "bootstrap_heuristic",
+                },
+                {
+                    "left_relative_path": "cam/b.jpg",
+                    "right_relative_path": "cam/c.jpg",
+                    "left_start_local": "2026-03-23T10:00:05",
+                    "right_start_local": "2026-03-23T10:00:10",
+                    "left_start_epoch_ms": "2",
+                    "right_start_epoch_ms": "3",
+                    "time_gap_seconds": "5.000000",
+                    "dino_cosine_distance": "0.040000",
+                    "distance_zscore": "0.100000",
+                    "smoothed_distance_zscore": "0.050000",
+                    "time_gap_boost": "0.000000",
+                    "boundary_score": "0.040000",
+                    "boundary_label": "none",
+                    "boundary_reason": "distance_only",
+                    "model_source": "bootstrap_heuristic",
+                },
+            ],
+        )
+        self.write_csv(
+            workspace_dir / "photo_segments.csv",
+            [
+                "set_id",
+                "performance_number",
+                "segment_index",
+                "start_relative_path",
+                "end_relative_path",
+                "start_local",
+                "end_local",
+                "photo_count",
+                "segment_confidence",
+            ],
+            [
+                {
+                    "set_id": "imgset-000001",
+                    "performance_number": "SEG0001",
+                    "segment_index": "0",
+                    "start_relative_path": "cam/b.jpg",
+                    "end_relative_path": "cam/c.jpg",
+                    "start_local": "2026-03-23T10:00:05",
+                    "end_local": "2026-03-23T10:00:10",
+                    "photo_count": "2",
+                    "segment_confidence": "0.820000",
+                }
+            ],
+        )
+
+    def test_load_image_only_diagnostics_builds_boundary_and_segment_maps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            self.create_workspace_with_diagnostics(workspace_dir)
+            diagnostics = review_gui.load_image_only_diagnostics(workspace_dir)
+            self.assertTrue(diagnostics["available"])
+            self.assertEqual(diagnostics["segment_by_set_id"]["imgset-000001"]["segment_confidence"], "0.820000")
+            self.assertEqual(
+                diagnostics["boundary_by_pair"][("cam/a.jpg", "cam/b.jpg")]["boundary_score"],
+                "0.910000",
+            )
+
+    def test_build_image_only_set_info_text_includes_boundary_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            self.create_workspace_with_diagnostics(workspace_dir)
+            diagnostics = review_gui.load_image_only_diagnostics(workspace_dir)
+            display_set = {
+                "display_name": "SEG0001",
+                "original_performance_number": "SEG0001",
+                "set_id": "imgset-000001",
+                "base_set_id": "imgset-000001",
+                "duplicate_status": "normal",
+                "timeline_status": "image_only",
+                "photo_count": 2,
+                "review_count": 0,
+                "duration_seconds": 5,
+                "max_internal_photo_gap_seconds": 5,
+                "performance_start_local": "2026-03-23T10:00:05",
+                "performance_end_local": "2026-03-23T10:00:10",
+                "first_photo_local": "2026-03-23T10:00:05",
+                "last_photo_local": "2026-03-23T10:00:10",
+                "merged_manually": False,
+                "photos": [
+                    {"relative_path": "cam/b.jpg"},
+                    {"relative_path": "cam/c.jpg"},
+                ],
+            }
+            text = review_gui.build_image_only_set_info_text(display_set, diagnostics, no_photos_confirmed=False)
+            self.assertIn("Segment confidence: 0.820000", text)
+            self.assertIn("Boundary before set", text)
+            self.assertIn("score: 0.910000", text)
+            self.assertIn("Boundary after set", text)
+
+    def test_build_image_only_set_info_text_includes_top_internal_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            self.create_workspace_with_diagnostics(workspace_dir)
+            diagnostics = review_gui.load_image_only_diagnostics(workspace_dir)
+            display_set = {
+                "display_name": "SEG0001",
+                "original_performance_number": "SEG0001",
+                "set_id": "imgset-000001",
+                "base_set_id": "imgset-000001",
+                "duplicate_status": "normal",
+                "timeline_status": "image_only",
+                "photo_count": 3,
+                "review_count": 0,
+                "duration_seconds": 10,
+                "max_internal_photo_gap_seconds": 5,
+                "performance_start_local": "2026-03-23T10:00:00",
+                "performance_end_local": "2026-03-23T10:00:10",
+                "first_photo_local": "2026-03-23T10:00:00",
+                "last_photo_local": "2026-03-23T10:00:10",
+                "merged_manually": False,
+                "photos": [
+                    {"relative_path": "cam/a.jpg"},
+                    {"relative_path": "cam/b.jpg"},
+                    {"relative_path": "cam/c.jpg"},
+                ],
+            }
+            text = review_gui.build_image_only_set_info_text(display_set, diagnostics, no_photos_confirmed=False)
+            self.assertIn("Top internal boundaries", text)
+            self.assertIn("pair: cam/a.jpg -> cam/b.jpg", text)
+
+    def test_build_image_only_photo_info_text_includes_neighbor_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            self.create_workspace_with_diagnostics(workspace_dir)
+            diagnostics = review_gui.load_image_only_diagnostics(workspace_dir)
+            photo = {
+                "display_name": "SEG0001",
+                "original_performance_number": "SEG0001",
+                "base_set_id": "imgset-000001",
+                "relative_path": "cam/b.jpg",
+                "filename": "b.jpg",
+                "adjusted_start_local": "2026-03-23T10:00:05",
+                "assignment_status": "assigned",
+                "assignment_reason": "",
+                "seconds_to_nearest_boundary": "0.000000",
+                "stream_id": "p-main",
+                "device": "A7R5",
+                "proxy_exists": True,
+            }
+            text = review_gui.build_image_only_photo_info_text(photo, diagnostics)
+            self.assertIn("Relative path: cam/b.jpg", text)
+            self.assertIn("Boundary after photo", text)
+            self.assertIn("Boundary before photo", text)
+            self.assertIn("score: 0.040000", text)
+
+    def test_build_image_only_multi_photo_info_text_includes_selected_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            self.create_workspace_with_diagnostics(workspace_dir)
+            diagnostics = review_gui.load_image_only_diagnostics(workspace_dir)
+            text = review_gui.build_image_only_multi_photo_info_text(
+                [
+                    {
+                        "relative_path": "cam/a.jpg",
+                        "filename": "a.jpg",
+                        "adjusted_start_local": "2026-03-23T10:00:00",
+                        "assignment_status": "assigned",
+                        "assignment_reason": "",
+                    },
+                    {
+                        "relative_path": "cam/b.jpg",
+                        "filename": "b.jpg",
+                        "adjusted_start_local": "2026-03-23T10:00:05",
+                        "assignment_status": "review",
+                        "assignment_reason": "boundary_score",
+                    },
+                ],
+                diagnostics,
+            )
+            self.assertIn("Selected photos: 2", text)
+            self.assertIn("Selected boundaries", text)
+            self.assertIn("score: 0.910000", text)
+
+    def test_determine_selected_preview_paths_uses_two_selected_photos(self):
+        selected_photos = [
+            {
+                "proxy_path": "/tmp/a.jpg",
+                "adjusted_start_local": "2026-03-23T10:00:00",
+                "relative_path": "cam/a.jpg",
+                "filename": "a.jpg",
+            },
+            {
+                "proxy_path": "/tmp/b.jpg",
+                "adjusted_start_local": "2026-03-23T10:00:05",
+                "relative_path": "cam/b.jpg",
+                "filename": "b.jpg",
+            },
+        ]
+        left_path, right_path, left_title, right_title = review_gui.determine_selected_preview_paths(
+            selected_photos=selected_photos,
+            current_photo={
+                "proxy_path": "/tmp/z.jpg",
+                "adjusted_start_local": "2026-03-23T10:00:10",
+                "relative_path": "cam/z.jpg",
+                "filename": "z.jpg",
+            },
+        )
+        self.assertEqual(left_path, "/tmp/a.jpg")
+        self.assertEqual(right_path, "/tmp/b.jpg")
+        self.assertEqual(left_title, "Selected A")
+        self.assertEqual(right_title, "Selected B")
+
+    def test_determine_selected_preview_paths_falls_back_to_current_photo_for_other_selection_counts(self):
+        left_path, right_path, left_title, right_title = review_gui.determine_selected_preview_paths(
+            selected_photos=[
+                {
+                    "proxy_path": "/tmp/a.jpg",
+                    "adjusted_start_local": "2026-03-23T10:00:00",
+                    "relative_path": "cam/a.jpg",
+                    "filename": "a.jpg",
+                },
+                {
+                    "proxy_path": "/tmp/b.jpg",
+                    "adjusted_start_local": "2026-03-23T10:00:05",
+                    "relative_path": "cam/b.jpg",
+                    "filename": "b.jpg",
+                },
+                {
+                    "proxy_path": "/tmp/c.jpg",
+                    "adjusted_start_local": "2026-03-23T10:00:10",
+                    "relative_path": "cam/c.jpg",
+                    "filename": "c.jpg",
+                },
+            ],
+            current_photo={
+                "proxy_path": "/tmp/z.jpg",
+                "adjusted_start_local": "2026-03-23T10:00:15",
+                "relative_path": "cam/z.jpg",
+                "filename": "z.jpg",
+            },
+        )
+        self.assertEqual(left_path, "/tmp/z.jpg")
+        self.assertEqual(right_path, "")
+        self.assertEqual(left_title, "Selected")
+        self.assertEqual(right_title, "")
+
+    def test_should_show_right_preview_forces_dual_when_exactly_two_selected(self):
+        self.assertTrue(review_gui.should_show_right_preview(view_mode=1, selected_photo_count=2))
+        self.assertTrue(review_gui.should_show_right_preview(view_mode=2, selected_photo_count=2))
+
+    def test_should_show_right_preview_follows_view_mode_for_other_selection_counts(self):
+        self.assertFalse(review_gui.should_show_right_preview(view_mode=1, selected_photo_count=1))
+        self.assertFalse(review_gui.should_show_right_preview(view_mode=1, selected_photo_count=3))
+        self.assertTrue(review_gui.should_show_right_preview(view_mode=2, selected_photo_count=1))
+
+
+if __name__ == "__main__":
+    unittest.main()
