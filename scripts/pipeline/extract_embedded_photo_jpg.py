@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import os
 import shutil
@@ -109,6 +110,12 @@ def parse_args() -> argparse.Namespace:
         "--overwrite",
         action="store_true",
         help="Overwrite existing preview and thumb JPG files",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=positive_int_arg,
+        default=4,
+        help="Number of photos to process in parallel. Default: 4",
     )
     return parser.parse_args()
 
@@ -560,6 +567,53 @@ def ensure_thumb_jpg(
     return read_jpeg_dimensions(thumb_path)
 
 
+def process_manifest_row(
+    day_dir: Path,
+    workspace_dir: Path,
+    photo_row: Dict[str, str],
+    overwrite: bool,
+    thumb_long_edge: int = DEFAULT_THUMB_LONG_EDGE,
+    preview_long_edge: int = DEFAULT_PREVIEW_LONG_EDGE,
+) -> Dict[str, str]:
+    relative_path = photo_row["relative_path"]
+    photo_order_index = str(photo_row.get("photo_order_index") or "").strip()
+    source_value = str(photo_row.get("path") or "").strip()
+    if not photo_order_index:
+        raise ValueError(f"photo_manifest.csv row missing photo_order_index for {relative_path}")
+    if not source_value:
+        raise ValueError(f"photo_manifest.csv row missing path for {relative_path}")
+    source_path = resolve_manifest_source_path(day_dir, relative_path, source_value)
+    if not source_path.exists() or not source_path.is_file():
+        raise ValueError(f"Source photo listed in photo_manifest.csv does not exist: {source_path}")
+    if source_path.suffix.lower() not in PHOTO_EXTENSIONS:
+        raise ValueError(f"Unsupported photo extension for {source_path}")
+    output_paths = build_output_paths(workspace_dir, relative_path)
+    preview_source, preview_dimensions = ensure_preview_jpg(
+        source_path,
+        output_paths["preview_path"],
+        overwrite,
+        preview_long_edge,
+    )
+    thumb_dimensions = ensure_thumb_jpg(
+        source_path,
+        output_paths["thumb_path"],
+        output_paths["preview_path"],
+        overwrite,
+        thumb_long_edge,
+    )
+    return build_manifest_row(
+        workspace_dir=workspace_dir,
+        source_path=source_path,
+        relative_path=relative_path,
+        photo_order_index=photo_order_index,
+        thumb_path=output_paths["thumb_path"],
+        preview_path=output_paths["preview_path"],
+        preview_source=preview_source,
+        thumb_dimensions=thumb_dimensions,
+        preview_dimensions=preview_dimensions,
+    )
+
+
 def build_manifest_rows(
     day_dir: Path,
     workspace_dir: Path,
@@ -578,27 +632,13 @@ def build_manifest_rows(
         task_id = progress.add_task("Extract embedded JPG".ljust(25), total=len(photo_rows))
         for photo_row in photo_rows:
             rows.append(
-                build_manifest_row(
+                process_manifest_row(
+                    day_dir=day_dir,
                     workspace_dir=workspace_dir,
-                    source_path=resolve_manifest_source_path(day_dir, photo_row["relative_path"], str(photo_row.get("path") or "").strip()),
-                    relative_path=photo_row["relative_path"],
-                    photo_order_index=str(photo_row.get("photo_order_index") or "").strip(),
-                    thumb_path=build_output_paths(workspace_dir, photo_row["relative_path"])["thumb_path"],
-                    preview_path=build_output_paths(workspace_dir, photo_row["relative_path"])["preview_path"],
-                    preview_source=ensure_preview_jpg(
-                        resolve_manifest_source_path(day_dir, photo_row["relative_path"], str(photo_row.get("path") or "").strip()),
-                        build_output_paths(workspace_dir, photo_row["relative_path"])["preview_path"],
-                        overwrite,
-                        preview_long_edge,
-                    )[0],
-                    thumb_dimensions=ensure_thumb_jpg(
-                        resolve_manifest_source_path(day_dir, photo_row["relative_path"], str(photo_row.get("path") or "").strip()),
-                        build_output_paths(workspace_dir, photo_row["relative_path"])["thumb_path"],
-                        build_output_paths(workspace_dir, photo_row["relative_path"])["preview_path"],
-                        overwrite,
-                        thumb_long_edge,
-                    ),
-                    preview_dimensions=read_jpeg_dimensions(build_output_paths(workspace_dir, photo_row["relative_path"])["preview_path"]),
+                    photo_row=photo_row,
+                    overwrite=overwrite,
+                    thumb_long_edge=thumb_long_edge,
+                    preview_long_edge=preview_long_edge,
                 )
             )
             progress.advance(task_id)
@@ -612,9 +652,12 @@ def extract_embedded_photo_jpg(
     overwrite: bool,
     thumb_long_edge: int = DEFAULT_THUMB_LONG_EDGE,
     preview_long_edge: int = DEFAULT_PREVIEW_LONG_EDGE,
+    jobs: int = 4,
 ) -> int:
     photo_rows = load_photo_manifest_rows(workspace_dir)
     validate_unique_output_paths(workspace_dir, photo_rows)
+    if jobs < 1:
+        raise ValueError("jobs must be at least 1")
     partial_path = partial_output_path(output_path)
     remove_stale_partial_output(partial_path)
     row_count = 0
@@ -626,47 +669,30 @@ def extract_embedded_photo_jpg(
         task_id = progress.add_task("Extract embedded JPG".ljust(25), total=len(photo_rows))
         partial_handle, partial_writer = open_partial_manifest_csv(partial_path)
         try:
-            for photo_row in photo_rows:
-                relative_path = photo_row["relative_path"]
-                photo_order_index = str(photo_row.get("photo_order_index") or "").strip()
-                source_value = str(photo_row.get("path") or "").strip()
-                if not photo_order_index:
-                    raise ValueError(f"photo_manifest.csv row missing photo_order_index for {relative_path}")
-                if not source_value:
-                    raise ValueError(f"photo_manifest.csv row missing path for {relative_path}")
-                source_path = resolve_manifest_source_path(day_dir, relative_path, source_value)
-                if not source_path.exists() or not source_path.is_file():
-                    raise ValueError(f"Source photo listed in photo_manifest.csv does not exist: {source_path}")
-                if source_path.suffix.lower() not in PHOTO_EXTENSIONS:
-                    raise ValueError(f"Unsupported photo extension for {source_path}")
-                output_paths = build_output_paths(workspace_dir, relative_path)
-                preview_source, preview_dimensions = ensure_preview_jpg(
-                    source_path,
-                    output_paths["preview_path"],
-                    overwrite,
-                    preview_long_edge,
-                )
-                thumb_dimensions = ensure_thumb_jpg(
-                    source_path,
-                    output_paths["thumb_path"],
-                    output_paths["preview_path"],
-                    overwrite,
-                    thumb_long_edge,
-                )
-                row = build_manifest_row(
-                    workspace_dir=workspace_dir,
-                    source_path=source_path,
-                    relative_path=relative_path,
-                    photo_order_index=photo_order_index,
-                    thumb_path=output_paths["thumb_path"],
-                    preview_path=output_paths["preview_path"],
-                    preview_source=preview_source,
-                    thumb_dimensions=thumb_dimensions,
-                    preview_dimensions=preview_dimensions,
-                )
-                append_partial_manifest_row(partial_handle, partial_writer, row)
-                row_count += 1
-                progress.advance(task_id)
+            max_workers = min(jobs, max(1, len(photo_rows)))
+            next_write_index = 0
+            pending_rows: Dict[int, Dict[str, str]] = {}
+            future_to_index: Dict[concurrent.futures.Future, int] = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for index, photo_row in enumerate(photo_rows):
+                    future = executor.submit(
+                        process_manifest_row,
+                        day_dir,
+                        workspace_dir,
+                        photo_row,
+                        overwrite,
+                        thumb_long_edge,
+                        preview_long_edge,
+                    )
+                    future_to_index[future] = index
+                for future in concurrent.futures.as_completed(future_to_index):
+                    index = future_to_index[future]
+                    pending_rows[index] = future.result()
+                    progress.advance(task_id)
+                    while next_write_index in pending_rows:
+                        append_partial_manifest_row(partial_handle, partial_writer, pending_rows.pop(next_write_index))
+                        row_count += 1
+                        next_write_index += 1
         finally:
             partial_handle.close()
     replace_output_from_partial(partial_path, output_path)
@@ -687,6 +713,7 @@ def main() -> int:
         overwrite=args.overwrite,
         thumb_long_edge=args.thumb_long_edge,
         preview_long_edge=args.preview_long_edge,
+        jobs=args.jobs,
     )
     console.print(f"Wrote {row_count} embedded JPG rows to {output_path}")
     return 0

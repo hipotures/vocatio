@@ -2,6 +2,7 @@ import contextlib
 import csv
 import importlib.util
 import io
+import time
 import sys
 import tempfile
 import unittest
@@ -41,6 +42,7 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             args = extract_jpg.parse_args()
         self.assertEqual(args.thumb_long_edge, 160)
         self.assertEqual(args.preview_long_edge, 1600)
+        self.assertEqual(args.jobs, 4)
 
     def test_parse_args_rejects_non_positive_long_edge_values(self):
         for option, value in (("--thumb-long-edge", "0"), ("--preview-long-edge", "-1")):
@@ -560,37 +562,57 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             partial_path = Path(f"{output_path}.partial")
             partial_path.write_text("stale partial\n", encoding="utf-8")
 
-            call_count = 0
-            original_preview = extract_jpg.ensure_preview_jpg
-            original_thumb = extract_jpg.ensure_thumb_jpg
+            appended_relative_paths = []
+            original_process = extract_jpg.process_manifest_row
+            original_append = extract_jpg.append_partial_manifest_row
             try:
-                def fake_preview(source_path, preview_path, overwrite, long_edge=extract_jpg.DEFAULT_PREVIEW_LONG_EDGE):
-                    nonlocal call_count
-                    call_count += 1
-                    preview_path.parent.mkdir(parents=True, exist_ok=True)
-                    preview_path.write_bytes(MINIMAL_JPEG_BYTES)
-                    if call_count == 2:
-                        self.assertTrue(partial_path.exists())
-                        partial_lines = partial_path.read_text(encoding="utf-8").splitlines()
-                        self.assertEqual(partial_lines[0], ",".join(extract_jpg.MANIFEST_HEADERS))
-                        self.assertEqual(len(partial_lines), 2)
-                        self.assertEqual(output_path.read_text(encoding="utf-8"), "old manifest\n")
-                    return ("existing_preview", (1, 1))
+                def fake_process(
+                    day_dir_value,
+                    workspace_dir_value,
+                    photo_row,
+                    overwrite,
+                    thumb_long_edge,
+                    preview_long_edge,
+                ):
+                    relative_path = photo_row["relative_path"]
+                    output_paths = extract_jpg.build_output_paths(workspace_dir_value, relative_path)
+                    output_paths["preview_path"].parent.mkdir(parents=True, exist_ok=True)
+                    output_paths["thumb_path"].parent.mkdir(parents=True, exist_ok=True)
+                    if relative_path.endswith("a.arw"):
+                        time.sleep(0.05)
+                    output_paths["preview_path"].write_bytes(MINIMAL_JPEG_BYTES)
+                    output_paths["thumb_path"].write_bytes(MINIMAL_JPEG_BYTES)
+                    source_path = extract_jpg.resolve_manifest_source_path(day_dir_value, relative_path, photo_row["path"])
+                    return extract_jpg.build_manifest_row(
+                        workspace_dir=workspace_dir_value,
+                        source_path=source_path,
+                        relative_path=relative_path,
+                        photo_order_index=str(photo_row["photo_order_index"]),
+                        thumb_path=output_paths["thumb_path"],
+                        preview_path=output_paths["preview_path"],
+                        preview_source="existing_preview",
+                        thumb_dimensions=(1, 1),
+                        preview_dimensions=(1, 1),
+                    )
 
-                def fake_thumb(source_path, thumb_path, preview_path, overwrite, long_edge=extract_jpg.DEFAULT_THUMB_LONG_EDGE):
-                    thumb_path.parent.mkdir(parents=True, exist_ok=True)
-                    thumb_path.write_bytes(MINIMAL_JPEG_BYTES)
-                    return (1, 1)
+                def fake_append(handle, writer, row):
+                    self.assertTrue(partial_path.exists())
+                    partial_lines = partial_path.read_text(encoding="utf-8").splitlines()
+                    self.assertEqual(partial_lines[0], ",".join(extract_jpg.MANIFEST_HEADERS))
+                    self.assertEqual(output_path.read_text(encoding="utf-8"), "old manifest\n")
+                    appended_relative_paths.append(row["relative_path"])
+                    return original_append(handle, writer, row)
 
-                extract_jpg.ensure_preview_jpg = fake_preview
-                extract_jpg.ensure_thumb_jpg = fake_thumb
-                row_count = extract_jpg.extract_embedded_photo_jpg(day_dir, workspace_dir, output_path, overwrite=False)
+                extract_jpg.process_manifest_row = fake_process
+                extract_jpg.append_partial_manifest_row = fake_append
+                row_count = extract_jpg.extract_embedded_photo_jpg(day_dir, workspace_dir, output_path, overwrite=False, jobs=2)
             finally:
-                extract_jpg.ensure_preview_jpg = original_preview
-                extract_jpg.ensure_thumb_jpg = original_thumb
+                extract_jpg.process_manifest_row = original_process
+                extract_jpg.append_partial_manifest_row = original_append
 
             self.assertEqual(row_count, 2)
             self.assertFalse(partial_path.exists())
+            self.assertEqual(appended_relative_paths, ["hour10/a.arw", "hour10/b.arw"])
             output_lines = output_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(output_lines[0], ",".join(extract_jpg.MANIFEST_HEADERS))
             self.assertEqual(len(output_lines), 3)
