@@ -492,10 +492,6 @@ def build_gap_hint_lines(
     for index in range(1, len(rows)):
         left_row = rows[index - 1]
         right_row = rows[index]
-        time_gap_seconds = rounded_seconds(
-            int(str(right_row["start_epoch_ms"])) - int(str(left_row["start_epoch_ms"]))
-        )
-        time_level = classify_time_gap_level(time_gap_seconds)
         pair = (str(left_row["relative_path"]), str(right_row["relative_path"]))
         boundary_row = boundary_rows_by_pair.get(pair)
         if boundary_row is None:
@@ -512,7 +508,6 @@ def build_gap_hint_lines(
             boundary_score_level = classify_boundary_score_level(boundary_score)
         lines.append(
             f"gap_{index:02d}_{index + 1:02d}: "
-            f"time_gap_seconds={time_gap_seconds} ({time_level}), "
             f"visual_distance={visual_distance_text} ({visual_distance_level}), "
             f"heuristic_boundary_score={boundary_score_text} ({boundary_score_level})"
         )
@@ -642,6 +637,11 @@ def build_user_prompt(
         f"You will receive {window_size} consecutive stage-event photos.\n\n"
         "Order:\n"
         f"{frames_block}\n\n"
+        "Important:\n"
+        "The frames are consecutive photos from one chronological sequence.\n"
+        "They are not random examples.\n"
+        "Reason about continuity from left to right:\n"
+        f"frame_01 -> frame_02 -> ... -> frame_{window_size:02d}\n\n"
         "Task:\n"
         "Choose at most one boundary between consecutive frames.\n\n"
         "A boundary means that the photos before and after it most likely belong to different segments.\n\n"
@@ -656,14 +656,24 @@ def build_user_prompt(
         "- audience = viewers, crowd, or audience-facing non-performance shots\n"
         "- rehearsal = floor test, stage test, or non-performance rehearsal\n"
         "- other = does not clearly fit the categories above\n\n"
-        "True boundary signals:\n"
-        "- different performer or different group\n"
-        "- clearly different costume identity\n"
-        "- clearly different performance identity\n"
-        "- clear switch to audience, backstage, rehearsal, or ceremony\n\n"
-        "Not a boundary by itself:\n"
+        "Create a boundary only if at least one positive boundary condition below is clearly true.\n"
+        "If none of the positive boundary conditions is clearly true, return null.\n\n"
+        "Positive boundary conditions:\n"
+        "- the person on the left and the person on the right are not the same dancer\n"
+        "- the dancers on the left and the dancers on the right do not belong to the same group\n"
+        "- the costume on the left and the costume on the right do not belong to the same costume set\n"
+        "- the segment type changes:\n"
+        "  - dance -> ceremony\n"
+        "  - dance -> audience\n"
+        "  - dance -> rehearsal\n"
+        "  - ceremony -> dance\n"
+        "  - audience -> dance\n"
+        "  - rehearsal -> dance\n\n"
+        "Forbidden reasons for a boundary:\n"
         "- pose change\n"
-        "- motion within the same act\n"
+        "- motion change\n"
+        "- choreography phrase change\n"
+        "- a new movement phrase inside the same act\n"
         "- framing change\n"
         "- lighting change alone\n"
         "- background change alone\n"
@@ -676,24 +686,19 @@ def build_user_prompt(
         "- Single dancer -> wider group view can still be the same segment.\n"
         "- If costume identity and act identity still match, do not create a boundary only because fewer or more dancers are visible.\n"
         "- Ignore background differences if they can be explained by camera direction, framing, crop, zoom, or a different shooting angle on the same stage.\n\n"
+        "If the change is only a new pose, new movement phrase, or another choreography moment within the same act, you must return null.\n\n"
         "Decision priority:\n"
         "1. images\n"
-        "2. time\n"
-        "3. heuristic hints\n\n"
-        "If images clearly contradict time or heuristics, trust the images first.\n\n"
-        "Hard timing rule for this event:\n"
-        "- A different performer group cannot start less than 30 seconds after the previous photos.\n"
-        "- If a candidate boundary has time_gap_seconds under 30, treat the photos on both sides as the same segment.\n"
-        "- Do not create a boundary inside a sub-30-second window, even if framing, background, or visible performer count changes.\n\n"
+        "2. heuristic hints\n\n"
+        "If images clearly contradict heuristic hints, trust the images first.\n\n"
         "Hint interpretation:\n"
         "- low = weak signal\n"
         "- medium = ambiguous signal\n"
         "- high = strong signal\n"
         "- unknown = unavailable hint\n"
-        "- larger time_gap_seconds makes a boundary more plausible, but time alone never proves a boundary\n"
         "- larger visual_distance means more visual change between adjacent frames\n"
         "- heuristic_boundary_score near 0 suggests continuity, near 1 suggests a likely boundary\n\n"
-        "Time and heuristic hints for consecutive gaps:\n"
+        "Heuristic hints for consecutive gaps:\n"
         f"{hints_block}\n\n"
         f"{response_header}"
         f"{decisions_block}\n\n"
@@ -1023,7 +1028,7 @@ def build_user_prompt_template(
     response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
 ) -> str:
     gap_hint_lines = [
-        f"gap_{index:02d}_{index + 1:02d}: time_gap_seconds=<seconds> (<level>), visual_distance=<value> (<level>), heuristic_boundary_score=<value> (<level>)"
+        f"gap_{index:02d}_{index + 1:02d}: visual_distance=<value> (<level>), heuristic_boundary_score=<value> (<level>)"
         for index in range(1, window_size)
     ]
     return build_user_prompt(

@@ -198,8 +198,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(
             probe.build_gap_hint_lines(rows, boundary_rows_by_pair),
             [
-                "gap_01_02: time_gap_seconds=44 (medium), visual_distance=0.709 (high), heuristic_boundary_score=0.501 (medium)",
-                "gap_02_03: time_gap_seconds=1 (low), visual_distance=0.040 (low), heuristic_boundary_score=0.020 (low)",
+                "gap_01_02: visual_distance=0.709 (high), heuristic_boundary_score=0.501 (medium)",
+                "gap_02_03: visual_distance=0.040 (low), heuristic_boundary_score=0.020 (low)",
             ],
         )
 
@@ -211,7 +211,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(
             probe.build_gap_hint_lines(rows, {}),
             [
-                "gap_01_02: time_gap_seconds=1 (low), visual_distance=unknown (unknown), heuristic_boundary_score=unknown (unknown)",
+                "gap_01_02: visual_distance=unknown (unknown), heuristic_boundary_score=unknown (unknown)",
             ],
         )
 
@@ -219,25 +219,35 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         prompt = probe.build_user_prompt(
             window_size=2,
             gap_hint_lines=[
-                "gap_01_02: time_gap_seconds=5 (low), visual_distance=0.150 (medium), heuristic_boundary_score=0.200 (low)",
+                "gap_01_02: visual_distance=0.150 (medium), heuristic_boundary_score=0.200 (low)",
             ],
         )
         self.assertIn('"no_cut"', prompt)
         self.assertIn('"cut_after_1"', prompt)
         self.assertNotIn('"cut_after_2"', prompt)
         self.assertIn("You will receive 2 consecutive stage-event photos", prompt)
+        self.assertIn("The frames are consecutive photos from one chronological sequence", prompt)
+        self.assertIn("They are not random examples", prompt)
+        self.assertIn("Reason about continuity from left to right", prompt)
         self.assertIn("Decision priority", prompt)
         self.assertIn("images", prompt)
         self.assertIn("heuristic hints", prompt)
-        self.assertIn("Time and heuristic hints for consecutive gaps", prompt)
-        self.assertIn("gap_01_02: time_gap_seconds=5 (low)", prompt)
+        self.assertIn("Heuristic hints for consecutive gaps", prompt)
+        self.assertIn("gap_01_02: visual_distance=0.150 (medium)", prompt)
         self.assertIn("audience or backstage insert", prompt)
         self.assertIn("floor rehearsal / floor test / stage test", prompt)
         self.assertIn("ceremony / award / host / result reading", prompt)
+        self.assertIn("Create a boundary only if at least one positive boundary condition below is clearly true", prompt)
+        self.assertIn("If none of the positive boundary conditions is clearly true, return null", prompt)
+        self.assertIn("the person on the left and the person on the right are not the same dancer", prompt)
+        self.assertIn("the dancers on the left and the dancers on the right do not belong to the same group", prompt)
+        self.assertIn("the costume on the left and the costume on the right do not belong to the same costume set", prompt)
+        self.assertIn("Forbidden reasons for a boundary", prompt)
+        self.assertIn("a new movement phrase inside the same act", prompt)
         self.assertIn("group shot followed by a solo shot of one dancer from the same group", prompt)
         self.assertIn("do not create a boundary only because fewer or more dancers are visible", prompt)
-        self.assertIn("A different performer group cannot start less than 30 seconds", prompt)
-        self.assertIn("Do not create a boundary inside a sub-30-second window", prompt)
+        self.assertIn("you must return null", prompt)
+        self.assertNotIn("time_gap_seconds", prompt)
         self.assertIn("If more than one real boundary appears", prompt)
         self.assertIn('If there is no clear evidence for a boundary, choose "no_cut"', prompt)
         self.assertIn("Keep frame notes short and concrete", prompt)
@@ -258,7 +268,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
     def test_build_user_prompt_schema_mode_mentions_boundary_after_frame(self):
         prompt = probe.build_user_prompt(
             window_size=3,
-            gap_hint_lines=["gap_01_02: time_gap_seconds=1 (low), visual_distance=0.100 (medium), heuristic_boundary_score=0.200 (low)"],
+            gap_hint_lines=["gap_01_02: visual_distance=0.100 (medium), heuristic_boundary_score=0.200 (low)"],
             extra_instructions="",
             response_schema_mode="on",
         )
