@@ -33,7 +33,7 @@ console = Console()
 PHOTO_EMBEDDED_MANIFEST_FILENAME = "photo_embedded_manifest.csv"
 PHOTO_MANIFEST_FILENAME = "photo_manifest.csv"
 DEFAULT_OUTPUT_FILENAME = "vlm_boundary_test.csv"
-DEFAULT_GUI_INDEX_FILENAME = "performance_proxy_index.image.vlm.json"
+RUN_METADATA_DIRNAME = "vlm_runs"
 DEFAULT_IMAGE_VARIANT = "preview"
 DEFAULT_WINDOW_SIZE = 10
 DEFAULT_OVERLAP = 2
@@ -46,9 +46,9 @@ DEFAULT_TEMPERATURE = 0.0
 DEFAULT_OLLAMA_THINK = "inherit"
 EMBEDDED_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "thumb_path", "preview_path"})
 PHOTO_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "start_epoch_ms", "start_local", "photo_order_index"})
-VALID_DECISIONS = tuple(["no_cut"] + [f"cut_after_{index}" for index in range(1, 10)])
 OUTPUT_HEADERS = [
     "generated_at",
+    "run_id",
     "image_variant",
     "model",
     "temperature",
@@ -123,16 +123,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--output",
         default=DEFAULT_OUTPUT_FILENAME,
         help=f"Output CSV filename or absolute path. Default: {DEFAULT_OUTPUT_FILENAME}",
-    )
-    parser.add_argument(
-        "--write-gui-index",
-        action="store_true",
-        help="Write a GUI-compatible image-only review index representing each VLM batch as one set.",
-    )
-    parser.add_argument(
-        "--gui-index-output",
-        default=DEFAULT_GUI_INDEX_FILENAME,
-        help=f"GUI index JSON filename or absolute path. Default: {DEFAULT_GUI_INDEX_FILENAME}",
     )
     parser.add_argument(
         "--image-variant",
@@ -213,11 +203,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--dump-debug-dir",
         help="Optional directory for per-batch prompt/request/response debug dumps.",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite the output CSV instead of appending",
     )
     return parser.parse_args(argv)
 
@@ -335,12 +320,19 @@ def load_extra_instructions(inline_value: str, file_value: Optional[str]) -> str
     return "\n\n".join(part for part in parts if part)
 
 
-def build_user_prompt(temporal_lines: Sequence[str], extra_instructions: str = "") -> str:
-    frames_block = "\n".join([f"frame_{index:02d} = attached image {index}" for index in range(1, 11)])
+def build_valid_decisions(window_size: int) -> tuple[str, ...]:
+    if window_size < 1:
+        raise ValueError("window_size must be at least 1")
+    return tuple(["no_cut"] + [f"cut_after_{index}" for index in range(1, window_size)])
+
+
+def build_user_prompt(window_size: int, temporal_lines: Sequence[str], extra_instructions: str = "") -> str:
+    frames_block = "\n".join([f"frame_{index:02d} = attached image {index}" for index in range(1, window_size + 1)])
     temporal_block = "\n".join(temporal_lines)
-    decisions_block = "\n".join([f'- "{decision}"' for decision in VALID_DECISIONS])
+    decisions_block = "\n".join([f'- "{decision}"' for decision in build_valid_decisions(window_size)])
+    last_cut_index = max(window_size - 1, 1)
     prompt = (
-        "You will receive 10 images representing consecutive photos from a stage event.\n\n"
+        f"You will receive {window_size} images representing consecutive photos from a stage event.\n\n"
         "Interpret them in this exact order:\n"
         f"{frames_block}\n\n"
         "Temporal sequence:\n"
@@ -373,9 +365,9 @@ def build_user_prompt(temporal_lines: Sequence[str], extra_instructions: str = "
         "You must choose exactly one of these decisions:\n"
         f"{decisions_block}\n\n"
         "Rules:\n"
-        '- Choose "no_cut" if all 10 frames most likely belong to the same performance.\n'
-        '- Choose "cut_after_N" only if frames 1..N and frames N+1..10 most likely belong to different performances.\n'
-        "- If more than one real boundary appears inside the 10-frame window, choose the single strongest and clearest boundary.\n"
+        f'- Choose "no_cut" if all {window_size} frames most likely belong to the same performance.\n'
+        f'- Choose "cut_after_N" only if frames 1..N and frames N+1..{window_size} most likely belong to different performances.\n'
+        f"- If more than one real boundary appears inside the {window_size}-frame window, choose the single strongest and clearest boundary.\n"
         "- In the reason field, briefly describe the costume or visual identity in every frame before you explain the boundary decision.\n"
         '- Start the reason with "Frame-by-frame notes:" and mention all frames in order.\n'
         "- Output only valid JSON.\n"
@@ -383,8 +375,8 @@ def build_user_prompt(temporal_lines: Sequence[str], extra_instructions: str = "
         "- Do not output any text before or after JSON.\n\n"
         "Return exactly this schema:\n"
         '{\n'
-        '  "decision": "cut_after_6",\n'
-        '  "reason": "Frame-by-frame notes: frame_01 red dress, frame_02 red dress, frame_03 red dress, frame_04 blue suit, frame_05 blue suit, frame_06 blue suit. Boundary: frames 1-3 show one segment, while frames 4-6 show a clearly different segment."\n'
+        f'  "decision": "cut_after_{last_cut_index}",\n'
+        '  "reason": "Frame-by-frame notes: frame_01 red dress, frame_02 red dress, frame_03 blue suit, frame_04 blue suit. Boundary: the window changes from one segment to a clearly different segment."\n'
         '}'
     )
     if extra_instructions.strip():
@@ -503,7 +495,8 @@ def extract_json_object_text(raw_response: str) -> str:
     return text[start : end + 1]
 
 
-def parse_model_response(raw_response: str) -> Dict[str, str]:
+def parse_model_response(raw_response: str, *, window_size: int) -> Dict[str, str]:
+    valid_decisions = build_valid_decisions(window_size)
     try:
         payload = json.loads(extract_json_object_text(raw_response))
     except Exception as error:
@@ -514,7 +507,7 @@ def parse_model_response(raw_response: str) -> Dict[str, str]:
         }
     decision = str(payload.get("decision", "") or "").strip()
     reason = str(payload.get("reason", "") or "").strip()
-    if decision not in VALID_DECISIONS:
+    if decision not in valid_decisions:
         return {
             "decision": "invalid_response",
             "reason": f"Invalid decision value: {decision}",
@@ -532,6 +525,7 @@ def parse_model_response(raw_response: str) -> Dict[str, str]:
 def build_result_row(
     *,
     generated_at: str,
+    run_id: str,
     image_variant: str,
     batch_index: int,
     start_row: int,
@@ -566,6 +560,7 @@ def build_result_row(
         previous_epoch_ms = current_epoch_ms
     return {
         "generated_at": generated_at,
+        "run_id": run_id,
         "image_variant": image_variant,
         "model": model,
         "temperature": str(temperature),
@@ -590,10 +585,10 @@ def build_result_row(
     }
 
 
-def append_result_rows(output_csv: Path, rows: Sequence[Mapping[str, str]], *, overwrite: bool) -> None:
+def append_result_rows(output_csv: Path, rows: Sequence[Mapping[str, str]]) -> None:
     output_csv.parent.mkdir(parents=True, exist_ok=True)
-    mode = "w" if overwrite or not output_csv.exists() else "a"
-    write_header = mode == "w"
+    mode = "a" if output_csv.exists() else "w"
+    write_header = not output_csv.exists()
     with output_csv.open(mode, newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=OUTPUT_HEADERS)
         if write_header:
@@ -606,8 +601,49 @@ def current_timestamp() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
-def build_debug_run_id() -> str:
-    return datetime.now(timezone.utc).astimezone().strftime("%Y%m%d_%H%M%S")
+def build_run_id(datetime_text: Optional[str] = None) -> str:
+    if datetime_text:
+        moment = datetime.fromisoformat(datetime_text)
+    else:
+        moment = datetime.now(timezone.utc).astimezone()
+    return f"vlm-{moment.strftime('%Y%m%d%H%M%S')}"
+
+
+def build_user_prompt_template(window_size: int, extra_instructions: str = "") -> str:
+    temporal_lines = [
+        f"frame_{index:02d}: t_from_first=<seconds>, delta_from_previous=<seconds>"
+        for index in range(1, window_size + 1)
+    ]
+    return build_user_prompt(window_size=window_size, temporal_lines=temporal_lines, extra_instructions=extra_instructions)
+
+
+def write_run_metadata(
+    *,
+    workspace_dir: Path,
+    run_id: str,
+    generated_at: str,
+    embedded_manifest_csv: Path,
+    photo_manifest_csv: Path,
+    output_csv: Path,
+    args_payload: Mapping[str, Any],
+    system_prompt: str,
+    user_prompt_template: str,
+) -> Dict[str, Any]:
+    runs_dir = workspace_dir / RUN_METADATA_DIRNAME
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = runs_dir / f"{run_id}.json"
+    metadata = {
+        "run_id": run_id,
+        "generated_at": generated_at,
+        "embedded_manifest_csv": str(embedded_manifest_csv),
+        "photo_manifest_csv": str(photo_manifest_csv),
+        "output_csv": str(output_csv),
+        "system_prompt": system_prompt,
+        "user_prompt_template": user_prompt_template,
+        "args": dict(args_payload),
+    }
+    atomic_write_json(metadata_path, metadata)
+    return metadata
 
 
 def dump_debug_artifacts(
@@ -641,30 +677,20 @@ def build_gui_index_payload(
     day_name: str,
     workspace_dir: Path,
     image_variant: str,
-    batch_payloads: Sequence[Mapping[str, Any]],
+    run_id: str,
+    ordered_rows: Sequence[Mapping[str, str]],
+    result_rows: Sequence[Mapping[str, str]],
 ) -> Dict[str, Any]:
-    ordered_rows: List[Dict[str, Any]] = []
-    row_by_relative_path: Dict[str, Dict[str, Any]] = {}
     cut_reasons_by_pair: Dict[tuple[str, str], List[str]] = {}
-    for batch_payload in batch_payloads:
-        rows = [dict(row) for row in batch_payload["rows"]]
-        for row in rows:
-            relative_path = str(row["relative_path"])
-            if relative_path not in row_by_relative_path:
-                row_by_relative_path[relative_path] = row
-                ordered_rows.append(row)
-        if str(batch_payload.get("response_status", "")) != "ok":
+    for result_row in result_rows:
+        if str(result_row.get("response_status", "")) != "ok":
             continue
-        decision = str(batch_payload.get("decision", ""))
-        if not decision.startswith("cut_after_"):
+        left_relative_path = str(result_row.get("cut_left_relative_path", "") or "")
+        right_relative_path = str(result_row.get("cut_right_relative_path", "") or "")
+        if not left_relative_path or not right_relative_path:
             continue
-        local_index = int(decision.removeprefix("cut_after_"))
-        if local_index <= 0 or local_index >= len(rows):
-            continue
-        left_relative_path = str(rows[local_index - 1]["relative_path"])
-        right_relative_path = str(rows[local_index]["relative_path"])
         pair = (left_relative_path, right_relative_path)
-        cut_reasons_by_pair.setdefault(pair, []).append(str(batch_payload.get("reason", "") or "").strip())
+        cut_reasons_by_pair.setdefault(pair, []).append(str(result_row.get("reason", "") or "").strip())
 
     segments: List[Dict[str, Any]] = []
     current_rows: List[Dict[str, Any]] = []
@@ -745,10 +771,19 @@ def build_gui_index_payload(
         "day": day_name,
         "workspace_dir": str(workspace_dir),
         "source_mode": SOURCE_MODE_IMAGE_ONLY_V1,
+        "vlm_run_id": run_id,
+        "vlm_image_variant": image_variant,
         "performance_count": len(performances),
         "photo_count": total_photo_count,
         "performances": performances,
     }
+
+
+def read_result_rows(output_csv: Path) -> List[Dict[str, str]]:
+    with output_csv.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        validate_required_columns(output_csv.name, reader.fieldnames, tuple(OUTPUT_HEADERS))
+        return [dict(row) for row in reader]
 
 
 def probe_vlm_photo_boundaries(
@@ -771,9 +806,7 @@ def probe_vlm_photo_boundaries(
     ollama_think: str,
     extra_instructions: str,
     dump_debug_dir: Optional[Path],
-    write_gui_index: bool,
-    gui_index_output: Path,
-    overwrite: bool,
+    args_payload: Mapping[str, Any],
 ) -> int:
     joined_rows = read_joined_rows(
         workspace_dir=workspace_dir,
@@ -783,9 +816,19 @@ def probe_vlm_photo_boundaries(
     )
     window_starts = build_window_start_indexes(len(joined_rows), window_size, overlap)[:max_batches]
     result_rows: List[Dict[str, str]] = []
-    gui_batch_payloads: List[Dict[str, Any]] = []
     generated_at = current_timestamp()
-    debug_run_id = build_debug_run_id()
+    run_id = build_run_id(generated_at)
+    write_run_metadata(
+        workspace_dir=workspace_dir,
+        run_id=run_id,
+        generated_at=generated_at,
+        embedded_manifest_csv=embedded_manifest_csv,
+        photo_manifest_csv=photo_manifest_csv,
+        output_csv=output_csv,
+        args_payload=args_payload,
+        system_prompt=SYSTEM_PROMPT,
+        user_prompt_template=build_user_prompt_template(window_size=window_size, extra_instructions=extra_instructions),
+    )
     request_args = argparse.Namespace(
         ollama_base_url=ollama_base_url,
         ollama_think=ollama_think,
@@ -809,7 +852,7 @@ def probe_vlm_photo_boundaries(
             end_index = start_index + window_size
             window_rows = joined_rows[start_index:end_index]
             temporal_lines = build_temporal_lines(window_rows)
-            prompt = build_user_prompt(temporal_lines, extra_instructions=extra_instructions)
+            prompt = build_user_prompt(window_size=window_size, temporal_lines=temporal_lines, extra_instructions=extra_instructions)
             payload = build_ollama_payload(
                 model=model,
                 prompt=prompt,
@@ -824,7 +867,7 @@ def probe_vlm_photo_boundaries(
                 if dump_debug_dir is not None:
                     dump_debug_artifacts(
                         debug_dir=dump_debug_dir,
-                        run_id=debug_run_id,
+                        run_id=run_id,
                         batch_index=batch_index,
                         prompt=prompt,
                         request_payload=payload,
@@ -835,7 +878,7 @@ def probe_vlm_photo_boundaries(
             if dump_debug_dir is not None:
                 dump_debug_artifacts(
                     debug_dir=dump_debug_dir,
-                    run_id=debug_run_id,
+                    run_id=run_id,
                     batch_index=batch_index,
                     prompt=prompt,
                     request_payload=payload,
@@ -843,10 +886,11 @@ def probe_vlm_photo_boundaries(
                     error_text=None,
                 )
             raw_response = extract_response_text(response_payload)
-            parsed_response = parse_model_response(raw_response)
+            parsed_response = parse_model_response(raw_response, window_size=window_size)
             result_rows.append(
                 build_result_row(
                     generated_at=generated_at,
+                    run_id=run_id,
                     image_variant=image_variant,
                     batch_index=batch_index,
                     start_row=start_index + 1,
@@ -860,27 +904,8 @@ def probe_vlm_photo_boundaries(
                     temperature=temperature,
                 )
             )
-            gui_batch_payloads.append(
-                {
-                    "batch_index": batch_index,
-                    "decision": str(parsed_response["decision"]),
-                    "reason": str(parsed_response["reason"]),
-                    "response_status": str(parsed_response["response_status"]),
-                    "rows": [dict(row) for row in window_rows],
-                }
-            )
             progress.advance(task)
-    append_result_rows(output_csv, result_rows, overwrite=overwrite)
-    if write_gui_index:
-        if gui_index_output.exists() and not overwrite:
-            raise ValueError(f"GUI index JSON already exists: {gui_index_output}")
-        gui_payload = build_gui_index_payload(
-            day_name=workspace_dir.parent.name,
-            workspace_dir=workspace_dir,
-            image_variant=image_variant,
-            batch_payloads=gui_batch_payloads,
-        )
-        atomic_write_json(gui_index_output, gui_payload)
+    append_result_rows(output_csv, result_rows)
     return len(result_rows)
 
 
@@ -893,11 +918,32 @@ def main() -> int:
     embedded_manifest_csv = resolve_path(workspace_dir, args.embedded_manifest_csv)
     photo_manifest_csv = resolve_path(workspace_dir, args.photo_manifest_csv)
     output_csv = resolve_path(workspace_dir, args.output)
-    gui_index_output = resolve_path(workspace_dir, args.gui_index_output)
     if not embedded_manifest_csv.exists():
         raise SystemExit(f"Embedded manifest CSV does not exist: {embedded_manifest_csv}")
     if not photo_manifest_csv.exists():
         raise SystemExit(f"Photo manifest CSV does not exist: {photo_manifest_csv}")
+    args_payload = {
+        "day_dir": str(day_dir),
+        "workspace_dir": str(workspace_dir),
+        "embedded_manifest_csv": str(embedded_manifest_csv),
+        "photo_manifest_csv": str(photo_manifest_csv),
+        "output_csv": str(output_csv),
+        "image_variant": args.image_variant,
+        "window_size": args.window_size,
+        "overlap": args.overlap,
+        "max_batches": args.max_batches,
+        "model": args.model,
+        "ollama_base_url": args.ollama_base_url,
+        "ollama_num_ctx": args.ollama_num_ctx,
+        "ollama_num_predict": args.ollama_num_predict,
+        "ollama_keep_alive": args.ollama_keep_alive,
+        "timeout_seconds": args.timeout_seconds,
+        "temperature": args.temperature,
+        "ollama_think": args.ollama_think,
+        "extra_instructions": args.extra_instructions,
+        "extra_instructions_file": args.extra_instructions_file,
+        "dump_debug_dir": args.dump_debug_dir,
+    }
     row_count = probe_vlm_photo_boundaries(
         workspace_dir=workspace_dir,
         embedded_manifest_csv=embedded_manifest_csv,
@@ -917,9 +963,7 @@ def main() -> int:
         ollama_think=args.ollama_think,
         extra_instructions=load_extra_instructions(args.extra_instructions, args.extra_instructions_file),
         dump_debug_dir=Path(args.dump_debug_dir).expanduser().resolve() if args.dump_debug_dir else None,
-        write_gui_index=bool(args.write_gui_index),
-        gui_index_output=gui_index_output,
-        overwrite=args.overwrite,
+        args_payload=args_payload,
     )
     console.print(f"Wrote {row_count} VLM probe rows to {output_csv}")
     return 0

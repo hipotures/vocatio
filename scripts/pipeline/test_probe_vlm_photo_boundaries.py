@@ -41,7 +41,6 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "false",
                 "--dump-debug-dir",
                 "/tmp/vlm-debug",
-                "--write-gui-index",
             ]
         )
         self.assertEqual(args.image_variant, "thumb")
@@ -50,7 +49,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(args.temperature, 0.25)
         self.assertEqual(args.ollama_think, "false")
         self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
-        self.assertTrue(args.write_gui_index)
+        self.assertFalse(hasattr(args, "write_gui_index"))
+        self.assertFalse(hasattr(args, "overwrite"))
 
     def test_build_window_start_indexes_uses_overlap_and_aligned_tail(self):
         self.assertEqual(probe.build_window_start_indexes(total_rows=26, window_size=10, overlap=2), [0, 8, 16])
@@ -77,13 +77,16 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
 
     def test_build_user_prompt_mentions_single_cut_decisions_and_temporal_sequence(self):
         prompt = probe.build_user_prompt(
-            [
+            window_size=2,
+            temporal_lines=[
                 "frame_01: t_from_first=0s, delta_from_previous=0s",
                 "frame_02: t_from_first=5s, delta_from_previous=5s",
             ],
         )
         self.assertIn('"no_cut"', prompt)
-        self.assertIn('"cut_after_9"', prompt)
+        self.assertIn('"cut_after_1"', prompt)
+        self.assertNotIn('"cut_after_2"', prompt)
+        self.assertIn("You will receive 2 images", prompt)
         self.assertIn("Temporal sequence", prompt)
         self.assertIn("audience or backstage insert", prompt)
         self.assertIn("floor rehearsal / floor test / stage test", prompt)
@@ -95,26 +98,30 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
 
     def test_build_user_prompt_appends_extra_instructions(self):
         prompt = probe.build_user_prompt(
-            ["frame_01: t_from_first=0s, delta_from_previous=0s"],
+            window_size=1,
+            temporal_lines=["frame_01: t_from_first=0s, delta_from_previous=0s"],
             extra_instructions="Prefer strong performer identity changes over lighting changes.",
         )
         self.assertIn("Additional instructions", prompt)
         self.assertIn("Prefer strong performer identity changes", prompt)
 
     def test_parse_model_response_accepts_json_decision_and_reason(self):
-        parsed = probe.parse_model_response('{"decision":"cut_after_6","reason":"Different performers."}')
-        self.assertEqual(parsed["decision"], "cut_after_6")
+        parsed = probe.parse_model_response(
+            '{"decision":"cut_after_1","reason":"Different performers."}',
+            window_size=2,
+        )
+        self.assertEqual(parsed["decision"], "cut_after_1")
         self.assertEqual(parsed["reason"], "Different performers.")
         self.assertEqual(parsed["response_status"], "ok")
 
     def test_parse_model_response_marks_invalid_json(self):
-        parsed = probe.parse_model_response("not json")
+        parsed = probe.parse_model_response("not json", window_size=2)
         self.assertEqual(parsed["decision"], "invalid_response")
         self.assertEqual(parsed["response_status"], "invalid_response")
         self.assertIn("JSON", parsed["reason"])
 
     def test_parse_model_response_marks_invalid_decision(self):
-        parsed = probe.parse_model_response('{"decision":"cut_after_10","reason":"Bad."}')
+        parsed = probe.parse_model_response('{"decision":"cut_after_2","reason":"Bad."}', window_size=2)
         self.assertEqual(parsed["decision"], "invalid_response")
         self.assertEqual(parsed["response_status"], "invalid_response")
         self.assertIn("decision", parsed["reason"])
@@ -122,6 +129,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
     def test_build_result_row_includes_cut_metadata(self):
         row = probe.build_result_row(
             generated_at="2026-04-14T03:30:00+02:00",
+            run_id="vlm-20260414033000",
             image_variant="thumb",
             batch_index=2,
             start_row=9,
@@ -145,6 +153,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             raw_response='{"decision":"cut_after_1","reason":"New act."}',
             parsed_response={"decision": "cut_after_1", "reason": "New act.", "response_status": "ok"},
         )
+        self.assertEqual(row["run_id"], "vlm-20260414033000")
         self.assertEqual(row["cut_after_local_index"], "1")
         self.assertEqual(row["cut_after_global_row"], "9")
         self.assertEqual(row["cut_left_relative_path"], "cam/a.jpg")
@@ -215,15 +224,60 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 output_csv,
                 [
                     {
-                        header: ""
+                        header: ("vlm-20260414033000" if header == "run_id" else "")
                         for header in probe.OUTPUT_HEADERS
                     }
                 ],
-                overwrite=False,
             )
             lines = output_csv.read_text(encoding="utf-8").splitlines()
             self.assertEqual(lines[0], ",".join(probe.OUTPUT_HEADERS))
             self.assertEqual(len(lines), 2)
+
+    def test_append_result_rows_appends_without_overwrite_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_csv = Path(tmp) / "vlm_boundary_test.csv"
+            first_row = {header: "" for header in probe.OUTPUT_HEADERS}
+            second_row = {header: "" for header in probe.OUTPUT_HEADERS}
+            first_row["run_id"] = "vlm-20260414033000"
+            second_row["run_id"] = "vlm-20260414033100"
+            probe.append_result_rows(output_csv, [first_row])
+            probe.append_result_rows(output_csv, [second_row])
+            rows = output_csv.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(rows), 3)
+            self.assertIn("vlm-20260414033000", rows[1])
+            self.assertIn("vlm-20260414033100", rows[2])
+
+    def test_build_run_id_uses_vlm_prefix_and_second_precision(self):
+        run_id = probe.build_run_id(datetime_text="2026-04-14T05:30:12+02:00")
+        self.assertEqual(run_id, "vlm-20260414053012")
+
+    def test_write_run_metadata_json_includes_prompt_and_cli_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            metadata = probe.write_run_metadata(
+                workspace_dir=workspace_dir,
+                run_id="vlm-20260414053012",
+                generated_at="2026-04-14T05:30:12+02:00",
+                embedded_manifest_csv=workspace_dir / "photo_embedded_manifest.csv",
+                photo_manifest_csv=workspace_dir / "photo_manifest.csv",
+                output_csv=workspace_dir / "vlm_boundary_test.csv",
+                args_payload={
+                    "image_variant": "preview",
+                    "window_size": 5,
+                    "overlap": 2,
+                    "max_batches": 100,
+                    "model": "qwen3.5:9b",
+                },
+                system_prompt="system",
+                user_prompt_template="user-template",
+            )
+            metadata_path = workspace_dir / "vlm_runs" / "vlm-20260414053012.json"
+            self.assertEqual(metadata["run_id"], "vlm-20260414053012")
+            self.assertTrue(metadata_path.exists())
+            stored = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["user_prompt_template"], "user-template")
+            self.assertEqual(stored["args"]["window_size"], 5)
 
     def test_dump_debug_artifacts_writes_prompt_request_and_response(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -270,86 +324,68 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             day_name="20260323",
             workspace_dir=Path("/tmp/workspace"),
             image_variant="thumb",
-            batch_payloads=[
+            run_id="vlm-20260414053012",
+            ordered_rows=[
                 {
-                    "batch_index": 1,
+                    "relative_path": "cam/a.hif",
+                    "source_path": "cam/a.hif",
+                    "filename": "a.hif",
+                    "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/a.jpg",
+                    "image_relative_path": "embedded_jpg/thumb/cam/a.jpg",
+                    "start_local": "2026-03-23T10:00:00",
+                    "stream_id": "cam",
+                    "device": "cam",
+                },
+                {
+                    "relative_path": "cam/b.hif",
+                    "source_path": "cam/b.hif",
+                    "filename": "b.hif",
+                    "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/b.jpg",
+                    "image_relative_path": "embedded_jpg/thumb/cam/b.jpg",
+                    "start_local": "2026-03-23T10:00:01",
+                    "stream_id": "cam",
+                    "device": "cam",
+                },
+                {
+                    "relative_path": "cam/c.hif",
+                    "source_path": "cam/c.hif",
+                    "filename": "c.hif",
+                    "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/c.jpg",
+                    "image_relative_path": "embedded_jpg/thumb/cam/c.jpg",
+                    "start_local": "2026-03-23T10:00:02",
+                    "stream_id": "cam",
+                    "device": "cam",
+                },
+                {
+                    "relative_path": "cam/d.hif",
+                    "source_path": "cam/d.hif",
+                    "filename": "d.hif",
+                    "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/d.jpg",
+                    "image_relative_path": "embedded_jpg/thumb/cam/d.jpg",
+                    "start_local": "2026-03-23T10:00:03",
+                    "stream_id": "cam",
+                    "device": "cam",
+                },
+            ],
+            result_rows=[
+                {
                     "decision": "cut_after_2",
                     "reason": "cut between b and c",
                     "response_status": "ok",
-                    "rows": [
-                        {
-                            "relative_path": "cam/a.hif",
-                            "source_path": "cam/a.hif",
-                            "filename": "a.hif",
-                            "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/a.jpg",
-                            "image_relative_path": "embedded_jpg/thumb/cam/a.jpg",
-                            "start_local": "2026-03-23T10:00:00",
-                            "stream_id": "cam",
-                            "device": "cam",
-                        },
-                        {
-                            "relative_path": "cam/b.hif",
-                            "source_path": "cam/b.hif",
-                            "filename": "b.hif",
-                            "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/b.jpg",
-                            "image_relative_path": "embedded_jpg/thumb/cam/b.jpg",
-                            "start_local": "2026-03-23T10:00:01",
-                            "stream_id": "cam",
-                            "device": "cam",
-                        },
-                        {
-                            "relative_path": "cam/c.hif",
-                            "source_path": "cam/c.hif",
-                            "filename": "c.hif",
-                            "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/c.jpg",
-                            "image_relative_path": "embedded_jpg/thumb/cam/c.jpg",
-                            "start_local": "2026-03-23T10:00:02",
-                            "stream_id": "cam",
-                            "device": "cam",
-                        },
-                    ],
+                    "cut_left_relative_path": "cam/b.hif",
+                    "cut_right_relative_path": "cam/c.hif",
                 },
                 {
-                    "batch_index": 2,
                     "decision": "cut_after_1",
                     "reason": "same cut repeated in overlap",
                     "response_status": "ok",
-                    "rows": [
-                        {
-                            "relative_path": "cam/b.hif",
-                            "source_path": "cam/b.hif",
-                            "filename": "b.hif",
-                            "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/b.jpg",
-                            "image_relative_path": "embedded_jpg/thumb/cam/b.jpg",
-                            "start_local": "2026-03-23T10:00:01",
-                            "stream_id": "cam",
-                            "device": "cam",
-                        },
-                        {
-                            "relative_path": "cam/c.hif",
-                            "source_path": "cam/c.hif",
-                            "filename": "c.hif",
-                            "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/c.jpg",
-                            "image_relative_path": "embedded_jpg/thumb/cam/c.jpg",
-                            "start_local": "2026-03-23T10:00:02",
-                            "stream_id": "cam",
-                            "device": "cam",
-                        },
-                        {
-                            "relative_path": "cam/d.hif",
-                            "source_path": "cam/d.hif",
-                            "filename": "d.hif",
-                            "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/d.jpg",
-                            "image_relative_path": "embedded_jpg/thumb/cam/d.jpg",
-                            "start_local": "2026-03-23T10:00:03",
-                            "stream_id": "cam",
-                            "device": "cam",
-                        },
-                    ],
+                    "cut_left_relative_path": "cam/b.hif",
+                    "cut_right_relative_path": "cam/c.hif",
                 },
             ],
         )
         self.assertEqual(payload["source_mode"], "image_only_v1")
+        self.assertEqual(payload["vlm_run_id"], "vlm-20260414053012")
         self.assertEqual(payload["performance_count"], 2)
         self.assertEqual(payload["photo_count"], 4)
         self.assertEqual(payload["performances"][0]["display_name"], "VLM0001")
