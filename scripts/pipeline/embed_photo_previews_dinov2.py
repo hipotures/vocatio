@@ -19,6 +19,7 @@ from rich.progress import (
     TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
+    TimeRemainingColumn,
 )
 
 from lib.pipeline_io import atomic_write_csv
@@ -53,6 +54,18 @@ MODEL_EMBED_DIMS = {
     "dinov2_vitl14": 1024,
     "dinov2_vitg14": 1536,
 }
+
+
+def build_progress_columns() -> tuple[object, ...]:
+    return (
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        TimeElapsedColumn(),
+    )
 
 
 def positive_int_arg(value: str) -> int:
@@ -392,12 +405,7 @@ def compute_embeddings(
 ) -> np.ndarray:
     batches: List[np.ndarray] = []
     with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(bar_width=40),
-        MofNCompleteColumn(),
-        TaskProgressColumn(),
-        TimeElapsedColumn(),
+        *build_progress_columns(),
         expand=False,
         console=console,
     ) as progress:

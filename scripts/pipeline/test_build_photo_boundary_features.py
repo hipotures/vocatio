@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+from rich.progress import TimeElapsedColumn, TimeRemainingColumn
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
@@ -25,6 +26,11 @@ boundary = load_module("build_photo_boundary_features_test", "scripts/pipeline/b
 
 
 class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
+    def test_build_progress_columns_include_eta_and_elapsed(self):
+        columns = boundary.build_progress_columns()
+        self.assertTrue(any(isinstance(column, TimeRemainingColumn) for column in columns))
+        self.assertTrue(any(isinstance(column, TimeElapsedColumn) for column in columns))
+
     def write_stage1_artifacts(
         self,
         workspace_dir: Path,

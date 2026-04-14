@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import numpy as np
+from rich.progress import TimeElapsedColumn, TimeRemainingColumn
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
@@ -36,6 +37,11 @@ class FakeBackend:
 
 
 class EmbedPhotoPreviewsDinov2Tests(unittest.TestCase):
+    def test_build_progress_columns_include_eta_and_elapsed(self):
+        columns = embed.build_progress_columns()
+        self.assertTrue(any(isinstance(column, TimeRemainingColumn) for column in columns))
+        self.assertTrue(any(isinstance(column, TimeElapsedColumn) for column in columns))
+
     def test_normalize_output_accepts_dict_tensor_values_without_truthiness_checks(self):
         backend = object.__new__(embed.Dinov2TorchHubBackend)
         expected = np.ones((2, 3), dtype=np.float32)

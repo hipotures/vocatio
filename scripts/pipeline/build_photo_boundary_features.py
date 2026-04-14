@@ -19,6 +19,7 @@ from rich.progress import (
     TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
+    TimeRemainingColumn,
 )
 
 from lib.image_pipeline_contracts import PHOTO_MANIFEST_REQUIRED_COLUMNS, validate_required_columns
@@ -73,6 +74,18 @@ DINO_INDEX_REQUIRED_COLUMNS = frozenset(
 
 LOCAL_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3}|\.\d{6})?$")
 CANONICAL_NON_NEGATIVE_INT_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
+
+
+def build_progress_columns() -> tuple[object, ...]:
+    return (
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        TimeElapsedColumn(),
+    )
 
 
 def positive_int_arg(value: str) -> int:
@@ -421,12 +434,7 @@ def compute_boundary_rows(
         )
     rows: List[Dict[str, str]] = []
     with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(bar_width=40),
-        MofNCompleteColumn(),
-        TaskProgressColumn(),
-        TimeElapsedColumn(),
+        *build_progress_columns(),
         expand=False,
         console=console,
     ) as progress:
