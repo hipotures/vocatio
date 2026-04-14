@@ -149,13 +149,19 @@ def resolve_selection_output_path(workspace_dir: Path, value: str) -> Path:
     return candidate
 
 
+def build_default_selection_filename(day: str, generated_at: str) -> str:
+    timestamp = datetime.fromisoformat(generated_at).strftime("%Y%m%d%H%M%S")
+    return f"selected_photos_{day}_{timestamp}.json"
+
+
 def build_photo_selection_payload(
     day: str,
     source_index_json: Path,
     generated_at: str,
     photos: Sequence[Dict],
+    selection_diagnostics: Optional[Dict[str, Any]] = None,
 ) -> Dict:
-    return {
+    payload = {
         "kind": "photo_selection_v1",
         "day": day,
         "generated_at": generated_at,
@@ -172,6 +178,9 @@ def build_photo_selection_payload(
             for photo in photos
         ],
     }
+    if selection_diagnostics:
+        payload["selection_diagnostics"] = selection_diagnostics
+    return payload
 
 
 def keyboard_help_sections() -> List[tuple[str, List[tuple[str, str]]]]:
@@ -467,6 +476,99 @@ def determine_selected_preview_paths(
 
 def should_show_right_preview(*, view_mode: int, selected_photo_count: int) -> bool:
     return view_mode == 2 or selected_photo_count == 2
+
+
+def build_selection_diagnostics_payload(
+    *,
+    mode: str,
+    current_display_name: str,
+    current_set_id: str,
+    selected_photos: Sequence[Mapping[str, Any]],
+    display_set: Optional[Mapping[str, Any]],
+    current_photo: Optional[Mapping[str, Any]],
+    diagnostics: Mapping[str, Any],
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "mode": mode,
+        "summary": {
+            "selected_photo_count": len(selected_photos),
+            "current_display_name": current_display_name,
+            "current_set_id": current_set_id,
+            "diagnostics_available": bool(diagnostics.get("available")),
+            "diagnostics_error": str(diagnostics.get("error", "") or ""),
+        },
+    }
+    if selected_photos:
+        sorted_photos = sorted(
+            selected_photos,
+            key=lambda photo: (
+                str(photo.get("adjusted_start_local", "")),
+                str(photo.get("relative_path", "")),
+                str(photo.get("filename", "")),
+            ),
+        )
+        payload["summary"]["first_time"] = str(sorted_photos[0].get("adjusted_start_local", "") or "")
+        payload["summary"]["last_time"] = str(sorted_photos[-1].get("adjusted_start_local", "") or "")
+    if mode == "set" and display_set is not None:
+        photos = list(display_set.get("photos", []))
+        base_set_id = str(display_set.get("base_set_id", "") or "")
+        segment_row = diagnostics.get("segment_by_set_id", {}).get(base_set_id) if diagnostics.get("available") else None
+        first_relative_path = str(photos[0].get("relative_path", "") or "") if photos else ""
+        last_relative_path = str(photos[-1].get("relative_path", "") or "") if photos else ""
+        left_boundary = diagnostics.get("boundary_by_right_relative_path", {}).get(first_relative_path) if diagnostics.get("available") else None
+        right_boundary = diagnostics.get("boundary_by_left_relative_path", {}).get(last_relative_path) if diagnostics.get("available") else None
+        internal_boundaries: List[Mapping[str, str]] = []
+        if diagnostics.get("available"):
+            boundary_by_pair = diagnostics.get("boundary_by_pair", {})
+            for index in range(len(photos) - 1):
+                left_relative_path = str(photos[index].get("relative_path", "") or "")
+                right_relative_path = str(photos[index + 1].get("relative_path", "") or "")
+                boundary_row = boundary_by_pair.get((left_relative_path, right_relative_path))
+                if boundary_row:
+                    internal_boundaries.append(dict(boundary_row))
+            internal_boundaries.sort(key=lambda row: float(str(row.get("boundary_score", "0") or "0")), reverse=True)
+        payload["set_diagnostics"] = {
+            "set_id": str(display_set.get("set_id", "") or ""),
+            "base_set_id": base_set_id,
+            "display_name": str(display_set.get("display_name", "") or ""),
+            "segment_confidence": str(segment_row.get("segment_confidence", "") if segment_row else ""),
+            "segment_index": str(segment_row.get("segment_index", "") if segment_row else ""),
+            "boundary_before_set": dict(left_boundary) if left_boundary else None,
+            "boundary_after_set": dict(right_boundary) if right_boundary else None,
+            "top_internal_boundaries": internal_boundaries[:3],
+        }
+    if mode == "single_photo" and current_photo is not None:
+        relative_path = str(current_photo.get("relative_path", "") or "")
+        left_boundary = diagnostics.get("boundary_by_left_relative_path", {}).get(relative_path) if diagnostics.get("available") else None
+        right_boundary = diagnostics.get("boundary_by_right_relative_path", {}).get(relative_path) if diagnostics.get("available") else None
+        payload["photo_diagnostics"] = {
+            "photo": dict(current_photo),
+            "boundary_after_photo": dict(left_boundary) if left_boundary else None,
+            "boundary_before_photo": dict(right_boundary) if right_boundary else None,
+        }
+    if mode == "multi_photo":
+        sorted_photos = sorted(
+            selected_photos,
+            key=lambda photo: (
+                str(photo.get("adjusted_start_local", "")),
+                str(photo.get("relative_path", "")),
+                str(photo.get("filename", "")),
+            ),
+        )
+        selected_boundaries: List[Dict[str, Any]] = []
+        if diagnostics.get("available"):
+            boundary_by_pair = diagnostics.get("boundary_by_pair", {})
+            for index in range(len(sorted_photos) - 1):
+                left_relative_path = str(sorted_photos[index].get("relative_path", "") or "")
+                right_relative_path = str(sorted_photos[index + 1].get("relative_path", "") or "")
+                boundary_row = boundary_by_pair.get((left_relative_path, right_relative_path))
+                if boundary_row:
+                    selected_boundaries.append(dict(boundary_row))
+        payload["multi_photo_diagnostics"] = {
+            "selected_photos": [dict(photo) for photo in sorted_photos],
+            "selected_boundaries": selected_boundaries,
+        }
+    return payload
 
 
 class ImageLoaderSignals(QObject):
@@ -1215,7 +1317,8 @@ class MainWindow(QMainWindow):
         if not photos:
             QMessageBox.information(self, "Export Selection", "Select one or more photo rows before exporting.")
             return
-        default_name = f"selected_photos_{self.payload.get('day', '')}.json"
+        generated_at = self.current_timestamp()
+        default_name = build_default_selection_filename(str(self.payload.get("day", "")), generated_at)
         filename, accepted = QInputDialog.getText(
             self,
             "Export Selection",
@@ -1230,11 +1333,53 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Export Selection", "Filename cannot be empty.")
             return
         output_path = resolve_selection_output_path(self.workspace_dir, filename)
+        selection_diagnostics = None
+        if self.info_dock.isVisible():
+            current_item = self.tree.currentItem()
+            if current_item is not None:
+                if len(photos) >= 2:
+                    mode = "multi_photo"
+                    display_set = self.current_top_level_item().data(0, Qt.UserRole) if self.current_top_level_item() else None
+                    current_photo = current_item.data(0, Qt.UserRole) if current_item.parent() is not None else None
+                    current_display_name = (
+                        str(display_set.get("display_name", "") or "")
+                        if isinstance(display_set, dict)
+                        else str((photos[0].get("display_name", "") if photos else "") or "")
+                    )
+                    current_set_id = (
+                        str(display_set.get("set_id", "") or "")
+                        if isinstance(display_set, dict)
+                        else str((photos[0].get("display_set_id", "") if photos else "") or "")
+                    )
+                elif current_item.parent() is None:
+                    mode = "set"
+                    display_set = current_item.data(0, Qt.UserRole)
+                    current_photo = None
+                    current_display_name = str(display_set.get("display_name", "") or "")
+                    current_set_id = str(display_set.get("set_id", "") or "")
+                else:
+                    mode = "single_photo"
+                    display_set = self.current_top_level_item().data(0, Qt.UserRole) if self.current_top_level_item() else None
+                    current_photo = current_item.data(0, Qt.UserRole)
+                    current_display_name = str(current_photo.get("display_name", "") or "")
+                    current_set_id = str(current_photo.get("display_set_id", "") or "")
+                selection_diagnostics = build_selection_diagnostics_payload(
+                    mode=mode,
+                    current_display_name=current_display_name,
+                    current_set_id=current_set_id,
+                    selected_photos=photos,
+                    display_set=display_set if isinstance(display_set, dict) else None,
+                    current_photo=current_photo if isinstance(current_photo, dict) else None,
+                    diagnostics=self.image_only_diagnostics
+                    if self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+                    else {"available": False, "error": ""},
+                )
         payload = build_photo_selection_payload(
             day=str(self.payload.get("day", "")),
             source_index_json=self.index_path,
-            generated_at=self.current_timestamp(),
+            generated_at=generated_at,
             photos=photos,
+            selection_diagnostics=selection_diagnostics,
         )
         try:
             output_path.parent.mkdir(parents=True, exist_ok=True)
