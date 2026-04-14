@@ -30,6 +30,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         args = probe.parse_args(
             [
                 "/tmp/day",
+                "--run-id",
+                "vlm-20260414053012",
                 "--image-variant",
                 "thumb",
                 "--window-size",
@@ -38,20 +40,39 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "2",
                 "--temperature",
                 "0.25",
+                "--response-schema-mode",
+                "on",
                 "--ollama-think",
                 "false",
                 "--dump-debug-dir",
                 "/tmp/vlm-debug",
             ]
         )
+        self.assertEqual(args.run_id, "vlm-20260414053012")
         self.assertEqual(args.image_variant, "thumb")
         self.assertEqual(args.window_size, 10)
         self.assertEqual(args.overlap, 2)
         self.assertEqual(args.temperature, 0.25)
+        self.assertEqual(args.response_schema_mode, "on")
         self.assertEqual(args.ollama_think, "false")
         self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
         self.assertFalse(hasattr(args, "write_gui_index"))
         self.assertFalse(hasattr(args, "overwrite"))
+
+    def test_build_response_schema_uses_boundary_after_frame_and_dynamic_notes(self):
+        schema = probe.build_response_schema(window_size=3)
+        self.assertEqual(
+            schema["properties"]["boundary_after_frame"]["enum"],
+            [None, "frame_01", "frame_02"],
+        )
+        self.assertEqual(
+            list(schema["properties"]["frame_notes"]["properties"].keys()),
+            ["frame_01", "frame_02", "frame_03"],
+        )
+        self.assertEqual(
+            schema["required"],
+            ["boundary_after_frame", "frame_notes", "primary_evidence", "summary"],
+        )
 
     def test_build_window_start_indexes_uses_overlap_and_aligned_tail(self):
         self.assertEqual(probe.build_window_start_indexes(total_rows=26, window_size=10, overlap=2), [0, 8, 16])
@@ -131,6 +152,10 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIn("audience or backstage insert", prompt)
         self.assertIn("floor rehearsal / floor test / stage test", prompt)
         self.assertIn("ceremony / award / host / result reading", prompt)
+        self.assertIn("group shot followed by a solo shot of one dancer from the same group", prompt)
+        self.assertIn("do not create a boundary only because fewer or more dancers are visible", prompt)
+        self.assertIn("A different performer group cannot start less than 30 seconds", prompt)
+        self.assertIn("Do not create a boundary inside a sub-30-second window", prompt)
         self.assertIn("If more than one real boundary appears", prompt)
         self.assertIn('If there is no clear evidence for a boundary, choose "no_cut"', prompt)
         self.assertIn("Keep frame notes short and concrete", prompt)
@@ -148,6 +173,17 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIn("Additional instructions", prompt)
         self.assertIn("Prefer strong performer identity changes", prompt)
 
+    def test_build_user_prompt_schema_mode_mentions_boundary_after_frame(self):
+        prompt = probe.build_user_prompt(
+            window_size=3,
+            gap_hint_lines=["gap_01_02: time_gap_seconds=1 (low), visual_distance=0.100 (medium), heuristic_boundary_score=0.200 (low)"],
+            extra_instructions="",
+            response_schema_mode="on",
+        )
+        self.assertIn('"boundary_after_frame"', prompt)
+        self.assertNotIn('"decision"', prompt)
+        self.assertIn("<one of: null, frame_01, frame_02>", prompt)
+
     def test_parse_model_response_accepts_structured_json_response(self):
         parsed = probe.parse_model_response(
             '{"decision":"cut_after_1","frame_notes":{"frame_01":"black-white solo","frame_02":"red-black solo"},"primary_evidence":["different performer","different costume identity"],"summary":"Frames 1 and 2 belong to different segments."}',
@@ -157,6 +193,23 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIn("frame_01=black-white solo", parsed["reason"])
         self.assertIn("different performer", parsed["reason"])
         self.assertIn("Frames 1 and 2 belong to different segments.", parsed["reason"])
+        self.assertEqual(parsed["response_status"], "ok")
+
+    def test_parse_model_response_accepts_boundary_after_frame_schema_response(self):
+        parsed = probe.parse_model_response(
+            '{"boundary_after_frame":"frame_01","frame_notes":{"frame_01":"black-white solo","frame_02":"red-black solo"},"primary_evidence":["different performer"],"summary":"Boundary after frame 1."}',
+            window_size=2,
+        )
+        self.assertEqual(parsed["decision"], "cut_after_1")
+        self.assertIn("Boundary after frame 1.", parsed["reason"])
+        self.assertEqual(parsed["response_status"], "ok")
+
+    def test_parse_model_response_accepts_boundary_after_frame_null_as_no_cut(self):
+        parsed = probe.parse_model_response(
+            '{"boundary_after_frame":null,"frame_notes":{"frame_01":"same solo","frame_02":"same solo"},"primary_evidence":["same performer"],"summary":"Same segment."}',
+            window_size=2,
+        )
+        self.assertEqual(parsed["decision"], "no_cut")
         self.assertEqual(parsed["response_status"], "ok")
 
     def test_parse_model_response_marks_invalid_json(self):
@@ -234,6 +287,22 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIs(extra_body["think"], False)
         self.assertEqual(extra_body["options"]["num_ctx"], 8192)
         self.assertEqual(extra_body["options"]["num_predict"], 128)
+
+    def test_build_ollama_payload_includes_schema_format_when_enabled(self):
+        schema = probe.build_response_schema(window_size=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "a.jpg"
+            image_path.write_bytes(b"jpg")
+            payload = probe.build_ollama_payload(
+                model="qwen3.5:9b",
+                prompt="prompt",
+                image_paths=[image_path],
+                keep_alive="15m",
+                temperature=0.0,
+                response_schema=schema,
+                extra_body=None,
+            )
+        self.assertEqual(payload["format"], schema)
 
     def test_read_joined_rows_uses_embedded_manifest_order_and_variant_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -374,9 +443,11 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     "overlap": 2,
                     "max_batches": 100,
                     "model": "qwen3.5:9b",
+                    "response_schema_mode": "on",
                 },
                 system_prompt="system",
                 user_prompt_template="user-template",
+                response_schema={"type": "object"},
             )
             metadata_path = workspace_dir / "vlm_runs" / "vlm-20260414053012.json"
             self.assertEqual(metadata["run_id"], "vlm-20260414053012")
@@ -385,6 +456,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             stored = json.loads(metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(stored["user_prompt_template"], "user-template")
             self.assertEqual(stored["args"]["window_size"], 5)
+            self.assertEqual(stored["args"]["response_schema_mode"], "on")
+            self.assertEqual(stored["response_schema"], {"type": "object"})
 
     def test_read_result_rows_accepts_legacy_header_with_new_run_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -440,9 +513,56 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 output_csv=output_csv,
                 config_hash="samehash",
                 new_run=False,
+                run_id=None,
             )
             self.assertEqual(state["run_id"], "vlm-20260414053113")
             self.assertEqual(state["completed_batches"], 1)
+
+    def test_resolve_run_state_uses_explicit_run_id_when_provided(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
+            runs_dir.mkdir(parents=True)
+            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            with output_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=probe.OUTPUT_HEADERS)
+                writer.writeheader()
+                first = {header: "" for header in probe.OUTPUT_HEADERS}
+                first["run_id"] = "vlm-20260414053012"
+                first["batch_index"] = "1"
+                first["config_hash"] = "samehash"
+                writer.writerow(first)
+                second = {header: "" for header in probe.OUTPUT_HEADERS}
+                second["run_id"] = "vlm-20260414053113"
+                second["batch_index"] = "1"
+                second["config_hash"] = "samehash"
+                writer.writerow(second)
+            for run_id in ("vlm-20260414053012", "vlm-20260414053113"):
+                (runs_dir / f"{run_id}.json").write_text(
+                    json.dumps({"run_id": run_id, "config_hash": "samehash", "args": {}}),
+                    encoding="utf-8",
+                )
+            state = probe.resolve_run_state(
+                workspace_dir=workspace_dir,
+                output_csv=output_csv,
+                config_hash="samehash",
+                new_run=False,
+                run_id="vlm-20260414053012",
+            )
+            self.assertEqual(state["run_id"], "vlm-20260414053012")
+            self.assertEqual(state["completed_batches"], 1)
+
+    def test_resolve_run_state_rejects_missing_explicit_run_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            with self.assertRaisesRegex(ValueError, "Requested run_id does not exist"):
+                probe.resolve_run_state(
+                    workspace_dir=workspace_dir,
+                    output_csv=workspace_dir / "vlm_boundary_test.csv",
+                    config_hash="samehash",
+                    new_run=False,
+                    run_id="vlm-20260414053012",
+                )
 
     def test_resolve_run_state_rejects_parameter_mismatch_on_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -454,13 +574,50 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 json.dumps({"run_id": "vlm-20260414053113", "config_hash": "oldhash", "args": {"window_size": 5}}),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ValueError, "Parameter mismatch"):
+            with self.assertRaisesRegex(ValueError, "Run configuration mismatch"):
                 probe.resolve_run_state(
                     workspace_dir=workspace_dir,
                     output_csv=output_csv,
                     config_hash="newhash",
                     new_run=False,
+                    run_id=None,
                 )
+
+    def test_resolve_run_state_accepts_legacy_metadata_missing_response_schema_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
+            runs_dir.mkdir(parents=True)
+            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            legacy_args = {
+                "embedded_manifest_csv": "/tmp/a.csv",
+                "photo_manifest_csv": "/tmp/b.csv",
+                "image_variant": "thumb",
+                "window_size": 5,
+                "overlap": 2,
+                "model": "qwen3.5:9b",
+                "ollama_base_url": "http://127.0.0.1:11434",
+                "ollama_num_ctx": 16384,
+                "ollama_num_predict": None,
+                "ollama_keep_alive": "15m",
+                "timeout_seconds": 300.0,
+                "temperature": 0.0,
+                "ollama_think": "false",
+                "effective_extra_instructions": "",
+            }
+            current_hash = probe.build_config_hash(legacy_args)
+            (runs_dir / "vlm-20260414053113.json").write_text(
+                json.dumps({"run_id": "vlm-20260414053113", "config_hash": "oldhash", "args": legacy_args}),
+                encoding="utf-8",
+            )
+            state = probe.resolve_run_state(
+                workspace_dir=workspace_dir,
+                output_csv=output_csv,
+                config_hash=current_hash,
+                new_run=False,
+                run_id="vlm-20260414053113",
+            )
+            self.assertEqual(state["run_id"], "vlm-20260414053113")
 
     def test_resolve_run_state_new_run_ignores_latest_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -477,6 +634,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 output_csv=output_csv,
                 config_hash="newhash",
                 new_run=True,
+                run_id=None,
             )
             self.assertIsNone(state["run_id"])
             self.assertEqual(state["completed_batches"], 0)

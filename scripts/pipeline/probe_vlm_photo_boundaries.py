@@ -46,6 +46,7 @@ DEFAULT_OLLAMA_KEEP_ALIVE = "15m"
 DEFAULT_TIMEOUT_SECONDS = 300.0
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_OLLAMA_THINK = "inherit"
+DEFAULT_RESPONSE_SCHEMA_MODE = "off"
 EMBEDDED_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "thumb_path", "preview_path"})
 PHOTO_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "start_epoch_ms", "start_local", "photo_order_index"})
 PHOTO_BOUNDARY_SCORES_REQUIRED_COLUMNS = frozenset(
@@ -99,6 +100,7 @@ RESUME_CONFIG_KEYS = (
     "timeout_seconds",
     "temperature",
     "ollama_think",
+    "response_schema_mode",
     "effective_extra_instructions",
 )
 
@@ -135,6 +137,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         description="Probe a local VLM on overlapping stage-photo windows and write one CSV summary row per batch."
     )
     parser.add_argument("day_dir", help="Path to a single day directory like /data/20260323")
+    parser.add_argument(
+        "--run-id",
+        help="Continue a specific existing VLM run by run_id instead of auto-selecting the latest compatible run.",
+    )
     parser.add_argument(
         "--workspace-dir",
         help="Override the workspace directory. Default: DAY/_workspace",
@@ -220,6 +226,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         choices=("inherit", "false", "low", "medium", "high"),
         default=DEFAULT_OLLAMA_THINK,
         help=f"Ollama reasoning effort override. Default: {DEFAULT_OLLAMA_THINK}",
+    )
+    parser.add_argument(
+        "--response-schema-mode",
+        choices=("off", "on"),
+        default=DEFAULT_RESPONSE_SCHEMA_MODE,
+        help=f"Enable or disable Ollama JSON Schema format enforcement. Default: {DEFAULT_RESPONSE_SCHEMA_MODE}",
     )
     parser.add_argument(
         "--extra-instructions",
@@ -448,10 +460,92 @@ def build_valid_decisions(window_size: int) -> tuple[str, ...]:
     return tuple(["no_cut"] + [f"cut_after_{index}" for index in range(1, window_size)])
 
 
-def build_user_prompt(window_size: int, gap_hint_lines: Sequence[str], extra_instructions: str = "") -> str:
+def build_boundary_after_frame_values(window_size: int) -> List[Optional[str]]:
+    return [None] + [f"frame_{index:02d}" for index in range(1, window_size)]
+
+
+def build_response_schema(window_size: int) -> Dict[str, Any]:
+    frame_properties = {f"frame_{index:02d}": {"type": "string"} for index in range(1, window_size + 1)}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "boundary_after_frame": {
+                "type": ["string", "null"],
+                "enum": build_boundary_after_frame_values(window_size),
+            },
+            "frame_notes": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": frame_properties,
+                "required": list(frame_properties.keys()),
+            },
+            "primary_evidence": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 4,
+            },
+            "summary": {"type": "string"},
+        },
+        "required": ["boundary_after_frame", "frame_notes", "primary_evidence", "summary"],
+    }
+
+
+def build_user_prompt(
+    window_size: int,
+    gap_hint_lines: Sequence[str],
+    extra_instructions: str = "",
+    response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
+) -> str:
     frames_block = "\n".join([f"frame_{index:02d} = attached image {index}" for index in range(1, window_size + 1)])
     hints_block = "\n".join(gap_hint_lines) if gap_hint_lines else "No heuristic gap hints are available."
-    decisions_block = "\n".join([f'- "{decision}"' for decision in build_valid_decisions(window_size)])
+    if response_schema_mode == "on":
+        decisions_block = "\n".join([f'- {value!r}' if value is not None else "- null" for value in build_boundary_after_frame_values(window_size)])
+        response_header = "Allowed boundary_after_frame values:\n"
+        response_rules = (
+            '- Use null if there is no boundary in the window.\n'
+            '- Use "frame_NN" only if the boundary is between frame_NN and the next frame.\n'
+        )
+        response_schema_hint = f'<one of: {", ".join(["null"] + [f"frame_{index:02d}" for index in range(1, window_size)])}>'
+        response_object = (
+            '{\n'
+            f'  "boundary_after_frame": "{response_schema_hint}",\n'
+            '  "frame_notes": {\n'
+            + ",\n".join(
+                [f'    "frame_{index:02d}": "<short note>"' for index in range(1, window_size + 1)]
+            )
+            + '\n  },\n'
+            '  "primary_evidence": [\n'
+            '    "<short evidence item>",\n'
+            '    "<short evidence item>"\n'
+            "  ],\n"
+            '  "summary": "<one short sentence>"\n'
+            '}'
+        )
+    else:
+        decisions_block = "\n".join([f'- "{decision}"' for decision in build_valid_decisions(window_size)])
+        response_header = "Allowed decisions:\n"
+        response_rules = (
+            f'- Choose "no_cut" if all {window_size} frames most likely belong to the same segment.\n'
+            '- If there is no clear evidence for a boundary, choose "no_cut".\n'
+            f'- Choose "cut_after_N" only if frames 1..N and frames N+1..{window_size} most likely belong to different segments.\n'
+        )
+        response_object = (
+            '{\n'
+            f'  "decision": "<one of: {", ".join(build_valid_decisions(window_size))}>",\n'
+            '  "frame_notes": {\n'
+            + ",\n".join(
+                [f'    "frame_{index:02d}": "<short note>"' for index in range(1, window_size + 1)]
+            )
+            + '\n  },\n'
+            '  "primary_evidence": [\n'
+            '    "<short evidence item>",\n'
+            '    "<short evidence item>"\n'
+            "  ],\n"
+            '  "summary": "<one short sentence>"\n'
+            '}'
+        )
     prompt = (
         f"You will receive {window_size} consecutive stage-event photos.\n\n"
         "Order:\n"
@@ -474,12 +568,23 @@ def build_user_prompt(window_size: int, gap_hint_lines: Sequence[str], extra_ins
         "- motion within the same act\n"
         "- framing change\n"
         "- lighting change alone\n"
-        "- background change alone\n\n"
+        "- background change alone\n"
+        "- a group shot followed by a solo shot of one dancer from the same group\n"
+        "- a solo shot followed by a wider group shot from the same ongoing act\n"
+        "- a change in visible performer count caused only by framing, crop, zoom, or partial visibility\n\n"
+        "Continuity reminders:\n"
+        "- Group performance -> single dancer from the same group can still be the same segment.\n"
+        "- Single dancer -> wider group view can still be the same segment.\n"
+        "- If costume identity and act identity still match, do not create a boundary only because fewer or more dancers are visible.\n\n"
         "Decision priority:\n"
         "1. images\n"
         "2. time\n"
         "3. heuristic hints\n\n"
         "If images clearly contradict time or heuristics, trust the images first.\n\n"
+        "Hard timing rule for this event:\n"
+        "- A different performer group cannot start less than 30 seconds after the previous photos.\n"
+        "- If a candidate boundary has time_gap_seconds under 30, treat the photos on both sides as the same segment.\n"
+        "- Do not create a boundary inside a sub-30-second window, even if framing, background, or visible performer count changes.\n\n"
         "Hint interpretation:\n"
         "- low = weak signal\n"
         "- medium = ambiguous signal\n"
@@ -490,32 +595,18 @@ def build_user_prompt(window_size: int, gap_hint_lines: Sequence[str], extra_ins
         "- heuristic_boundary_score near 0 suggests continuity, near 1 suggests a likely boundary\n\n"
         "Time and heuristic hints for consecutive gaps:\n"
         f"{hints_block}\n\n"
-        "Allowed decisions:\n"
+        f"{response_header}"
         f"{decisions_block}\n\n"
         "Rules:\n"
-        f'- Choose "no_cut" if all {window_size} frames most likely belong to the same segment.\n'
-        '- If there is no clear evidence for a boundary, choose "no_cut".\n'
-        f'- Choose "cut_after_N" only if frames 1..N and frames N+1..{window_size} most likely belong to different segments.\n'
+        f"{response_rules}"
         f"- If more than one real boundary appears inside the {window_size}-frame window, choose the single strongest and clearest boundary.\n"
         "- Keep frame notes short and concrete.\n"
-        '- If the decision is "no_cut", primary_evidence should describe continuity evidence.\n'
+        '- If there is no boundary, primary_evidence should describe continuity evidence.\n'
         "- Output only valid JSON.\n"
         "- Do not output markdown.\n"
         "- Do not output any text before or after JSON.\n\n"
         "Return exactly one JSON object with this structure:\n"
-        '{\n'
-        f'  "decision": "<one of: {", ".join(build_valid_decisions(window_size))}>",\n'
-        '  "frame_notes": {\n'
-        + ",\n".join(
-            [f'    "frame_{index:02d}": "<short note>"' for index in range(1, window_size + 1)]
-        )
-        + '\n  },\n'
-        '  "primary_evidence": [\n'
-        '    "<short evidence item>",\n'
-        '    "<short evidence item>"\n'
-        "  ],\n"
-        '  "summary": "<one short sentence>"\n'
-        '}'
+        f"{response_object}"
     )
     if extra_instructions.strip():
         prompt += f"\n\nAdditional instructions:\n{extra_instructions.strip()}"
@@ -581,6 +672,7 @@ def build_ollama_payload(
     image_paths: Sequence[Path],
     keep_alive: str,
     temperature: float,
+    response_schema: Optional[Mapping[str, Any]] = None,
     extra_body: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     options: Dict[str, Any] = {"temperature": temperature}
@@ -603,6 +695,8 @@ def build_ollama_payload(
         merged_options.update(payload["options"])
         payload.update({key: value for key, value in extra_body.items() if key != "options"})
         payload["options"] = merged_options
+    if response_schema is not None:
+        payload["format"] = dict(response_schema)
     return payload
 
 
@@ -643,7 +737,16 @@ def parse_model_response(raw_response: str, *, window_size: int) -> Dict[str, st
             "reason": f"JSON parse error: {error}",
             "response_status": "invalid_response",
         }
-    decision = str(payload.get("decision", "") or "").strip()
+    boundary_after_frame = payload.get("boundary_after_frame", "__missing__")
+    if boundary_after_frame != "__missing__":
+        if boundary_after_frame is None:
+            decision = "no_cut"
+        else:
+            boundary_text = str(boundary_after_frame).strip()
+            valid_frames = {f"frame_{index:02d}": f"cut_after_{index}" for index in range(1, window_size)}
+            decision = valid_frames.get(boundary_text, "")
+    else:
+        decision = str(payload.get("decision", "") or "").strip()
     if decision not in valid_decisions:
         return {
             "decision": "invalid_response",
@@ -787,17 +890,29 @@ def build_run_id(datetime_text: Optional[str] = None) -> str:
 
 
 def build_config_hash(args_payload: Mapping[str, Any]) -> str:
-    filtered_payload = {key: args_payload.get(key) for key in RESUME_CONFIG_KEYS}
+    filtered_payload = {
+        key: (DEFAULT_RESPONSE_SCHEMA_MODE if key == "response_schema_mode" else args_payload.get(key))
+        for key in RESUME_CONFIG_KEYS
+    }
     encoded = json.dumps(filtered_payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     return hashlib.md5(encoded.encode("utf-8")).hexdigest()
 
 
-def build_user_prompt_template(window_size: int, extra_instructions: str = "") -> str:
+def build_user_prompt_template(
+    window_size: int,
+    extra_instructions: str = "",
+    response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
+) -> str:
     gap_hint_lines = [
         f"gap_{index:02d}_{index + 1:02d}: time_gap_seconds=<seconds> (<level>), visual_distance=<value> (<level>), heuristic_boundary_score=<value> (<level>)"
         for index in range(1, window_size)
     ]
-    return build_user_prompt(window_size=window_size, gap_hint_lines=gap_hint_lines, extra_instructions=extra_instructions)
+    return build_user_prompt(
+        window_size=window_size,
+        gap_hint_lines=gap_hint_lines,
+        extra_instructions=extra_instructions,
+        response_schema_mode=response_schema_mode,
+    )
 
 
 def write_run_metadata(
@@ -812,6 +927,7 @@ def write_run_metadata(
     args_payload: Mapping[str, Any],
     system_prompt: str,
     user_prompt_template: str,
+    response_schema: Optional[Mapping[str, Any]],
 ) -> Dict[str, Any]:
     runs_dir = workspace_dir / RUN_METADATA_DIRNAME
     runs_dir.mkdir(parents=True, exist_ok=True)
@@ -825,6 +941,7 @@ def write_run_metadata(
         "output_csv": str(output_csv),
         "system_prompt": system_prompt,
         "user_prompt_template": user_prompt_template,
+        "response_schema": dict(response_schema) if response_schema is not None else None,
         "args": dict(args_payload),
     }
     atomic_write_json(metadata_path, metadata)
@@ -839,6 +956,14 @@ def read_latest_run_metadata(workspace_dir: Path) -> Optional[Dict[str, Any]]:
     if not metadata_paths:
         return None
     return json.loads(metadata_paths[-1].read_text(encoding="utf-8"))
+
+
+def read_run_metadata_by_id(workspace_dir: Path, run_id: str) -> Optional[Dict[str, Any]]:
+    runs_dir = workspace_dir / RUN_METADATA_DIRNAME
+    metadata_path = runs_dir / f"{run_id}.json"
+    if not metadata_path.exists():
+        return None
+    return json.loads(metadata_path.read_text(encoding="utf-8"))
 
 
 def dump_debug_artifacts(
@@ -1040,29 +1165,40 @@ def resolve_run_state(
     output_csv: Path,
     config_hash: str,
     new_run: bool,
+    run_id: Optional[str],
 ) -> Dict[str, Any]:
     if new_run:
         return {"run_id": None, "completed_batches": 0, "metadata": None}
-    latest_metadata = read_latest_run_metadata(workspace_dir)
-    if latest_metadata is None:
+    selected_metadata: Optional[Dict[str, Any]]
+    if run_id:
+        selected_metadata = read_run_metadata_by_id(workspace_dir, run_id)
+        if selected_metadata is None:
+            raise ValueError(f"Requested run_id does not exist: {run_id}")
+    else:
+        selected_metadata = read_latest_run_metadata(workspace_dir)
+    if selected_metadata is None:
         return {"run_id": None, "completed_batches": 0, "metadata": None}
-    latest_hash = str(latest_metadata.get("config_hash", "") or "")
-    if latest_hash != config_hash:
+    selected_hash = str(selected_metadata.get("config_hash", "") or "")
+    selected_args = selected_metadata.get("args")
+    compatible_hashes = {selected_hash}
+    if isinstance(selected_args, Mapping):
+        compatible_hashes.add(build_config_hash(selected_args))
+    if config_hash not in compatible_hashes:
         raise ValueError(
-            f"Parameter mismatch for resume: latest run {latest_metadata.get('run_id', '')} has "
-            f"config_hash={latest_hash}, current config_hash={config_hash}. Use --new-run to start a fresh run."
+            f"Run configuration mismatch for resume: run {selected_metadata.get('run_id', '')} has "
+            f"config_hash={selected_hash}, current config_hash={config_hash}. Use --new-run to start a fresh run."
         )
     completed_batches = 0
     if output_csv.exists():
         completed_batches = sum(
             1
             for row in read_result_rows(output_csv)
-            if str(row.get("run_id", "") or "") == str(latest_metadata.get("run_id", "") or "")
+            if str(row.get("run_id", "") or "") == str(selected_metadata.get("run_id", "") or "")
         )
     return {
-        "run_id": str(latest_metadata.get("run_id", "") or ""),
+        "run_id": str(selected_metadata.get("run_id", "") or ""),
         "completed_batches": completed_batches,
-        "metadata": latest_metadata,
+        "metadata": selected_metadata,
     }
 
 
@@ -1118,6 +1254,7 @@ def probe_vlm_photo_boundaries(
         output_csv=output_csv,
         config_hash=config_hash,
         new_run=new_run,
+        run_id=str(args_payload.get("run_id", "") or "") or None,
     )
     completed_batches = int(run_state["completed_batches"])
     if completed_batches > len(all_window_starts):
@@ -1143,6 +1280,7 @@ def probe_vlm_photo_boundaries(
     run_id = str(run_state["run_id"] or "")
     if not run_id:
         run_id = build_run_id(generated_at)
+        response_schema = build_response_schema(window_size) if str(args_payload.get("response_schema_mode", "off")) == "on" else None
         write_run_metadata(
             workspace_dir=workspace_dir,
             run_id=run_id,
@@ -1153,8 +1291,14 @@ def probe_vlm_photo_boundaries(
             output_csv=output_csv,
             args_payload=args_payload,
             system_prompt=SYSTEM_PROMPT,
-            user_prompt_template=build_user_prompt_template(window_size=window_size, extra_instructions=extra_instructions),
+            user_prompt_template=build_user_prompt_template(
+                window_size=window_size,
+                extra_instructions=extra_instructions,
+                response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
+            ),
+            response_schema=response_schema,
         )
+    response_schema = build_response_schema(window_size) if str(args_payload.get("response_schema_mode", "off")) == "on" else None
     request_args = argparse.Namespace(
         ollama_base_url=ollama_base_url,
         ollama_think=ollama_think,
@@ -1179,13 +1323,19 @@ def probe_vlm_photo_boundaries(
             end_index = start_index + window_size
             window_rows = joined_rows[start_index:end_index]
             gap_hint_lines = build_gap_hint_lines(window_rows, boundary_rows_by_pair)
-            prompt = build_user_prompt(window_size=window_size, gap_hint_lines=gap_hint_lines, extra_instructions=extra_instructions)
+            prompt = build_user_prompt(
+                window_size=window_size,
+                gap_hint_lines=gap_hint_lines,
+                extra_instructions=extra_instructions,
+                response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
+            )
             payload = build_ollama_payload(
                 model=model,
                 prompt=prompt,
                 image_paths=[Path(str(row["image_path"])) for row in window_rows],
                 keep_alive=ollama_keep_alive,
                 temperature=temperature,
+                response_schema=response_schema,
                 extra_body=extra_body,
             )
             try:
@@ -1250,6 +1400,7 @@ def main() -> int:
         raise SystemExit(f"Photo manifest CSV does not exist: {photo_manifest_csv}")
     args_payload = {
         "day_dir": str(day_dir),
+        "run_id": args.run_id,
         "workspace_dir": str(workspace_dir),
         "embedded_manifest_csv": str(embedded_manifest_csv),
         "photo_manifest_csv": str(photo_manifest_csv),
@@ -1266,6 +1417,7 @@ def main() -> int:
         "timeout_seconds": args.timeout_seconds,
         "temperature": args.temperature,
         "ollama_think": args.ollama_think,
+        "response_schema_mode": args.response_schema_mode,
         "extra_instructions": args.extra_instructions,
         "extra_instructions_file": args.extra_instructions_file,
         "effective_extra_instructions": load_extra_instructions(args.extra_instructions, args.extra_instructions_file),
