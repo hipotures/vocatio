@@ -113,6 +113,16 @@ SYSTEM_PROMPT = (
 )
 
 
+def build_system_prompt(response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE) -> str:
+    if response_schema_mode == "on":
+        return (
+            "You analyze consecutive stage performance photos. "
+            "Choose at most one boundary between consecutive frames. "
+            "Return only valid JSON with keys boundary_after_frame, frame_notes, primary_evidence, and summary."
+        )
+    return SYSTEM_PROMPT
+
+
 def positive_int_arg(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -735,6 +745,7 @@ def build_ollama_payload(
     image_paths: Sequence[Path],
     keep_alive: str,
     temperature: float,
+    response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
     response_schema: Optional[Mapping[str, Any]] = None,
     extra_body: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -745,7 +756,7 @@ def build_ollama_payload(
         "keep_alive": keep_alive,
         "options": options,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": build_system_prompt(response_schema_mode)},
             {
                 "role": "user",
                 "content": prompt,
@@ -806,8 +817,10 @@ def parse_model_response(raw_response: str, *, window_size: int) -> Dict[str, st
             decision = "no_cut"
         else:
             boundary_text = str(boundary_after_frame).strip()
+            if boundary_text.lower() == "null":
+                boundary_text = ""
             valid_frames = {f"frame_{index:02d}": f"cut_after_{index}" for index in range(1, window_size)}
-            decision = valid_frames.get(boundary_text, "")
+            decision = "no_cut" if not boundary_text else valid_frames.get(boundary_text, "")
     else:
         decision = str(payload.get("decision", "") or "").strip()
     if decision not in valid_decisions:
@@ -1405,7 +1418,7 @@ def probe_vlm_photo_boundaries(
             photo_manifest_csv=photo_manifest_csv,
             output_csv=output_csv,
             args_payload=args_payload,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=build_system_prompt(str(args_payload.get("response_schema_mode", "off"))),
             user_prompt_template=build_user_prompt_template(
                 window_size=window_size,
                 extra_instructions=extra_instructions,
@@ -1479,6 +1492,7 @@ def probe_vlm_photo_boundaries(
                 image_paths=[Path(str(row["image_path"])) for row in window_rows],
                 keep_alive=ollama_keep_alive,
                 temperature=temperature,
+                response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
                 response_schema=response_schema,
                 extra_body=extra_body,
             )

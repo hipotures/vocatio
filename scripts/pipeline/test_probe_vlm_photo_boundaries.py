@@ -251,6 +251,10 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertNotIn('"decision"', prompt)
         self.assertIn("<one of: null, frame_01, frame_02>", prompt)
 
+    def test_build_system_prompt_mentions_boundary_after_frame_in_schema_mode(self):
+        self.assertIn("boundary_after_frame", probe.build_system_prompt("on"))
+        self.assertIn("decision", probe.build_system_prompt("off"))
+
     def test_parse_model_response_accepts_structured_json_response(self):
         parsed = probe.parse_model_response(
             '{"decision":"cut_after_1","frame_notes":{"frame_01":"black-white solo","frame_02":"red-black solo"},"primary_evidence":["different performer","different costume identity"],"summary":"Frames 1 and 2 belong to different segments."}',
@@ -274,6 +278,14 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
     def test_parse_model_response_accepts_boundary_after_frame_null_as_no_cut(self):
         parsed = probe.parse_model_response(
             '{"boundary_after_frame":null,"frame_notes":{"frame_01":"same solo","frame_02":"same solo"},"primary_evidence":["same performer"],"summary":"Same segment."}',
+            window_size=2,
+        )
+        self.assertEqual(parsed["decision"], "no_cut")
+        self.assertEqual(parsed["response_status"], "ok")
+
+    def test_parse_model_response_accepts_boundary_after_frame_string_null_as_no_cut(self):
+        parsed = probe.parse_model_response(
+            '{"boundary_after_frame":"null","frame_notes":{"frame_01":"same solo","frame_02":"same solo"},"primary_evidence":["same performer"],"summary":"Same segment."}',
             window_size=2,
         )
         self.assertEqual(parsed["decision"], "no_cut")
