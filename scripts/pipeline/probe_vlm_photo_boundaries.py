@@ -23,12 +23,16 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
+from lib.image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1
+from lib.pipeline_io import atomic_write_json
+
 
 console = Console()
 
 PHOTO_EMBEDDED_MANIFEST_FILENAME = "photo_embedded_manifest.csv"
 PHOTO_MANIFEST_FILENAME = "photo_manifest.csv"
 DEFAULT_OUTPUT_FILENAME = "vlm_boundary_test.csv"
+DEFAULT_GUI_INDEX_FILENAME = "performance_proxy_index.image.vlm.json"
 DEFAULT_IMAGE_VARIANT = "preview"
 DEFAULT_WINDOW_SIZE = 10
 DEFAULT_OVERLAP = 2
@@ -120,6 +124,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help=f"Output CSV filename or absolute path. Default: {DEFAULT_OUTPUT_FILENAME}",
     )
     parser.add_argument(
+        "--write-gui-index",
+        action="store_true",
+        help="Write a GUI-compatible image-only review index representing each VLM batch as one set.",
+    )
+    parser.add_argument(
+        "--gui-index-output",
+        default=DEFAULT_GUI_INDEX_FILENAME,
+        help=f"GUI index JSON filename or absolute path. Default: {DEFAULT_GUI_INDEX_FILENAME}",
+    )
+    parser.add_argument(
         "--image-variant",
         choices=("thumb", "preview"),
         default=DEFAULT_IMAGE_VARIANT,
@@ -196,6 +210,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Optional text file appended to the default VLM prompt.",
     )
     parser.add_argument(
+        "--dump-debug-dir",
+        help="Optional directory for per-batch prompt/request/response debug dumps.",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite the output CSV instead of appending",
@@ -258,11 +276,15 @@ def read_joined_rows(
         joined_rows.append(
             {
                 "relative_path": relative_path,
+                "source_path": relative_path,
                 "filename": Path(relative_path).name,
                 "image_path": str(image_path),
+                "image_relative_path": image_value,
                 "start_epoch_ms": str(photo_row.get("start_epoch_ms", "") or "").strip(),
                 "start_local": str(photo_row.get("start_local", "") or "").strip(),
                 "photo_order_index": str(photo_row.get("photo_order_index", "") or "").strip(),
+                "stream_id": Path(relative_path).parts[0] if Path(relative_path).parts else "",
+                "device": Path(relative_path).parts[0] if Path(relative_path).parts else "",
             }
         )
     if not joined_rows:
@@ -324,23 +346,35 @@ def build_user_prompt(temporal_lines: Sequence[str], extra_instructions: str = "
         f"{temporal_block}\n\n"
         "Task:\n"
         "Choose at most one boundary between consecutive frames.\n\n"
-        "A boundary means that the photos before and after it most likely belong to different performances or acts.\n\n"
+        "A boundary means that the photos before and after it most likely belong to different scene types or different performance segments.\n\n"
+        "Possible segment types include:\n"
+        "- a dance performance or act\n"
+        "- audience or backstage insert\n"
+        "- floor rehearsal / floor test / stage test between performance groups\n"
+        "- ceremony / award / result reading / host speaking segment\n\n"
         "Typical evidence for a true boundary:\n"
         "- different performer or group\n"
         "- clearly different costume identity\n"
         "- clearly different performance identity\n"
         "- major scene change that strongly suggests a different act\n\n"
+        "Important:\n"
+        "- If performance X is interrupted by audience or backstage photos, that interruption is a real boundary.\n"
+        "- If audience or backstage photos are followed again by performance X, that return is also a real boundary.\n"
+        "- Floor rehearsal between groups is not part of a normal performance act and should be treated as a separate segment.\n"
+        "- Ceremony is not the same as a dance performance and should be treated as a separate segment.\n\n"
         "Do NOT treat these alone as a boundary:\n"
         "- pose change\n"
         "- motion within the same act\n"
         "- small framing change\n"
         "- lighting change alone\n"
-        "- background change alone if the performer and costume still indicate the same act\n\n"
+        "- background change alone if the performer and costume still indicate the same act\n"
+        "- a few off-angle shots if they still clearly show the same ongoing performance and not a separate audience, backstage, rehearsal, or ceremony segment\n\n"
         "You must choose exactly one of these decisions:\n"
         f"{decisions_block}\n\n"
         "Rules:\n"
         '- Choose "no_cut" if all 10 frames most likely belong to the same performance.\n'
         '- Choose "cut_after_N" only if frames 1..N and frames N+1..10 most likely belong to different performances.\n'
+        "- If more than one real boundary appears inside the 10-frame window, choose the single strongest and clearest boundary.\n"
         "- Output only valid JSON.\n"
         "- Do not output markdown.\n"
         "- Do not output any text before or after JSON.\n\n"
@@ -385,6 +419,7 @@ def build_ollama_extra_body(args: argparse.Namespace) -> Dict[str, Any]:
         reasoning_effort = "none" if args.ollama_think == "false" else args.ollama_think
         extra_body["reasoning_effort"] = reasoning_effort
         extra_body["reasoning"] = {"effort": reasoning_effort}
+        extra_body["think"] = False if args.ollama_think == "false" else True
     options: Dict[str, Any] = {}
     if args.ollama_num_predict is not None:
         options["num_predict"] = args.ollama_num_predict
@@ -568,6 +603,151 @@ def current_timestamp() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+def build_debug_run_id() -> str:
+    return datetime.now(timezone.utc).astimezone().strftime("%Y%m%d_%H%M%S")
+
+
+def dump_debug_artifacts(
+    *,
+    debug_dir: Path,
+    run_id: str,
+    batch_index: int,
+    prompt: str,
+    request_payload: Mapping[str, Any],
+    response_payload: Optional[Mapping[str, Any]],
+    error_text: Optional[str],
+) -> None:
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"vlm_probe_{run_id}_batch_{batch_index:03d}"
+    (debug_dir / f"{stem}_prompt.txt").write_text(prompt, encoding="utf-8")
+    (debug_dir / f"{stem}_request.json").write_text(
+        json.dumps(request_payload, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+    if response_payload is not None:
+        (debug_dir / f"{stem}_response.json").write_text(
+            json.dumps(response_payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+    if error_text is not None:
+        (debug_dir / f"{stem}_error.txt").write_text(error_text, encoding="utf-8")
+
+
+def build_gui_index_payload(
+    *,
+    day_name: str,
+    workspace_dir: Path,
+    image_variant: str,
+    batch_payloads: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    ordered_rows: List[Dict[str, Any]] = []
+    row_by_relative_path: Dict[str, Dict[str, Any]] = {}
+    cut_reasons_by_pair: Dict[tuple[str, str], List[str]] = {}
+    for batch_payload in batch_payloads:
+        rows = [dict(row) for row in batch_payload["rows"]]
+        for row in rows:
+            relative_path = str(row["relative_path"])
+            if relative_path not in row_by_relative_path:
+                row_by_relative_path[relative_path] = row
+                ordered_rows.append(row)
+        if str(batch_payload.get("response_status", "")) != "ok":
+            continue
+        decision = str(batch_payload.get("decision", ""))
+        if not decision.startswith("cut_after_"):
+            continue
+        local_index = int(decision.removeprefix("cut_after_"))
+        if local_index <= 0 or local_index >= len(rows):
+            continue
+        left_relative_path = str(rows[local_index - 1]["relative_path"])
+        right_relative_path = str(rows[local_index]["relative_path"])
+        pair = (left_relative_path, right_relative_path)
+        cut_reasons_by_pair.setdefault(pair, []).append(str(batch_payload.get("reason", "") or "").strip())
+
+    segments: List[Dict[str, Any]] = []
+    current_rows: List[Dict[str, Any]] = []
+    for row in ordered_rows:
+        relative_path = str(row["relative_path"])
+        is_new_segment_start = False
+        split_pair: Optional[tuple[str, str]] = None
+        if current_rows:
+            previous_relative_path = str(current_rows[-1]["relative_path"])
+            candidate_pair = (previous_relative_path, relative_path)
+            if candidate_pair in cut_reasons_by_pair:
+                is_new_segment_start = True
+                split_pair = candidate_pair
+        if is_new_segment_start:
+            reasons = cut_reasons_by_pair.get(split_pair or ("", ""), [])
+            segments.append(
+                {
+                    "rows": current_rows,
+                    "cut_hits": len(reasons),
+                    "cut_reasons": reasons,
+                }
+            )
+            current_rows = [row]
+            continue
+        current_rows.append(row)
+    if current_rows:
+        segments.append(
+            {
+                "rows": current_rows,
+                "cut_hits": 0,
+                "cut_reasons": [],
+            }
+        )
+
+    performances: List[Dict[str, Any]] = []
+    total_photo_count = len(ordered_rows)
+    for segment_index, segment in enumerate(segments, start=1):
+        rows = list(segment["rows"])
+        if not rows:
+            continue
+        photos: List[Dict[str, Any]] = []
+        for row in rows:
+            photos.append(
+                {
+                    "relative_path": str(row["relative_path"]),
+                    "source_path": str(row["source_path"]),
+                    "proxy_path": str(row["image_relative_path"]),
+                    "proxy_exists": True,
+                    "filename": str(row["filename"]),
+                    "photo_start_local": str(row.get("start_local", "") or ""),
+                    "assignment_status": "",
+                    "assignment_reason": "",
+                    "seconds_to_nearest_boundary": "",
+                    "stream_id": str(row.get("stream_id", "") or ""),
+                    "device": str(row.get("device", "") or ""),
+                }
+            )
+        display_name = f"VLM{segment_index:04d}"
+        performances.append(
+            {
+                "set_id": f"vlm-set-{segment_index:04d}",
+                "base_set_id": f"vlm-set-{segment_index:04d}",
+                "display_name": display_name,
+                "original_performance_number": display_name,
+                "performance_number": display_name,
+                "segment_index": str(segment_index - 1),
+                "timeline_status": f"vlm_probe:{int(segment['cut_hits'])}_hits",
+                "duplicate_status": "normal",
+                "performance_start_local": str(rows[0].get("start_local", "") or ""),
+                "performance_end_local": str(rows[-1].get("start_local", "") or ""),
+                "segment_confidence": image_variant,
+                "vlm_boundary_hits": str(int(segment["cut_hits"])),
+                "vlm_boundary_reasons": list(segment["cut_reasons"]),
+                "photos": photos,
+            }
+        )
+    return {
+        "day": day_name,
+        "workspace_dir": str(workspace_dir),
+        "source_mode": SOURCE_MODE_IMAGE_ONLY_V1,
+        "performance_count": len(performances),
+        "photo_count": total_photo_count,
+        "performances": performances,
+    }
+
+
 def probe_vlm_photo_boundaries(
     *,
     workspace_dir: Path,
@@ -587,6 +767,9 @@ def probe_vlm_photo_boundaries(
     temperature: float,
     ollama_think: str,
     extra_instructions: str,
+    dump_debug_dir: Optional[Path],
+    write_gui_index: bool,
+    gui_index_output: Path,
     overwrite: bool,
 ) -> int:
     joined_rows = read_joined_rows(
@@ -597,7 +780,9 @@ def probe_vlm_photo_boundaries(
     )
     window_starts = build_window_start_indexes(len(joined_rows), window_size, overlap)[:max_batches]
     result_rows: List[Dict[str, str]] = []
+    gui_batch_payloads: List[Dict[str, Any]] = []
     generated_at = current_timestamp()
+    debug_run_id = build_debug_run_id()
     request_args = argparse.Namespace(
         ollama_base_url=ollama_base_url,
         ollama_think=ollama_think,
@@ -629,7 +814,30 @@ def probe_vlm_photo_boundaries(
                 temperature=temperature,
                 extra_body=extra_body,
             )
-            response_payload = ollama_post_json(ollama_base_url, "/api/chat", payload, timeout_seconds)
+            try:
+                response_payload = ollama_post_json(ollama_base_url, "/api/chat", payload, timeout_seconds)
+            except Exception as error:
+                if dump_debug_dir is not None:
+                    dump_debug_artifacts(
+                        debug_dir=dump_debug_dir,
+                        run_id=debug_run_id,
+                        batch_index=batch_index,
+                        prompt=prompt,
+                        request_payload=payload,
+                        response_payload=None,
+                        error_text=str(error),
+                    )
+                raise
+            if dump_debug_dir is not None:
+                dump_debug_artifacts(
+                    debug_dir=dump_debug_dir,
+                    run_id=debug_run_id,
+                    batch_index=batch_index,
+                    prompt=prompt,
+                    request_payload=payload,
+                    response_payload=response_payload,
+                    error_text=None,
+                )
             raw_response = extract_response_text(response_payload)
             parsed_response = parse_model_response(raw_response)
             result_rows.append(
@@ -648,8 +856,27 @@ def probe_vlm_photo_boundaries(
                     temperature=temperature,
                 )
             )
+            gui_batch_payloads.append(
+                {
+                    "batch_index": batch_index,
+                    "decision": str(parsed_response["decision"]),
+                    "reason": str(parsed_response["reason"]),
+                    "response_status": str(parsed_response["response_status"]),
+                    "rows": [dict(row) for row in window_rows],
+                }
+            )
             progress.advance(task)
     append_result_rows(output_csv, result_rows, overwrite=overwrite)
+    if write_gui_index:
+        if gui_index_output.exists() and not overwrite:
+            raise ValueError(f"GUI index JSON already exists: {gui_index_output}")
+        gui_payload = build_gui_index_payload(
+            day_name=workspace_dir.parent.name,
+            workspace_dir=workspace_dir,
+            image_variant=image_variant,
+            batch_payloads=gui_batch_payloads,
+        )
+        atomic_write_json(gui_index_output, gui_payload)
     return len(result_rows)
 
 
@@ -662,6 +889,7 @@ def main() -> int:
     embedded_manifest_csv = resolve_path(workspace_dir, args.embedded_manifest_csv)
     photo_manifest_csv = resolve_path(workspace_dir, args.photo_manifest_csv)
     output_csv = resolve_path(workspace_dir, args.output)
+    gui_index_output = resolve_path(workspace_dir, args.gui_index_output)
     if not embedded_manifest_csv.exists():
         raise SystemExit(f"Embedded manifest CSV does not exist: {embedded_manifest_csv}")
     if not photo_manifest_csv.exists():
@@ -684,6 +912,9 @@ def main() -> int:
         temperature=args.temperature,
         ollama_think=args.ollama_think,
         extra_instructions=load_extra_instructions(args.extra_instructions, args.extra_instructions_file),
+        dump_debug_dir=Path(args.dump_debug_dir).expanduser().resolve() if args.dump_debug_dir else None,
+        write_gui_index=bool(args.write_gui_index),
+        gui_index_output=gui_index_output,
         overwrite=args.overwrite,
     )
     console.print(f"Wrote {row_count} VLM probe rows to {output_csv}")

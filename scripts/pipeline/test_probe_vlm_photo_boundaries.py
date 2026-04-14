@@ -39,6 +39,9 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "0.25",
                 "--ollama-think",
                 "false",
+                "--dump-debug-dir",
+                "/tmp/vlm-debug",
+                "--write-gui-index",
             ]
         )
         self.assertEqual(args.image_variant, "thumb")
@@ -46,6 +49,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(args.overlap, 2)
         self.assertEqual(args.temperature, 0.25)
         self.assertEqual(args.ollama_think, "false")
+        self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
+        self.assertTrue(args.write_gui_index)
 
     def test_build_window_start_indexes_uses_overlap_and_aligned_tail(self):
         self.assertEqual(probe.build_window_start_indexes(total_rows=26, window_size=10, overlap=2), [0, 8, 16])
@@ -80,6 +85,10 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIn('"no_cut"', prompt)
         self.assertIn('"cut_after_9"', prompt)
         self.assertIn("Temporal sequence", prompt)
+        self.assertIn("audience or backstage insert", prompt)
+        self.assertIn("floor rehearsal / floor test / stage test", prompt)
+        self.assertIn("ceremony / award / result reading / host speaking segment", prompt)
+        self.assertIn("If more than one real boundary appears", prompt)
         self.assertNotIn("confidence", prompt.lower())
 
     def test_build_user_prompt_appends_extra_instructions(self):
@@ -154,6 +163,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         extra_body = probe.build_ollama_extra_body(args)
         self.assertEqual(extra_body["reasoning_effort"], "none")
         self.assertEqual(extra_body["reasoning"]["effort"], "none")
+        self.assertIs(extra_body["think"], False)
         self.assertEqual(extra_body["options"]["num_ctx"], 8192)
         self.assertEqual(extra_body["options"]["num_predict"], 128)
 
@@ -212,6 +222,140 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             lines = output_csv.read_text(encoding="utf-8").splitlines()
             self.assertEqual(lines[0], ",".join(probe.OUTPUT_HEADERS))
             self.assertEqual(len(lines), 2)
+
+    def test_dump_debug_artifacts_writes_prompt_request_and_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_dir = Path(tmp)
+            probe.dump_debug_artifacts(
+                debug_dir=debug_dir,
+                run_id="20260414_031500",
+                batch_index=3,
+                prompt="prompt body",
+                request_payload={"model": "qwen3.5:9b", "messages": [{"role": "user", "content": "x"}]},
+                response_payload={"message": {"content": "{\"decision\":\"no_cut\",\"reason\":\"same act\"}"}},
+                error_text=None,
+            )
+            prompt_path = debug_dir / "vlm_probe_20260414_031500_batch_003_prompt.txt"
+            request_path = debug_dir / "vlm_probe_20260414_031500_batch_003_request.json"
+            response_path = debug_dir / "vlm_probe_20260414_031500_batch_003_response.json"
+            self.assertTrue(prompt_path.exists())
+            self.assertTrue(request_path.exists())
+            self.assertTrue(response_path.exists())
+            self.assertEqual(prompt_path.read_text(encoding="utf-8"), "prompt body")
+            self.assertEqual(json.loads(request_path.read_text(encoding="utf-8"))["model"], "qwen3.5:9b")
+            self.assertEqual(json.loads(response_path.read_text(encoding="utf-8"))["message"]["content"], '{"decision":"no_cut","reason":"same act"}')
+
+    def test_dump_debug_artifacts_writes_error_without_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_dir = Path(tmp)
+            probe.dump_debug_artifacts(
+                debug_dir=debug_dir,
+                run_id="20260414_031500",
+                batch_index=4,
+                prompt="prompt body",
+                request_payload={"model": "qwen3.5:9b"},
+                response_payload=None,
+                error_text="timed out",
+            )
+            error_path = debug_dir / "vlm_probe_20260414_031500_batch_004_error.txt"
+            response_path = debug_dir / "vlm_probe_20260414_031500_batch_004_response.json"
+            self.assertTrue(error_path.exists())
+            self.assertFalse(response_path.exists())
+            self.assertEqual(error_path.read_text(encoding="utf-8"), "timed out")
+
+    def test_build_gui_index_payload_builds_global_sets_from_unique_cuts(self):
+        payload = probe.build_gui_index_payload(
+            day_name="20260323",
+            workspace_dir=Path("/tmp/workspace"),
+            image_variant="thumb",
+            batch_payloads=[
+                {
+                    "batch_index": 1,
+                    "decision": "cut_after_2",
+                    "reason": "cut between b and c",
+                    "response_status": "ok",
+                    "rows": [
+                        {
+                            "relative_path": "cam/a.hif",
+                            "source_path": "cam/a.hif",
+                            "filename": "a.hif",
+                            "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/a.jpg",
+                            "image_relative_path": "embedded_jpg/thumb/cam/a.jpg",
+                            "start_local": "2026-03-23T10:00:00",
+                            "stream_id": "cam",
+                            "device": "cam",
+                        },
+                        {
+                            "relative_path": "cam/b.hif",
+                            "source_path": "cam/b.hif",
+                            "filename": "b.hif",
+                            "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/b.jpg",
+                            "image_relative_path": "embedded_jpg/thumb/cam/b.jpg",
+                            "start_local": "2026-03-23T10:00:01",
+                            "stream_id": "cam",
+                            "device": "cam",
+                        },
+                        {
+                            "relative_path": "cam/c.hif",
+                            "source_path": "cam/c.hif",
+                            "filename": "c.hif",
+                            "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/c.jpg",
+                            "image_relative_path": "embedded_jpg/thumb/cam/c.jpg",
+                            "start_local": "2026-03-23T10:00:02",
+                            "stream_id": "cam",
+                            "device": "cam",
+                        },
+                    ],
+                },
+                {
+                    "batch_index": 2,
+                    "decision": "cut_after_1",
+                    "reason": "same cut repeated in overlap",
+                    "response_status": "ok",
+                    "rows": [
+                        {
+                            "relative_path": "cam/b.hif",
+                            "source_path": "cam/b.hif",
+                            "filename": "b.hif",
+                            "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/b.jpg",
+                            "image_relative_path": "embedded_jpg/thumb/cam/b.jpg",
+                            "start_local": "2026-03-23T10:00:01",
+                            "stream_id": "cam",
+                            "device": "cam",
+                        },
+                        {
+                            "relative_path": "cam/c.hif",
+                            "source_path": "cam/c.hif",
+                            "filename": "c.hif",
+                            "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/c.jpg",
+                            "image_relative_path": "embedded_jpg/thumb/cam/c.jpg",
+                            "start_local": "2026-03-23T10:00:02",
+                            "stream_id": "cam",
+                            "device": "cam",
+                        },
+                        {
+                            "relative_path": "cam/d.hif",
+                            "source_path": "cam/d.hif",
+                            "filename": "d.hif",
+                            "image_path": "/tmp/workspace/embedded_jpg/thumb/cam/d.jpg",
+                            "image_relative_path": "embedded_jpg/thumb/cam/d.jpg",
+                            "start_local": "2026-03-23T10:00:03",
+                            "stream_id": "cam",
+                            "device": "cam",
+                        },
+                    ],
+                },
+            ],
+        )
+        self.assertEqual(payload["source_mode"], "image_only_v1")
+        self.assertEqual(payload["performance_count"], 2)
+        self.assertEqual(payload["photo_count"], 4)
+        self.assertEqual(payload["performances"][0]["display_name"], "VLM0001")
+        self.assertEqual(payload["performances"][0]["timeline_status"], "vlm_probe:2_hits")
+        self.assertEqual([photo["relative_path"] for photo in payload["performances"][0]["photos"]], ["cam/a.hif", "cam/b.hif"])
+        self.assertEqual([photo["relative_path"] for photo in payload["performances"][1]["photos"]], ["cam/c.hif", "cam/d.hif"])
+        self.assertEqual(payload["performances"][0]["photos"][0]["proxy_path"], "embedded_jpg/thumb/cam/a.jpg")
+        self.assertIn("same cut repeated in overlap", payload["performances"][0]["vlm_boundary_reasons"])
 
 
 if __name__ == "__main__":
