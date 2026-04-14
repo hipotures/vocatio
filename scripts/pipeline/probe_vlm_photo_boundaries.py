@@ -357,20 +357,19 @@ def build_window_start_indexes(total_rows: int, window_size: int, overlap: int) 
     return starts
 
 
-def build_candidate_window_start_indexes(
+def build_candidate_windows(
     rows: Sequence[Mapping[str, str]],
     window_size: int,
     overlap: int,
     boundary_gap_seconds: int,
-) -> List[int]:
+) -> List[Dict[str, int]]:
     total_rows = len(rows)
     if total_rows < window_size:
         raise ValueError(f"Need at least {window_size} rows, got {total_rows}")
     if overlap >= window_size:
         raise ValueError("overlap must be smaller than window_size")
     final_start = total_rows - window_size
-    starts: List[int] = []
-    seen: set[int] = set()
+    candidates_by_start: Dict[int, Dict[str, int]] = {}
     for cut_index in range(total_rows - 1):
         left_epoch_ms = int(str(rows[cut_index]["start_epoch_ms"]))
         right_epoch_ms = int(str(rows[cut_index + 1]["start_epoch_ms"]))
@@ -382,10 +381,32 @@ def build_candidate_window_start_indexes(
             start_index = 0
         if start_index > final_start:
             start_index = final_start
-        if start_index not in seen:
-            seen.add(start_index)
-            starts.append(start_index)
-    return starts
+        existing = candidates_by_start.get(start_index)
+        candidate = {
+            "start_index": start_index,
+            "cut_index": cut_index,
+            "time_gap_seconds": time_gap_seconds,
+        }
+        if existing is None or candidate["time_gap_seconds"] > existing["time_gap_seconds"]:
+            candidates_by_start[start_index] = candidate
+    return [candidates_by_start[start_index] for start_index in sorted(candidates_by_start)]
+
+
+def build_candidate_window_start_indexes(
+    rows: Sequence[Mapping[str, str]],
+    window_size: int,
+    overlap: int,
+    boundary_gap_seconds: int,
+) -> List[int]:
+    return [
+        int(candidate["start_index"])
+        for candidate in build_candidate_windows(
+            rows,
+            window_size=window_size,
+            overlap=overlap,
+            boundary_gap_seconds=boundary_gap_seconds,
+        )
+    ]
 
 
 def rounded_seconds(delta_ms: int) -> int:
@@ -1259,6 +1280,52 @@ def build_resume_message(
     )
 
 
+def build_run_start_message(*, run_id: str, total_batches: int, boundary_gap_seconds: int) -> str:
+    return (
+        f"Starting VLM run {run_id}; {total_batches} candidate batch(es) "
+        f"from gaps > {boundary_gap_seconds}s."
+    )
+
+
+def build_candidate_batch_message(
+    *,
+    batch_index: int,
+    total_batches: int,
+    time_gap_seconds: int,
+    start_row: int,
+    end_row: int,
+    left_start_local: str,
+    right_start_local: str,
+) -> str:
+    return (
+        f"Batch {batch_index}/{total_batches} | gap {time_gap_seconds}s | rows {start_row}..{end_row} | "
+        f"{left_start_local[-8:]} -> {right_start_local[-8:]}"
+    )
+
+
+def build_batch_result_message(
+    *,
+    batch_index: int,
+    decision: str,
+    cut_after_global_row: str,
+    cut_left_start_local: str,
+    cut_right_start_local: str,
+    cuts: int,
+    no_cut: int,
+    invalid: int,
+) -> str:
+    outcome = decision
+    if cut_after_global_row:
+        outcome = (
+            f"{decision} -> global row {cut_after_global_row} "
+            f"({cut_left_start_local[-8:]} -> {cut_right_start_local[-8:]})"
+        )
+    return (
+        f"Result batch {batch_index}: {outcome} | "
+        f"cuts={cuts} no_cut={no_cut} invalid={invalid}"
+    )
+
+
 def probe_vlm_photo_boundaries(
     *,
     workspace_dir: Path,
@@ -1291,7 +1358,7 @@ def probe_vlm_photo_boundaries(
         image_variant=image_variant,
     )
     boundary_rows_by_pair = read_boundary_scores_by_pair(workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME)
-    all_window_starts = build_candidate_window_start_indexes(
+    all_candidates = build_candidate_windows(
         joined_rows,
         window_size=window_size,
         overlap=overlap,
@@ -1305,12 +1372,12 @@ def probe_vlm_photo_boundaries(
         run_id=str(args_payload.get("run_id", "") or "") or None,
     )
     completed_batches = int(run_state["completed_batches"])
-    if completed_batches > len(all_window_starts):
+    if completed_batches > len(all_candidates):
         raise ValueError(
-            f"Run {run_state['run_id']} already has {completed_batches} batches, but only {len(all_window_starts)} windows exist"
+            f"Run {run_state['run_id']} already has {completed_batches} batches, but only {len(all_candidates)} windows exist"
         )
-    window_starts = all_window_starts[completed_batches : completed_batches + max_batches]
-    if not window_starts:
+    candidate_windows = all_candidates[completed_batches : completed_batches + max_batches]
+    if not candidate_windows:
         console.print(
             f"No remaining VLM windows for run {run_state['run_id'] or '<new>'}; already processed {completed_batches} batch(es)."
         )
@@ -1320,7 +1387,7 @@ def probe_vlm_photo_boundaries(
             build_resume_message(
                 run_id=str(run_state["run_id"]),
                 completed_batches=completed_batches,
-                total_batches=len(all_window_starts),
+                total_batches=len(all_candidates),
                 requested_batches=max_batches,
             )
         )
@@ -1346,6 +1413,21 @@ def probe_vlm_photo_boundaries(
             ),
             response_schema=response_schema,
         )
+        console.print(
+            build_run_start_message(
+                run_id=run_id,
+                total_batches=len(all_candidates),
+                boundary_gap_seconds=boundary_gap_seconds,
+            )
+        )
+    existing_result_rows = [
+        row
+        for row in (read_result_rows(output_csv) if output_csv.exists() else [])
+        if str(row.get("run_id", "") or "") == run_id
+    ]
+    cut_count = sum(1 for row in existing_result_rows if str(row.get("decision", "") or "").startswith("cut_after_"))
+    no_cut_count = sum(1 for row in existing_result_rows if str(row.get("decision", "") or "") == "no_cut")
+    invalid_count = sum(1 for row in existing_result_rows if str(row.get("response_status", "") or "") != "ok")
     response_schema = build_response_schema(window_size) if str(args_payload.get("response_schema_mode", "off")) == "on" else None
     request_args = argparse.Namespace(
         ollama_base_url=ollama_base_url,
@@ -1365,11 +1447,25 @@ def probe_vlm_photo_boundaries(
         expand=False,
         console=console,
     ) as progress:
-        task = progress.add_task("Probe VLM windows".ljust(25), total=len(window_starts))
-        for batch_offset, start_index in enumerate(window_starts, start=1):
+        task = progress.add_task("Probe VLM candidate gaps".ljust(25), total=len(candidate_windows))
+        for batch_offset, candidate in enumerate(candidate_windows, start=1):
             batch_index = completed_batches + batch_offset
+            start_index = int(candidate["start_index"])
+            cut_index = int(candidate["cut_index"])
+            time_gap_seconds = int(candidate["time_gap_seconds"])
             end_index = start_index + window_size
             window_rows = joined_rows[start_index:end_index]
+            progress.console.print(
+                build_candidate_batch_message(
+                    batch_index=batch_index,
+                    total_batches=len(all_candidates),
+                    time_gap_seconds=time_gap_seconds,
+                    start_row=start_index + 1,
+                    end_row=end_index,
+                    left_start_local=str(joined_rows[cut_index]["start_local"]),
+                    right_start_local=str(joined_rows[cut_index + 1]["start_local"]),
+                )
+            )
             gap_hint_lines = build_gap_hint_lines(window_rows, boundary_rows_by_pair)
             prompt = build_user_prompt(
                 window_size=window_size,
@@ -1429,8 +1525,34 @@ def probe_vlm_photo_boundaries(
                 temperature=temperature,
             )
             append_result_rows(output_csv, [result_row])
+            if str(result_row["decision"]).startswith("cut_after_"):
+                cut_count += 1
+            elif str(result_row["decision"]) == "no_cut":
+                no_cut_count += 1
+            else:
+                invalid_count += 1
+            progress.console.print(
+                build_batch_result_message(
+                    batch_index=batch_index,
+                    decision=str(result_row["decision"]),
+                    cut_after_global_row=str(result_row["cut_after_global_row"]),
+                    cut_left_start_local=(
+                        str(joined_rows[int(result_row["cut_after_global_row"]) - 1]["start_local"])
+                        if str(result_row["cut_after_global_row"])
+                        else ""
+                    ),
+                    cut_right_start_local=(
+                        str(joined_rows[int(result_row["cut_after_global_row"])]["start_local"])
+                        if str(result_row["cut_after_global_row"])
+                        else ""
+                    ),
+                    cuts=cut_count,
+                    no_cut=no_cut_count,
+                    invalid=invalid_count,
+                )
+            )
             progress.advance(task)
-    return len(window_starts)
+    return len(candidate_windows)
 
 
 def main() -> int:

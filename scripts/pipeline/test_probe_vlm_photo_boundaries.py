@@ -128,6 +128,27 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             [],
         )
 
+    def test_build_candidate_windows_tracks_gap_and_cut_index(self):
+        rows = [
+            {"start_epoch_ms": "0"},
+            {"start_epoch_ms": "1000"},
+            {"start_epoch_ms": "2000"},
+            {"start_epoch_ms": "3000"},
+            {"start_epoch_ms": "20000"},
+            {"start_epoch_ms": "21000"},
+            {"start_epoch_ms": "22000"},
+            {"start_epoch_ms": "23000"},
+        ]
+        self.assertEqual(
+            probe.build_candidate_windows(
+                rows,
+                window_size=5,
+                overlap=2,
+                boundary_gap_seconds=10,
+            ),
+            [{"start_index": 2, "cut_index": 3, "time_gap_seconds": 17}],
+        )
+
     def test_build_temporal_lines_uses_rounded_second_deltas(self):
         rows = [
             {"start_epoch_ms": "1000"},
@@ -696,6 +717,52 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIn("batch 101", message)
         self.assertIn("150 remaining", message)
         self.assertIn("running up to 25 more", message)
+
+    def test_build_run_start_message_reports_candidates_and_gap_threshold(self):
+        message = probe.build_run_start_message(
+            run_id="vlm-20260414053113",
+            total_batches=84,
+            boundary_gap_seconds=10,
+        )
+        self.assertIn("Starting VLM run vlm-20260414053113", message)
+        self.assertIn("84 candidate batch(es)", message)
+        self.assertIn("gaps > 10s", message)
+
+    def test_build_candidate_batch_message_reports_gap_rows_and_paths(self):
+        message = probe.build_candidate_batch_message(
+            batch_index=8,
+            total_batches=100,
+            time_gap_seconds=37,
+            start_row=1241,
+            end_row=1247,
+            left_start_local="2026-03-23T08:52:34",
+            right_start_local="2026-03-23T08:53:18",
+        )
+        self.assertIn("Batch 8/100", message)
+        self.assertIn("gap 37s", message)
+        self.assertIn("rows 1241..1247", message)
+        self.assertIn("08:52:34", message)
+        self.assertIn("08:53:18", message)
+
+    def test_build_batch_result_message_reports_cut_and_counters(self):
+        message = probe.build_batch_result_message(
+            batch_index=8,
+            decision="cut_after_3",
+            cut_after_global_row="1243",
+            cut_left_start_local="2026-03-23T08:52:34",
+            cut_right_start_local="2026-03-23T08:53:18",
+            cuts=12,
+            no_cut=58,
+            invalid=1,
+        )
+        self.assertIn("Result batch 8", message)
+        self.assertIn("cut_after_3", message)
+        self.assertIn("global row 1243", message)
+        self.assertIn("08:52:34", message)
+        self.assertIn("08:53:18", message)
+        self.assertIn("cuts=12", message)
+        self.assertIn("no_cut=58", message)
+        self.assertIn("invalid=1", message)
 
     def test_probe_vlm_photo_boundaries_returns_zero_at_end_of_data(self):
         with tempfile.TemporaryDirectory() as tmp:
