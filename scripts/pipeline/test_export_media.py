@@ -66,8 +66,9 @@ class ExportMediaCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"
             stream_dir = day_dir / "p-a7r5"
-            stream_dir.mkdir(parents=True)
-            photo_path = stream_dir / "A0001.ARW"
+            nested_dir = stream_dir / "raw"
+            nested_dir.mkdir(parents=True)
+            photo_path = nested_dir / "A0001.ARW"
             photo_path.write_bytes(b"photo-bytes")
 
             sort_key, row = export_media.build_photo_manifest_entry(
@@ -86,19 +87,19 @@ class ExportMediaCliTests(unittest.TestCase):
             )
 
             self.assertEqual(list(row.keys()), export_media.MEDIA_MANIFEST_HEADERS)
-            self.assertEqual(sort_key[-1], "p-a7r5/A0001.ARW")
+            self.assertEqual(sort_key[-1], "p-a7r5/raw/A0001.ARW")
             self.assertEqual(row["day"], "20260323")
             self.assertEqual(row["stream_id"], "p-a7r5")
             self.assertEqual(row["device"], "a7r5")
             self.assertEqual(row["media_type"], "photo")
             self.assertEqual(row["source_root"], str(day_dir))
-            self.assertEqual(row["source_dir"], str(stream_dir))
-            self.assertEqual(row["source_rel_dir"], "p-a7r5")
+            self.assertEqual(row["source_dir"], str(nested_dir))
+            self.assertEqual(row["source_rel_dir"], "p-a7r5/raw")
             self.assertEqual(row["path"], str(photo_path))
-            self.assertEqual(row["relative_path"], "p-a7r5/A0001.ARW")
-            self.assertEqual(row["media_id"], "p-a7r5/A0001.ARW")
-            self.assertEqual(row["photo_id"], "p-a7r5/A0001.ARW")
-            self.assertEqual(row["filename"], "p-a7r5/A0001.ARW")
+            self.assertEqual(row["relative_path"], "p-a7r5/raw/A0001.ARW")
+            self.assertEqual(row["media_id"], "p-a7r5/raw/A0001.ARW")
+            self.assertEqual(row["photo_id"], "p-a7r5/raw/A0001.ARW")
+            self.assertEqual(row["filename"], "p-a7r5/raw/A0001.ARW")
             self.assertEqual(row["extension"], ".arw")
             self.assertEqual(row["capture_time_local"], "2026-03-23T10:00:00")
             self.assertEqual(row["capture_subsec"], "123")

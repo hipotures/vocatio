@@ -108,7 +108,7 @@ def build_photo_manifest_entry(
     metadata: Optional[Mapping[str, object]],
 ) -> tuple[tuple[int, datetime, str, str], Dict[str, str]]:
     relative_path = path.relative_to(day_dir).as_posix()
-    source_dir = day_dir / stream_id
+    source_dir = path.parent
     source_rel_dir = source_dir.relative_to(day_dir).as_posix()
     row = empty_media_row()
     row.update(
