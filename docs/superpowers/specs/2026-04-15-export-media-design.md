@@ -251,6 +251,36 @@ This avoids a broad downstream rename migration and lets later steps consume fil
 
 ## Exporter Behavior
 
+### CLI surface
+
+`export_media.py` should expose one unified CLI instead of separate photo-specific and video-specific entrypoints.
+
+Required argument:
+
+- `day_dir`
+
+Recommended options:
+
+- `--workspace-dir`
+- `--output`
+  - default: `media_manifest.csv`
+- `--targets`
+  - optional explicit stream filtering such as `p-a7r5 v-gh7`
+- `--list-targets`
+- `--media-types {all,photo,video}`
+  - default: `all`
+  - this is only an input filter for debugging and staged migration
+  - it must not change the schema of the output file
+- `--jobs`
+  - default: `4`
+  - one global concurrency limit for metadata extraction batches across both photos and video
+
+Rejected CLI additions for the first implementation:
+
+- separate `--photo-jobs` and `--video-jobs`
+- multiple output schema modes
+- a single explicit `--stream-id` mode
+
 ### Discovery
 
 `export_media.py` scans the day directory for:
@@ -296,6 +326,25 @@ The manifest write must remain atomic:
 - write to a sibling temp file
 - validate output rows
 - replace final output with `os.replace`
+
+### Progress UX
+
+The exporter must use `rich.progress` and show both elapsed time and ETA during long-running metadata extraction.
+
+The progress layout should follow the repository standard:
+
+- `SpinnerColumn()`
+- `TextColumn("[progress.description]{task.description}")`
+- `BarColumn(bar_width=40)`
+- `MofNCompleteColumn()`
+- `TaskProgressColumn()`
+- `TimeElapsedColumn()`
+
+Additionally, because this exporter is expected to process large day directories, it should also include:
+
+- `TimeRemainingColumn()`
+
+Task descriptions should remain fixed-width so the progress bar does not shift horizontally.
 
 ## Reader Layer
 
