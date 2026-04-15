@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Optional, Sequence
 
 from rich.console import Console
 from rich.progress import (
@@ -20,6 +20,7 @@ from rich.progress import (
 
 
 console = Console()
+DAY_PATTERN = re.compile(r"^\d{8}$")
 STREAM_PATTERN = re.compile(r"^(?P<prefix>[pv])-(?P<device>[A-Za-z0-9._-]+)$")
 
 
@@ -115,23 +116,51 @@ def filter_streams_by_media_types(
     }
 
 
+def selected_streams(
+    streams: Dict[str, Dict[str, str]],
+    targets: Optional[Sequence[str]],
+) -> List[Dict[str, str]] | None:
+    if not targets:
+        return [streams[key] for key in sorted(streams)]
+    missing = [target for target in targets if target not in streams]
+    if missing:
+        console.print(f"[red]Error: unknown targets: {', '.join(missing)}[/red]")
+        return None
+    return [streams[target] for target in targets]
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    day_dir = Path(args.day_dir)
-    streams = filter_streams_by_media_types(detect_streams(day_dir), args.media_types)
-    if args.targets:
-        requested = set(args.targets)
-        streams = {
-            stream_id: info
-            for stream_id, info in streams.items()
-            if stream_id in requested
-        }
+    day_dir = Path(args.day_dir).resolve()
+    if not day_dir.exists() or not day_dir.is_dir():
+        console.print(f"[red]Error: {args.day_dir} is not a directory.[/red]")
+        return 1
+    if not DAY_PATTERN.match(day_dir.name):
+        console.print(f"[red]Error: expected a day directory like 20260323, got {day_dir.name}.[/red]")
+        return 1
+
+    streams = detect_streams(day_dir)
+    if not streams:
+        console.print(f"[red]Error: no p-/v- streams found in {day_dir}.[/red]")
+        return 1
+
+    streams = filter_streams_by_media_types(streams, args.media_types)
+    if not streams:
+        console.print(f"[red]Error: no streams matched media-types={args.media_types} in {day_dir}.[/red]")
+        return 1
+
+    streams_to_process = selected_streams(streams, args.targets)
+    if streams_to_process is None:
+        return 1
+
     if args.list_targets:
-        for stream_id in streams:
-            console.print(stream_id)
+        for info in streams_to_process:
+            console.print(f"{info['stream_id']}  {info['media_type']}  {info['source_dir']}")
         return 0
-    console.print("Export orchestration is not implemented yet.")
-    return 0
+    console.print(
+        "[red]Error: export orchestration is not implemented yet. Use --list-targets to inspect detected streams.[/red]"
+    )
+    return 1
 
 
 if __name__ == "__main__":
