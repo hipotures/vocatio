@@ -649,6 +649,10 @@ def persist_manifest_snapshot(
     return snapshot_rows
 
 
+def finalize_successful_export(output_path: Path) -> None:
+    partial_output_path(output_path).unlink(missing_ok=True)
+
+
 def load_existing_manifest(path: Path, label: str) -> List[Dict[str, str]] | None:
     if not path.exists():
         return []
@@ -1126,18 +1130,22 @@ def main(argv: list[str] | None = None) -> int:
             day_dir,
         )
         remaining_files = sum(len(batch) for _info, batch in batch_specs)
-        process_task = progress.add_task("Process media".ljust(25), total=remaining_files)
 
         if not batch_specs:
             if rows_by_relative_path:
                 snapshot_rows = persist_manifest_snapshot(output_path, rows_by_relative_path)
-                console.print(f"[green]Wrote {len(snapshot_rows)} rows to {output_path}[/green]")
+                finalize_successful_export(output_path)
+                console.print(
+                    f"[green]Manifest already up to date with {len(snapshot_rows)} rows at {output_path}[/green]"
+                )
                 return 0
             console.print(
                 "[red]Error: no remaining media files matched the current selection under "
                 f"{day_dir}.[/red]"
             )
             return 1
+
+        process_task = progress.add_task("Process media".ljust(25), total=remaining_files)
 
         interrupt_state, previous_handler = install_interrupt_handler()
         try:
@@ -1212,6 +1220,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 130
 
+    finalize_successful_export(output_path)
     console.print(f"[green]Wrote {len(snapshot_rows)} rows to {output_path}[/green]")
     return 0
 

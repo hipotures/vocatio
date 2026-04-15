@@ -165,6 +165,9 @@ class ExportMediaCliTests(unittest.TestCase):
                 [row["relative_path"] for row in media_manifest.select_photo_rows(rows)],
                 ["p-a7r5/done.hif", "p-a7r5/todo.hif"],
             )
+            self.assertFalse(
+                export_media.partial_output_path(workspace_dir / "media_manifest.csv").exists()
+            )
 
     def test_main_restart_ignores_partial_manifest_and_reprocesses_everything(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -225,6 +228,42 @@ class ExportMediaCliTests(unittest.TestCase):
             self.assertEqual(
                 [row["relative_path"] for row in media_manifest.select_photo_rows(rows)],
                 ["p-a7r5/done.hif", "p-a7r5/todo.hif"],
+            )
+            self.assertFalse(
+                export_media.partial_output_path(workspace_dir / "media_manifest.csv").exists()
+            )
+
+    def test_main_reports_up_to_date_when_nothing_remains_to_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            photo_dir = day_dir / "p-a7r5"
+            workspace_dir.mkdir(parents=True)
+            photo_dir.mkdir(parents=True)
+
+            done_path = photo_dir / "done.hif"
+            done_path.write_bytes(b"done")
+            _sort_key, done_row = export_media.build_photo_manifest_entry(
+                day_dir=day_dir,
+                stream_id="p-a7r5",
+                device="a7r5",
+                path=done_path,
+                metadata={
+                    "DateTimeOriginal": "2026:03:23 10:00:00",
+                    "SubSecDateTimeOriginal": "2026:03:23 10:00:00.100",
+                },
+            )
+            export_media.assign_photo_order_indexes([done_row])
+            export_media.write_media_manifest_csv(workspace_dir / "media_manifest.csv", [done_row])
+
+            with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
+                with mock.patch.object(export_media.console, "print") as console_print:
+                    exit_code = export_media.main([str(day_dir)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(
+                console_print.call_args_list[-1].args[0],
+                f"[green]Manifest already up to date with 1 rows at {workspace_dir / 'media_manifest.csv'}[/green]",
             )
 
     def test_main_stops_after_active_batches_and_saves_partial_state(self) -> None:

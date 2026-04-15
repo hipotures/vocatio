@@ -88,7 +88,7 @@ By default this writes:
 DAY/_workspace/media_manifest.csv
 ```
 
-The exporter now keeps a resumable checkpoint alongside the final manifest:
+The exporter uses a resumable checkpoint file during interrupted or in-progress work:
 
 ```bash
 DAY/_workspace/media_manifest.csv.partial
@@ -101,6 +101,7 @@ Behavior:
 - if `.partial` does not exist but `media_manifest.csv` exists, the exporter reconstructs `.partial` from the final manifest and resumes
 - `--restart` ignores both files and rebuilds from scratch
 - after each completed metadata batch, the exporter updates both `.partial` and `media_manifest.csv` using atomic replace
+- after a clean successful finish, `.partial` is removed
 
 Operational notes:
 
