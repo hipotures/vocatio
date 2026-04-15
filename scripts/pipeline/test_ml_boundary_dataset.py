@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
@@ -21,6 +23,16 @@ def test_sort_photo_rows_uses_timestamp_order_idx_photo_id() -> None:
     assert [row["photo_id"] for row in ordered] == ["p0", "p1", "p2", "p3", "p4"]
 
 
+def test_sort_photo_rows_rejects_missing_or_blank_order_idx() -> None:
+    with pytest.raises(ValueError, match="order_idx"):
+        sort_photo_rows([{"photo_id": "p1", "timestamp": "2025-03-25T08:00:00.000"}])
+
+    with pytest.raises(ValueError, match="order_idx"):
+        sort_photo_rows(
+            [{"photo_id": "p1", "order_idx": "", "timestamp": "2025-03-25T08:00:00.000"}]
+        )
+
+
 def test_canonical_candidate_id_is_stable() -> None:
     first = canonical_candidate_id(
         day_id="20250325",
@@ -34,5 +46,12 @@ def test_canonical_candidate_id_is_stable() -> None:
         center_right_photo_id="p4",
         candidate_rule_version="gap-v1",
     )
+    changed = canonical_candidate_id(
+        day_id="20250325",
+        center_left_photo_id="p3",
+        center_right_photo_id="p4",
+        candidate_rule_version="gap-v2",
+    )
 
     assert first == second
+    assert changed != first

@@ -5,7 +5,7 @@ from hashlib import sha1
 
 def _normalize_order_idx(value: object) -> int:
     if value in (None, ""):
-        return 0
+        raise ValueError("order_idx is required and must not be blank")
     return int(value)
 
 
@@ -14,7 +14,7 @@ def sort_photo_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
         rows,
         key=lambda row: (
             row["timestamp"],
-            _normalize_order_idx(row.get("order_idx", 0)),
+            _normalize_order_idx(row.get("order_idx")),
             row["photo_id"],
         ),
     )
