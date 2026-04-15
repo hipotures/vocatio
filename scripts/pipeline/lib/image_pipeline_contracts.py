@@ -42,6 +42,71 @@ PHOTO_MANIFEST_REQUIRED_COLUMNS = frozenset(
     }
 )
 
+MEDIA_MANIFEST_HEADERS = [
+    "day",
+    "stream_id",
+    "device",
+    "media_type",
+    "source_root",
+    "source_dir",
+    "source_rel_dir",
+    "path",
+    "relative_path",
+    "media_id",
+    "photo_id",
+    "filename",
+    "extension",
+    "capture_time_local",
+    "capture_subsec",
+    "photo_order_index",
+    "start_local",
+    "end_local",
+    "start_epoch_ms",
+    "end_epoch_ms",
+    "duration_seconds",
+    "timestamp_source",
+    "model",
+    "make",
+    "sequence",
+    "width",
+    "height",
+    "fps",
+    "embedded_size_bytes",
+    "actual_size_bytes",
+    "metadata_status",
+    "metadata_error",
+    "create_date_raw",
+    "track_create_date_raw",
+    "media_create_date_raw",
+    "datetime_original_raw",
+    "subsec_datetime_original_raw",
+    "subsec_create_date_raw",
+    "file_modify_date_raw",
+    "file_create_date_raw",
+]
+
+MEDIA_MANIFEST_REQUIRED_COLUMNS = frozenset(
+    {
+        "media_type",
+        "stream_id",
+        "path",
+        "relative_path",
+        "media_id",
+        "start_local",
+        "start_epoch_ms",
+    }
+)
+
+MEDIA_MANIFEST_PHOTO_REQUIRED_COLUMNS = frozenset(
+    set(MEDIA_MANIFEST_REQUIRED_COLUMNS)
+    | {"photo_id", "capture_time_local", "capture_subsec", "photo_order_index"}
+)
+
+MEDIA_MANIFEST_VIDEO_REQUIRED_COLUMNS = frozenset(
+    set(MEDIA_MANIFEST_REQUIRED_COLUMNS)
+    | {"end_local", "end_epoch_ms", "duration_seconds", "width", "height", "fps"}
+)
+
 
 def validate_required_columns(
     name: str,
