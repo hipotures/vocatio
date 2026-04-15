@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import argparse
 import re
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence
 
 from rich.console import Console
 from rich.progress import (
@@ -18,10 +19,14 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from lib.image_pipeline_contracts import MEDIA_MANIFEST_HEADERS
+from lib.photo_time_order import pick_capture_time_parts
+
 
 console = Console()
 DAY_PATTERN = re.compile(r"^\d{8}$")
 STREAM_PATTERN = re.compile(r"^(?P<prefix>[pv])-(?P<device>[A-Za-z0-9._-]+)$")
+PHOTO_FALLBACK_SORT_DT = datetime.max
 
 
 def positive_int_arg(value: str) -> int:
@@ -83,6 +88,84 @@ def build_progress_columns() -> tuple[object, ...]:
         TimeRemainingColumn(),
         TimeElapsedColumn(),
     )
+
+
+def empty_media_row() -> Dict[str, str]:
+    return {header: "" for header in MEDIA_MANIFEST_HEADERS}
+
+
+def metadata_text(metadata: Optional[Mapping[str, object]], key: str) -> str:
+    if metadata is None:
+        return ""
+    return str(metadata.get(key) or "")
+
+
+def build_photo_manifest_entry(
+    day_dir: Path,
+    stream_id: str,
+    device: str,
+    path: Path,
+    metadata: Optional[Mapping[str, object]],
+) -> tuple[tuple[int, datetime, str, str], Dict[str, str]]:
+    relative_path = path.relative_to(day_dir).as_posix()
+    source_dir = day_dir / stream_id
+    source_rel_dir = source_dir.relative_to(day_dir).as_posix()
+    row = empty_media_row()
+    row.update(
+        {
+            "day": day_dir.name,
+            "stream_id": stream_id,
+            "device": device,
+            "media_type": "photo",
+            "source_root": str(day_dir),
+            "source_dir": str(source_dir),
+            "source_rel_dir": "" if source_rel_dir == "." else source_rel_dir,
+            "path": str(path),
+            "relative_path": relative_path,
+            "media_id": relative_path,
+            "photo_id": relative_path,
+            "filename": relative_path,
+            "extension": path.suffix.lower(),
+            "model": metadata_text(metadata, "Model"),
+            "make": metadata_text(metadata, "Make"),
+            "actual_size_bytes": str(path.stat().st_size),
+            "create_date_raw": metadata_text(metadata, "CreateDate"),
+            "datetime_original_raw": metadata_text(metadata, "DateTimeOriginal"),
+            "subsec_datetime_original_raw": metadata_text(metadata, "SubSecDateTimeOriginal"),
+            "subsec_create_date_raw": metadata_text(metadata, "SubSecCreateDate"),
+            "file_modify_date_raw": metadata_text(metadata, "FileModifyDate"),
+            "file_create_date_raw": metadata_text(metadata, "FileCreateDate"),
+        }
+    )
+    if metadata is None:
+        row["metadata_status"] = "error"
+        row["metadata_error"] = "Missing metadata"
+        return (1, PHOTO_FALLBACK_SORT_DT, "", relative_path), row
+
+    try:
+        time_parts = pick_capture_time_parts(metadata)
+    except ValueError as error:
+        row["metadata_status"] = "partial"
+        row["metadata_error"] = str(error)
+        return (1, PHOTO_FALLBACK_SORT_DT, "", relative_path), row
+
+    row.update(
+        {
+            "capture_time_local": time_parts.capture_time_local,
+            "capture_subsec": time_parts.capture_subsec,
+            "start_local": time_parts.start_local,
+            "start_epoch_ms": time_parts.start_epoch_ms,
+            "timestamp_source": time_parts.timestamp_source,
+            "metadata_status": "ok",
+            "metadata_error": "",
+        }
+    )
+    return (0, time_parts.sort_dt, row["capture_subsec"], relative_path), row
+
+
+def assign_photo_order_indexes(rows: Sequence[Dict[str, str]]) -> None:
+    for index, row in enumerate(rows):
+        row["photo_order_index"] = str(index)
 
 
 def detect_streams(day_dir: Path) -> Dict[str, Dict[str, str]]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
 
 def load_module(module_name: str, relative_path: str):
@@ -59,6 +61,109 @@ class ExportMediaCliTests(unittest.TestCase):
         self.assertEqual(sorted(export_media.filter_streams_by_media_types(streams, "all")), ["p-a7r5", "v-gh7"])
         self.assertEqual(sorted(export_media.filter_streams_by_media_types(streams, "photo")), ["p-a7r5"])
         self.assertEqual(sorted(export_media.filter_streams_by_media_types(streams, "video")), ["v-gh7"])
+
+    def test_build_photo_manifest_entry_populates_image_only_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            stream_dir = day_dir / "p-a7r5"
+            stream_dir.mkdir(parents=True)
+            photo_path = stream_dir / "A0001.ARW"
+            photo_path.write_bytes(b"photo-bytes")
+
+            sort_key, row = export_media.build_photo_manifest_entry(
+                day_dir=day_dir,
+                stream_id="p-a7r5",
+                device="a7r5",
+                path=photo_path,
+                metadata={
+                    "SubSecDateTimeOriginal": "2026:03:23 10:00:00.123+02:00",
+                    "CreateDate": "2026:03:23 10:00:00+02:00",
+                    "Model": "ILCE-7RM5",
+                    "Make": "Sony",
+                    "FileModifyDate": "2026:03:23 10:01:00+02:00",
+                    "FileCreateDate": "2026:03:23 10:02:00+02:00",
+                },
+            )
+
+            self.assertEqual(list(row.keys()), export_media.MEDIA_MANIFEST_HEADERS)
+            self.assertEqual(sort_key[-1], "p-a7r5/A0001.ARW")
+            self.assertEqual(row["day"], "20260323")
+            self.assertEqual(row["stream_id"], "p-a7r5")
+            self.assertEqual(row["device"], "a7r5")
+            self.assertEqual(row["media_type"], "photo")
+            self.assertEqual(row["source_root"], str(day_dir))
+            self.assertEqual(row["source_dir"], str(stream_dir))
+            self.assertEqual(row["source_rel_dir"], "p-a7r5")
+            self.assertEqual(row["path"], str(photo_path))
+            self.assertEqual(row["relative_path"], "p-a7r5/A0001.ARW")
+            self.assertEqual(row["media_id"], "p-a7r5/A0001.ARW")
+            self.assertEqual(row["photo_id"], "p-a7r5/A0001.ARW")
+            self.assertEqual(row["filename"], "p-a7r5/A0001.ARW")
+            self.assertEqual(row["extension"], ".arw")
+            self.assertEqual(row["capture_time_local"], "2026-03-23T10:00:00")
+            self.assertEqual(row["capture_subsec"], "123")
+            self.assertEqual(row["photo_order_index"], "")
+            self.assertEqual(row["start_local"], "2026-03-23T10:00:00.123")
+            self.assertEqual(row["start_epoch_ms"], "1774252800123")
+            self.assertEqual(row["timestamp_source"], "subsec_datetime_original")
+            self.assertEqual(row["model"], "ILCE-7RM5")
+            self.assertEqual(row["make"], "Sony")
+            self.assertEqual(row["actual_size_bytes"], str(photo_path.stat().st_size))
+            self.assertEqual(row["metadata_status"], "ok")
+            self.assertEqual(row["metadata_error"], "")
+            self.assertEqual(row["end_local"], "")
+            self.assertEqual(row["end_epoch_ms"], "")
+            self.assertEqual(row["duration_seconds"], "")
+            self.assertEqual(row["width"], "")
+            self.assertEqual(row["height"], "")
+            self.assertEqual(row["fps"], "")
+            self.assertEqual(row["embedded_size_bytes"], "")
+            self.assertEqual(row["track_create_date_raw"], "")
+            self.assertEqual(row["media_create_date_raw"], "")
+
+    def test_build_photo_manifest_entry_keeps_row_when_metadata_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            stream_dir = day_dir / "p-a7r5"
+            stream_dir.mkdir(parents=True)
+            photo_path = stream_dir / "missing.jpg"
+            photo_path.write_bytes(b"x")
+
+            sort_key, row = export_media.build_photo_manifest_entry(
+                day_dir=day_dir,
+                stream_id="p-a7r5",
+                device="a7r5",
+                path=photo_path,
+                metadata=None,
+            )
+
+            self.assertEqual(list(row.keys()), export_media.MEDIA_MANIFEST_HEADERS)
+            self.assertEqual(sort_key[-1], "p-a7r5/missing.jpg")
+            self.assertEqual(row["relative_path"], "p-a7r5/missing.jpg")
+            self.assertEqual(row["media_id"], "p-a7r5/missing.jpg")
+            self.assertEqual(row["photo_id"], "p-a7r5/missing.jpg")
+            self.assertEqual(row["capture_time_local"], "")
+            self.assertEqual(row["capture_subsec"], "")
+            self.assertEqual(row["start_local"], "")
+            self.assertEqual(row["start_epoch_ms"], "")
+            self.assertEqual(row["timestamp_source"], "")
+            self.assertEqual(row["metadata_status"], "error")
+            self.assertEqual(row["metadata_error"], "Missing metadata")
+            self.assertEqual(row["actual_size_bytes"], "1")
+
+    def test_assign_photo_order_indexes_sets_dense_order(self) -> None:
+        rows = [
+            {"relative_path": "p-a7r5/c.jpg", "photo_order_index": ""},
+            {"relative_path": "p-a7r5/a.jpg", "photo_order_index": "99"},
+            {"relative_path": "p-a7r5/b.jpg", "photo_order_index": ""},
+        ]
+
+        export_media.assign_photo_order_indexes(rows)
+
+        self.assertEqual(
+            [row["photo_order_index"] for row in rows],
+            ["0", "1", "2"],
+        )
 
     def test_main_list_targets_prints_selected_streams_and_returns_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
