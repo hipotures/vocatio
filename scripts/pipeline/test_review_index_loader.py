@@ -369,6 +369,109 @@ class ReviewIndexLoaderTests(unittest.TestCase):
 
             self.assertIn("day/workspace_dir mismatch", str(ctx.exception))
 
+    def test_load_review_index_accepts_image_only_external_workspace_when_day_dir_is_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            day_dir = tmp_path / "20260323"
+            day_dir.mkdir(parents=True)
+            workspace_dir = tmp_path / "external-workspace"
+            workspace_dir.mkdir(parents=True)
+            source_path = day_dir / "cam_a" / "IMG_0001.ARW"
+            proxy_path = workspace_dir / "proxy_jpg" / "cam_a" / "IMG_0001.jpg"
+            source_path.parent.mkdir(parents=True)
+            proxy_path.parent.mkdir(parents=True)
+            source_path.write_bytes(b"raw")
+            proxy_path.write_bytes(b"jpg")
+
+            payload = {
+                "day": day_dir.name,
+                "workspace_dir": str(workspace_dir),
+                "performance_count": 1,
+                "photo_count": 1,
+                "source_mode": contracts.SOURCE_MODE_IMAGE_ONLY_V1,
+                "performances": [
+                    {
+                        "performance_number": "101",
+                        "photos": [
+                            {
+                                "relative_path": "cam_a/IMG_0001.ARW",
+                                "source_path": "cam_a/IMG_0001.ARW",
+                                "proxy_path": "proxy_jpg/cam_a/IMG_0001.jpg",
+                                "photo_start_local": "2026-03-23 10:00:00",
+                                "assignment_status": "review",
+                                "assignment_reason": "boundary_score",
+                                "seconds_to_nearest_boundary": "12.5",
+                                "stream_id": "p-a7r5",
+                                "device": "A7R5",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            normalized = review_index_loader.load_review_index(
+                self.write_payload(workspace_dir, payload),
+                day_dir=day_dir,
+            )
+
+            photo = normalized["performances"][0]["photos"][0]
+            self.assertEqual(normalized["workspace_dir"], str(workspace_dir.resolve()))
+            self.assertEqual(photo["source_path"], str(source_path.resolve()))
+            self.assertEqual(photo["proxy_path"], str(proxy_path.resolve()))
+
+    def test_load_review_index_accepts_image_only_source_paths_under_symlinked_stream_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            day_dir = tmp_path / "20250325"
+            day_dir.mkdir(parents=True)
+            source_root = tmp_path / "20250325DWC"
+            source_root.mkdir(parents=True)
+            stream_link = day_dir / "p-a7r5"
+            stream_link.symlink_to(source_root, target_is_directory=True)
+            workspace_dir = tmp_path / "workspace-target"
+            workspace_dir.mkdir(parents=True)
+            source_path = source_root / "20250325_085305_001_28217192.jpg"
+            proxy_path = workspace_dir / "embedded_jpg" / "preview" / "p-a7r5" / "20250325_085305_001_28217192.jpg.jpg"
+            source_path.write_bytes(b"raw")
+            proxy_path.parent.mkdir(parents=True)
+            proxy_path.write_bytes(b"jpg")
+
+            payload = {
+                "day": day_dir.name,
+                "workspace_dir": str(workspace_dir),
+                "performance_count": 1,
+                "photo_count": 1,
+                "source_mode": contracts.SOURCE_MODE_IMAGE_ONLY_V1,
+                "performances": [
+                    {
+                        "performance_number": "SEG0001",
+                        "photos": [
+                            {
+                                "relative_path": "p-a7r5/20250325_085305_001_28217192.jpg",
+                                "source_path": "p-a7r5/20250325_085305_001_28217192.jpg",
+                                "proxy_path": "embedded_jpg/preview/p-a7r5/20250325_085305_001_28217192.jpg.jpg",
+                                "photo_start_local": "2025-03-25T08:53:05",
+                                "assignment_status": "assigned",
+                                "assignment_reason": "",
+                                "seconds_to_nearest_boundary": "",
+                                "stream_id": "p-a7r5",
+                                "device": "A7R5",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            normalized = review_index_loader.load_review_index(
+                self.write_payload(workspace_dir, payload),
+                day_dir=day_dir,
+            )
+
+            photo = normalized["performances"][0]["photos"][0]
+            self.assertEqual(photo["relative_path"], "p-a7r5/20250325_085305_001_28217192.jpg")
+            self.assertEqual(photo["source_path"], str(source_path.resolve()))
+            self.assertEqual(photo["proxy_path"], str(proxy_path.resolve()))
+
     def test_load_review_index_allows_legacy_external_workspace_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

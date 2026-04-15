@@ -2217,7 +2217,7 @@ def main() -> int:
         state_path = workspace_dir / state_path
 
     try:
-        payload = review_index_loader.load_review_index(index_path)
+        payload = review_index_loader.load_review_index(index_path, day_dir=day_dir)
     except ValueError as error:
         print(f"Error: {error}")
         return 1

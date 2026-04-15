@@ -26,7 +26,7 @@ def validate_required_fields(name: str, required: Iterable[str], payload: Mappin
         raise ValueError(f"{name} missing required fields: {', '.join(missing)}")
 
 
-def load_review_index(index_path: Path | str) -> dict[str, Any]:
+def load_review_index(index_path: Path | str, *, day_dir: Path | str | None = None) -> dict[str, Any]:
     index_file_path = Path(index_path).expanduser()
     if not index_file_path.is_absolute():
         cwd_path = Path.cwd()
@@ -43,7 +43,8 @@ def load_review_index(index_path: Path | str) -> dict[str, Any]:
     validate_required_fields("review index payload", REQUIRED_TOP_LEVEL_FIELDS, payload)
 
     source_mode = str(payload.get("source_mode", "") or "").strip()
-    day_dir, workspace_dir = resolve_day_and_workspace_dir(payload, index_file_path, source_mode)
+    resolved_day_dir = None if day_dir is None else Path(day_dir).expanduser().resolve()
+    day_dir, workspace_dir = resolve_day_and_workspace_dir(payload, index_file_path, source_mode, resolved_day_dir)
     performances = payload["performances"]
     if not isinstance(performances, list):
         raise ValueError("review index payload field 'performances' must be a list")
@@ -88,7 +89,12 @@ def load_review_index(index_path: Path | str) -> dict[str, Any]:
     return normalized_payload
 
 
-def resolve_day_and_workspace_dir(payload: Mapping[str, Any], index_path: Path, source_mode: str) -> tuple[Path, Path]:
+def resolve_day_and_workspace_dir(
+    payload: Mapping[str, Any],
+    index_path: Path,
+    source_mode: str,
+    day_dir: Path | None = None,
+) -> tuple[Path, Path]:
     day = str(payload.get("day", "") or "").strip()
     if not day:
         raise ValueError("review index payload field 'day' must not be empty")
@@ -100,6 +106,13 @@ def resolve_day_and_workspace_dir(payload: Mapping[str, Any], index_path: Path, 
         relative_workspace = normalize_relative_workspace_dir(workspace_value)
         declared_workspace_dir = index_path.parent / relative_workspace
     if source_mode == SOURCE_MODE_IMAGE_ONLY_V1:
+        if day_dir is not None:
+            if day_dir.name != day:
+                raise ValueError(
+                    "review index payload day/day_dir mismatch: "
+                    f"day={day} day_dir={day_dir}"
+                )
+            return day_dir, declared_workspace_dir.resolve()
         declared_day_dir = declared_workspace_dir.parent
         if declared_day_dir.name != day:
             raise ValueError(
@@ -295,21 +308,20 @@ def normalize_photo(
 def normalize_relative_path(value: str, field_name: str, root_dir: Path) -> Path:
     if not value:
         raise ValueError(f"{field_name} must not be empty")
-    path = Path(value)
-    if path.is_absolute():
+    candidate = PurePosixPath(value)
+    if candidate.is_absolute():
         raise ValueError(f"{field_name} must be relative under {root_dir}: {value}")
-    resolved = (root_dir / path).resolve()
-    try:
-        resolved.relative_to(root_dir)
-    except ValueError as error:
-        raise ValueError(f"{field_name} must stay under {root_dir}: {value}") from error
-    return Path(resolved.relative_to(root_dir))
+    normalized_parts: list[str] = []
+    for part in candidate.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            raise ValueError(f"{field_name} must stay under {root_dir}: {value}")
+        normalized_parts.append(part)
+    if not normalized_parts:
+        raise ValueError(f"{field_name} must not be empty")
+    return Path(*normalized_parts)
 
 
 def resolve_runtime_path(root_dir: Path, relative_path: Path, field_name: str) -> Path:
-    resolved = (root_dir / relative_path).resolve()
-    try:
-        resolved.relative_to(root_dir)
-    except ValueError as error:
-        raise ValueError(f"{field_name} must stay under {root_dir}: {relative_path.as_posix()}") from error
-    return resolved
+    return (root_dir / relative_path).resolve()
