@@ -26,6 +26,7 @@ from rich.table import Table
 from rich.text import Text
 
 
+from lib.workspace_dir import resolve_workspace_dir
 def ensure_venv_python() -> None:
     if os.environ.get("SCRIPTOZA_VENV_BOOTSTRAPPED") == "1":
         return
@@ -391,7 +392,7 @@ def main() -> int:
         console.print(f"[red]Error: {args.day_dir} is not a directory.[/red]")
         return 1
 
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     merged_csv = Path(args.merged_csv).resolve() if args.merged_csv else workspace_dir / "merged_video_synced.csv"
     sync_map_path = Path(args.sync_map).resolve() if args.sync_map else workspace_dir / "sync_map.csv"
     output_root = Path(args.output_root).resolve() if args.output_root else workspace_dir / "transcripts"

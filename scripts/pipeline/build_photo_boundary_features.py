@@ -26,6 +26,7 @@ from lib.image_pipeline_contracts import PHOTO_MANIFEST_REQUIRED_COLUMNS, valida
 from lib.pipeline_io import atomic_write_csv
 
 
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 PHOTO_QUALITY_FILENAME = "photo_quality.csv"
@@ -519,7 +520,7 @@ def main() -> int:
     day_dir = Path(args.day_dir).resolve()
     if not day_dir.exists() or not day_dir.is_dir():
         raise SystemExit(f"Day directory does not exist: {day_dir}")
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     manifest_csv = resolve_manifest_path(workspace_dir, args.manifest_csv)
     quality_csv = resolve_quality_path(workspace_dir, args.quality_csv)
     features_dir = resolve_features_dir(workspace_dir, args.features_dir)

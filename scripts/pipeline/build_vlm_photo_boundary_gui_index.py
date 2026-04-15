@@ -13,6 +13,7 @@ import probe_vlm_photo_boundaries as probe
 from lib.pipeline_io import atomic_write_json
 
 
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 DEFAULT_OUTPUT_FILENAME = probe.DEFAULT_OUTPUT_FILENAME
@@ -117,7 +118,7 @@ def main() -> int:
     day_dir = Path(args.day_dir).resolve()
     if not day_dir.exists() or not day_dir.is_dir():
         raise SystemExit(f"Day directory does not exist: {day_dir}")
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     output_csv = probe.resolve_path(workspace_dir, args.output_csv)
     gui_index_output = probe.resolve_path(workspace_dir, args.gui_index_output)
     if not output_csv.exists():

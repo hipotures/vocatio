@@ -27,6 +27,7 @@ from rich.table import Table
 
 import copy_reviewed_set_assets as reviewed_sets
 import demo_semantic_announcement_classifier as demo
+from lib.workspace_dir import resolve_workspace_dir
 
 
 console = Console()
@@ -405,9 +406,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_day_workspace(day_dir: Path, override_workspace: Optional[str]) -> Path:
-    if override_workspace:
-        return Path(override_workspace).resolve()
-    return day_dir / "_workspace"
+    return resolve_workspace_dir(day_dir, override_workspace)
 
 
 def pick_existing_file(workspace_dir: Path, preferred: Sequence[str], fallback: Optional[str] = None) -> Optional[Path]:

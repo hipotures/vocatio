@@ -34,6 +34,7 @@ from lib.photo_pre_model_annotations import (
 )
 
 
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 PHOTO_EMBEDDED_MANIFEST_FILENAME = "photo_embedded_manifest.csv"
@@ -1720,7 +1721,7 @@ def main() -> int:
     day_dir = Path(args.day_dir).resolve()
     if not day_dir.exists() or not day_dir.is_dir():
         raise SystemExit(f"Day directory does not exist: {day_dir}")
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     embedded_manifest_csv = resolve_path(workspace_dir, args.embedded_manifest_csv)
     photo_manifest_csv = resolve_path(workspace_dir, args.photo_manifest_csv)
     output_csv = resolve_path(workspace_dir, args.output)

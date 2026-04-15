@@ -26,6 +26,7 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 SUPPORTED_FORMATS = {".arw", ".cr3", ".hif", ".heif", ".jpg", ".jpeg", ".nef"}
@@ -512,7 +513,7 @@ def main() -> int:
         console.print(f"[red]Error: {args.day_dir} is not a directory.[/red]")
         return 1
 
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     output_root = Path(args.output_root).resolve() if args.output_root else workspace_dir / "proxy_jpg"
     manifest_path = Path(args.manifest)
     if not manifest_path.is_absolute():

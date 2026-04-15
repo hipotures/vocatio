@@ -21,6 +21,7 @@ from rich.progress import (
 from rich.table import Table
 
 
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 DAY_PATTERN = re.compile(r"^\d{8}$")
@@ -214,7 +215,7 @@ def main() -> int:
         console.print(f"[red]Error: expected a day directory like 20260323, got {day_dir.name}.[/red]")
         return 1
 
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     if not workspace_dir.exists() or not workspace_dir.is_dir():
         console.print(f"[red]Error: workspace not found: {workspace_dir}[/red]")
         return 1

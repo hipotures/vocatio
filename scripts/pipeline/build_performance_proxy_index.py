@@ -9,6 +9,7 @@ from typing import Dict, List
 from rich.console import Console
 from rich.table import Table
 
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 
@@ -77,7 +78,7 @@ def main() -> int:
         console.print(f"[red]Error: {args.day_dir} is not a directory.[/red]")
         return 1
 
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     assignments_csv = Path(args.assignments_csv).resolve() if args.assignments_csv else workspace_dir / "photo_assignments.csv"
     timeline_csv = Path(args.timeline_csv).resolve() if args.timeline_csv else workspace_dir / "performance_timeline.csv"
     announcements_csv = (

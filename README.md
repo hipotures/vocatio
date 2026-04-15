@@ -62,7 +62,17 @@ By default, generated artifacts are written to:
 DAY/_workspace
 ```
 
-You can override this with `--workspace-dir`.
+Workspace resolution precedence is:
+
+1. `--workspace-dir`
+2. `DAY/.vocatio` with `WORKSPACE_DIR=...`
+3. `DAY/_workspace`
+
+Example `DAY/.vocatio`:
+
+```bash
+WORKSPACE_DIR=/fast/local/vocatio/20250324
+```
 
 ## Unified Media Export
 

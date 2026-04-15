@@ -20,6 +20,7 @@ from rich.progress import (
 from rich.table import Table
 
 
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 DAY_PATTERN = re.compile(r"^\d{8}$")
@@ -519,7 +520,7 @@ def main() -> int:
         console.print(f"[red]Error: expected a day directory like 20260323, got {day_dir.name}.[/red]")
         return 1
 
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     timeline_csv = Path(args.timeline_csv).resolve() if args.timeline_csv else workspace_dir / "performance_timeline.csv"
     output_assignments = Path(args.output_assignments)
     output_review = Path(args.output_review)

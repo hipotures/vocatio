@@ -43,6 +43,7 @@ from lib.photo_pre_model_annotations import (
 from lib.pipeline_io import atomic_write_json
 
 
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 DEFAULT_PHOTO_INDEX = "photo_embedded_manifest.csv"
@@ -267,7 +268,7 @@ def drain_completed_futures(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     day_dir = Path(args.day_dir).resolve()
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     index_path = resolve_path(workspace_dir, args.photo_index)
     output_dir = resolve_path(workspace_dir, args.output_dir)
     candidate_entries = load_candidate_entries(

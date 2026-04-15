@@ -19,6 +19,7 @@ from lib.caption_scene_common import (
 )
 
 
+from lib.workspace_dir import resolve_workspace_dir
 DEFAULT_MODEL_NAME = "microsoft/Florence-2-base-ft"
 DEFAULT_MAX_NEW_TOKENS = 96
 
@@ -41,7 +42,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     day_dir = Path(args.day_dir).resolve()
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     index_path = resolve_path(workspace_dir, args.photo_index)
     output_dir = Path(args.output_dir).resolve()
     return run_caption_cli(

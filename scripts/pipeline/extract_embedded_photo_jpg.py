@@ -25,6 +25,7 @@ from rich.progress import (
 )
 
 from lib.image_pipeline_contracts import PHOTO_MANIFEST_REQUIRED_COLUMNS, validate_required_columns
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 PHOTO_EXTENSIONS = {".arw", ".cr3", ".hif", ".heif", ".jpg", ".jpeg", ".nef"}
@@ -704,7 +705,7 @@ def main() -> int:
     day_dir = Path(args.day_dir).resolve()
     if not day_dir.exists() or not day_dir.is_dir():
         raise SystemExit(f"Day directory does not exist: {day_dir}")
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     output_path = resolve_output_path(workspace_dir, args.output)
     row_count = extract_embedded_photo_jpg(
         day_dir=day_dir,

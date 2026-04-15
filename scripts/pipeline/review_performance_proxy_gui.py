@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from lib.workspace_dir import resolve_workspace_dir
 try:
     from lib import review_index_loader
 except ModuleNotFoundError:
@@ -2187,7 +2188,7 @@ def main() -> int:
         print(f"Error: {args.day_dir} is not a directory.")
         return 1
 
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
 
     index_path = Path(args.index)
     if not index_path.is_absolute():

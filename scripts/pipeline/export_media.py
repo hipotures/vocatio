@@ -39,6 +39,7 @@ from lib.photo_time_order import (
     parse_exif_datetime,
     pick_capture_time_parts,
 )
+from lib.workspace_dir import resolve_workspace_dir as resolve_configured_workspace_dir
 
 
 console = Console()
@@ -604,9 +605,7 @@ def metadata_by_source_path(items: Iterable[Mapping[str, object]]) -> Dict[str, 
 
 
 def resolve_workspace_dir(day_dir: Path, workspace_value: Optional[str]) -> Path:
-    if workspace_value:
-        return Path(workspace_value).resolve()
-    return day_dir / "_workspace"
+    return resolve_configured_workspace_dir(day_dir, workspace_value)
 
 
 def resolve_output_path(workspace_dir: Path, output_value: str) -> Path:

@@ -26,6 +26,7 @@ from rich.progress import (
 from rich.table import Table
 
 
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -1033,7 +1034,7 @@ def prepare_windows(args: argparse.Namespace) -> int:
         console.print(f"[red]Error: expected a day directory like 20260324, got {day_dir.name}.[/red]")
         return 1
 
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     merged_csv = Path(args.merged_csv).resolve() if args.merged_csv else workspace_dir / "merged_video_synced.csv"
     transcripts_root = Path(args.transcripts_root).resolve() if args.transcripts_root else workspace_dir / "transcripts"
     summary_output = resolve_output_path(workspace_dir, args.summary_output)
@@ -1442,7 +1443,7 @@ def classify_windows(args: argparse.Namespace) -> int:
         console.print(f"[red]Error: expected a day directory like 20260324, got {day_dir.name}.[/red]")
         return 1
 
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     input_jsonl = resolve_output_path(workspace_dir, args.input_jsonl)
     output_jsonl = resolve_output_path(workspace_dir, args.output_jsonl)
     output_csv = resolve_output_path(workspace_dir, args.output_csv)

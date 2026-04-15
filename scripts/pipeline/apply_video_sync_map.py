@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 DAY_PATTERN = re.compile(r"^\d{8}$")
@@ -191,7 +192,7 @@ def main() -> int:
         console.print(f"[red]Error: expected a day directory like 20260323, got {day_dir.name}.[/red]")
         return 1
 
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     merged_csv = Path(args.merged_csv).resolve() if args.merged_csv else workspace_dir / "merged_video.csv"
     sync_map_path = Path(args.sync_map).resolve() if args.sync_map else workspace_dir / "sync_map.csv"
     if not merged_csv.exists():

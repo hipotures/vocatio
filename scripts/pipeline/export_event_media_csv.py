@@ -24,6 +24,7 @@ from rich.progress import (
 from rich.table import Table
 
 
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 PHOTO_EXTENSIONS = {".arw", ".cr3", ".hif", ".heif", ".jpg", ".jpeg", ".nef"}
@@ -432,7 +433,7 @@ def main() -> int:
         console.print(f"[red]Error: expected a day directory like 20260323, got {day_dir.name}.[/red]")
         return 1
 
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     day = day_dir.name
     streams = detect_streams(day_dir)
     if not streams:

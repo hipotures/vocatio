@@ -24,6 +24,7 @@ from rich.progress import (
 from rich.table import Table
 
 
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 PHOTO_GAP_THRESHOLD_SECONDS = 600
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -829,7 +830,7 @@ def main() -> int:
     day_dir = Path(args.day_dir).resolve()
     target_root = Path(args.target_dir).resolve()
     config_path = resolve_profile_path(args.config)
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     index_json = resolve_workspace_file(
         workspace_dir,
         args.index_json,

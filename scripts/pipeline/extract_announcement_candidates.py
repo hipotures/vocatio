@@ -22,6 +22,7 @@ from rich.progress import (
 from rich.table import Table
 
 
+from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 DAY_PATTERN = re.compile(r"^\d{8}$")
@@ -450,7 +451,7 @@ def main() -> int:
         console.print(f"[red]Error: expected a day directory like 20260323, got {day_dir.name}.[/red]")
         return 1
 
-    workspace_dir = Path(args.workspace_dir).resolve() if args.workspace_dir else day_dir / "_workspace"
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     merged_csv = Path(args.merged_csv).resolve() if args.merged_csv else workspace_dir / "merged_video_synced.csv"
     transcripts_root = Path(args.transcripts_root).resolve() if args.transcripts_root else workspace_dir / "transcripts"
     output_path = Path(args.output)
