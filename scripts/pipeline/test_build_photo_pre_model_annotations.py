@@ -6,7 +6,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
@@ -35,6 +34,39 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
         self.assertEqual(args.workers, 1)
         self.assertFalse(args.overwrite)
         self.assertEqual(args.output_dir, pre_model.DEFAULT_OUTPUT_DIRNAME)
+
+    def test_apply_vocatio_defaults_reads_premodel_values(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            day_dir = Path(tmp_dir) / "20260323"
+            day_dir.mkdir(parents=True)
+            (day_dir / ".vocatio").write_text(
+                "\n".join(
+                    [
+                        "PREMODEL_PROVIDER=llamacpp",
+                        "PREMODEL_BASE_URL=http://127.0.0.1:8003",
+                        "PREMODEL_MODEL=test-model",
+                        "PREMODEL_PHOTO_INDEX=photo_embedded_manifest.csv",
+                        "PREMODEL_IMAGE_COLUMN=thumb_path",
+                        "PREMODEL_OUTPUT_DIR=custom_annotations",
+                        "PREMODEL_MAX_OUTPUT_TOKENS=2048",
+                        "PREMODEL_TEMPERATURE=0.25",
+                        "PREMODEL_TIMEOUT_SECONDS=90",
+                        "PREMODEL_WORKERS=3",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = pre_model.parse_args([str(day_dir)])
+            args = pre_model.apply_vocatio_defaults(args, day_dir)
+            self.assertEqual(args.provider, "llamacpp")
+            self.assertEqual(args.base_url, "http://127.0.0.1:8003")
+            self.assertEqual(args.model_name, "test-model")
+            self.assertEqual(args.image_column, "thumb_path")
+            self.assertEqual(args.output_dir, "custom_annotations")
+            self.assertEqual(args.max_tokens, 2048)
+            self.assertEqual(args.temperature, 0.25)
+            self.assertEqual(args.timeout_seconds, 90.0)
+            self.assertEqual(args.workers, 3)
 
     def test_build_annotation_output_path_uses_relative_path_subdirectories(self):
         output_path = pre_model.build_annotation_output_path(

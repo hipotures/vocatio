@@ -43,7 +43,7 @@ from lib.photo_pre_model_annotations import (
 from lib.pipeline_io import atomic_write_json
 
 
-from lib.workspace_dir import resolve_workspace_dir
+from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
 console = Console()
 
 DEFAULT_PHOTO_INDEX = "photo_embedded_manifest.csv"
@@ -54,6 +54,7 @@ DEFAULT_MAX_TOKENS = 1024
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_WORKERS = 1
+DEFAULT_PROVIDER = "llamacpp"
 
 
 def build_progress_columns() -> tuple[object, ...]:
@@ -70,6 +71,12 @@ def build_progress_columns() -> tuple[object, ...]:
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build per-photo pre-model annotations for stage-event images.")
     parser.add_argument("day_dir", help="Path to a single day directory like /data/20260323")
+    parser.add_argument(
+        "--provider",
+        choices=("llamacpp", "ollama", "vllm"),
+        default=DEFAULT_PROVIDER,
+        help=f"Pre-model provider. Default: {DEFAULT_PROVIDER}",
+    )
     parser.add_argument(
         "--photo-index",
         default=DEFAULT_PHOTO_INDEX,
@@ -93,6 +100,40 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--workers", type=positive_int_arg, default=DEFAULT_WORKERS, help=f"Concurrent request workers. Default: {DEFAULT_WORKERS}")
     parser.add_argument("--overwrite", action="store_true", help="Rebuild existing annotation files instead of resuming.")
     return parser.parse_args(argv)
+
+
+def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.Namespace:
+    config = load_vocatio_config(day_dir)
+
+    def apply_string(attr: str, default_value: str, config_key: str) -> None:
+        if getattr(args, attr) == default_value:
+            configured = str(config.get(config_key, "") or "").strip()
+            if configured:
+                setattr(args, attr, configured)
+
+    def apply_int(attr: str, default_value: int, config_key: str) -> None:
+        if getattr(args, attr) == default_value:
+            configured = str(config.get(config_key, "") or "").strip()
+            if configured:
+                setattr(args, attr, positive_int_arg(configured))
+
+    def apply_float(attr: str, default_value: float, config_key: str) -> None:
+        if getattr(args, attr) == default_value:
+            configured = str(config.get(config_key, "") or "").strip()
+            if configured:
+                setattr(args, attr, float(configured))
+
+    apply_string("provider", DEFAULT_PROVIDER, "PREMODEL_PROVIDER")
+    apply_string("photo_index", DEFAULT_PHOTO_INDEX, "PREMODEL_PHOTO_INDEX")
+    apply_string("image_column", DEFAULT_IMAGE_COLUMN, "PREMODEL_IMAGE_COLUMN")
+    apply_string("output_dir", DEFAULT_OUTPUT_DIRNAME, "PREMODEL_OUTPUT_DIR")
+    apply_string("base_url", DEFAULT_BASE_URL, "PREMODEL_BASE_URL")
+    apply_string("model_name", DEFAULT_MODEL_NAME, "PREMODEL_MODEL")
+    apply_int("max_tokens", DEFAULT_MAX_TOKENS, "PREMODEL_MAX_OUTPUT_TOKENS")
+    apply_float("temperature", DEFAULT_TEMPERATURE, "PREMODEL_TEMPERATURE")
+    apply_float("timeout_seconds", DEFAULT_TIMEOUT_SECONDS, "PREMODEL_TIMEOUT_SECONDS")
+    apply_int("workers", DEFAULT_WORKERS, "PREMODEL_WORKERS")
+    return args
 
 
 def load_candidate_entries(
@@ -268,6 +309,11 @@ def drain_completed_futures(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     day_dir = Path(args.day_dir).resolve()
+    args = apply_vocatio_defaults(args, day_dir)
+    if args.provider != "llamacpp":
+        raise SystemExit(
+            f"Unsupported pre-model provider for build_photo_pre_model_annotations.py: {args.provider}"
+        )
     workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     index_path = resolve_path(workspace_dir, args.photo_index)
     output_dir = resolve_path(workspace_dir, args.output_dir)

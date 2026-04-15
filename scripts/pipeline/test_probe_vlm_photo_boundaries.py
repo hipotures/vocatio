@@ -7,6 +7,8 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+from lib.image_pipeline_contracts import MEDIA_MANIFEST_HEADERS
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
@@ -69,6 +71,59 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         args = probe.parse_args(["/tmp/day"])
         self.assertEqual(args.boundary_gap_seconds, 10)
         self.assertEqual(args.json_validation_mode, "strict")
+        self.assertEqual(args.photo_manifest_csv, "media_manifest.csv")
+
+    def test_apply_vocatio_defaults_reads_vlm_values(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            day_dir = Path(tmp_dir) / "20260323"
+            day_dir.mkdir(parents=True)
+            (day_dir / ".vocatio").write_text(
+                "\n".join(
+                    [
+                        "VLM_PROVIDER=ollama",
+                        "VLM_BASE_URL=http://127.0.0.1:11435",
+                        "VLM_MODEL=test-model",
+                        "VLM_PHOTO_MANIFEST_CSV=media_manifest.csv",
+                        "VLM_EMBEDDED_MANIFEST_CSV=photo_embedded_manifest.csv",
+                        "VLM_IMAGE_VARIANT=thumb",
+                        "VLM_WINDOW_SIZE=7",
+                        "VLM_OVERLAP=3",
+                        "VLM_BOUNDARY_GAP_SECONDS=20",
+                        "VLM_CONTEXT_TOKENS=8192",
+                        "VLM_MAX_OUTPUT_TOKENS=256",
+                        "VLM_KEEP_ALIVE=30m",
+                        "VLM_TIMEOUT_SECONDS=180",
+                        "VLM_TEMPERATURE=0.15",
+                        "VLM_REASONING_LEVEL=false",
+                        "VLM_RESPONSE_SCHEMA_MODE=on",
+                        "VLM_JSON_VALIDATION_MODE=relaxed",
+                        "VLM_PHOTO_PRE_MODEL_DIR=custom_pre_model",
+                        "VLM_DUMP_DEBUG_DIR=/tmp/vlm-debug",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = probe.parse_args([str(day_dir)])
+            args = probe.apply_vocatio_defaults(args, day_dir)
+            self.assertEqual(args.provider, "ollama")
+            self.assertEqual(args.ollama_base_url, "http://127.0.0.1:11435")
+            self.assertEqual(args.model, "test-model")
+            self.assertEqual(args.photo_manifest_csv, "media_manifest.csv")
+            self.assertEqual(args.embedded_manifest_csv, "photo_embedded_manifest.csv")
+            self.assertEqual(args.image_variant, "thumb")
+            self.assertEqual(args.window_size, 7)
+            self.assertEqual(args.overlap, 3)
+            self.assertEqual(args.boundary_gap_seconds, 20)
+            self.assertEqual(args.ollama_num_ctx, 8192)
+            self.assertEqual(args.ollama_num_predict, 256)
+            self.assertEqual(args.ollama_keep_alive, "30m")
+            self.assertEqual(args.timeout_seconds, 180.0)
+            self.assertEqual(args.temperature, 0.15)
+            self.assertEqual(args.ollama_think, "false")
+            self.assertEqual(args.response_schema_mode, "on")
+            self.assertEqual(args.json_validation_mode, "relaxed")
+            self.assertEqual(args.photo_pre_model_dir, "custom_pre_model")
+            self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
 
     def test_build_response_schema_uses_boundary_after_frame_and_dynamic_notes(self):
         schema = probe.build_response_schema(window_size=3)
@@ -508,7 +563,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             preview_a.write_bytes(b"preview-a")
             preview_b.write_bytes(b"preview-b")
             embedded_manifest = workspace_dir / "photo_embedded_manifest.csv"
-            photo_manifest = workspace_dir / "photo_manifest.csv"
+            photo_manifest = workspace_dir / "media_manifest.csv"
             with embedded_manifest.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(
                     handle,
@@ -518,13 +573,33 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 writer.writerow({"relative_path": "cam/a.hif", "thumb_path": "embedded_jpg/thumb/cam/a.jpg", "preview_path": "embedded_jpg/preview/cam/a.jpg"})
                 writer.writerow({"relative_path": "cam/b.hif", "thumb_path": "embedded_jpg/thumb/cam/b.jpg", "preview_path": "embedded_jpg/preview/cam/b.jpg"})
             with photo_manifest.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(
-                    handle,
-                    fieldnames=["relative_path", "start_epoch_ms", "start_local", "photo_order_index"],
-                )
+                writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
                 writer.writeheader()
-                writer.writerow({"relative_path": "cam/a.hif", "start_epoch_ms": "1000", "start_local": "2026-03-23T10:00:00", "photo_order_index": "0"})
-                writer.writerow({"relative_path": "cam/b.hif", "start_epoch_ms": "2000", "start_local": "2026-03-23T10:00:01", "photo_order_index": "1"})
+                for index, name in enumerate(("a", "b")):
+                    writer.writerow(
+                        {
+                            "day": day_dir.name,
+                            "stream_id": "cam",
+                            "device": "cam",
+                            "media_type": "photo",
+                            "source_root": str(day_dir),
+                            "source_dir": str(day_dir / "cam"),
+                            "source_rel_dir": "cam",
+                            "path": str(day_dir / "cam" / f"{name}.hif"),
+                            "relative_path": f"cam/{name}.hif",
+                            "media_id": f"cam/{name}.hif",
+                            "photo_id": f"cam/{name}.hif",
+                            "filename": f"{name}.hif",
+                            "extension": ".hif",
+                            "capture_time_local": f"2026-03-23T10:00:0{index}",
+                            "capture_subsec": "000",
+                            "photo_order_index": str(index),
+                            "start_local": f"2026-03-23T10:00:0{index}",
+                            "start_epoch_ms": str(1000 + index * 1000),
+                            "timestamp_source": "test",
+                            "metadata_status": "ok",
+                        }
+                    )
             rows = probe.read_joined_rows(
                 workspace_dir=workspace_dir,
                 embedded_manifest_csv=embedded_manifest,
@@ -907,17 +982,33 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                             "preview_path": f"embedded_jpg/preview/cam/{name}.jpg",
                         }
                     )
-            photo_manifest_csv = workspace_dir / "photo_manifest.csv"
+            photo_manifest_csv = workspace_dir / "media_manifest.csv"
             with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["relative_path", "start_epoch_ms", "start_local", "photo_order_index"])
+                writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
                 writer.writeheader()
                 for index, name in enumerate(("a", "b", "c", "d", "e")):
                     writer.writerow(
                         {
+                            "day": day_dir.name,
+                            "stream_id": "cam",
+                            "device": "cam",
+                            "media_type": "photo",
+                            "source_root": str(day_dir),
+                            "source_dir": str(day_dir / "cam"),
+                            "source_rel_dir": "cam",
+                            "path": str(day_dir / "cam" / f"{name}.hif"),
                             "relative_path": f"cam/{name}.hif",
-                            "start_epoch_ms": str(index * 1000),
-                            "start_local": f"2026-03-23T10:00:0{index}",
+                            "media_id": f"cam/{name}.hif",
+                            "photo_id": f"cam/{name}.hif",
+                            "filename": f"{name}.hif",
+                            "extension": ".hif",
+                            "capture_time_local": f"2026-03-23T10:00:0{index}",
+                            "capture_subsec": "000",
                             "photo_order_index": str(index),
+                            "start_local": f"2026-03-23T10:00:0{index}",
+                            "start_epoch_ms": str(index * 1000),
+                            "timestamp_source": "test",
+                            "metadata_status": "ok",
                         }
                     )
             output_csv = workspace_dir / "vlm_boundary_test.csv"
@@ -1009,17 +1100,33 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                             "preview_path": f"embedded_jpg/preview/cam/{name}.jpg",
                         }
                     )
-            photo_manifest_csv = workspace_dir / "photo_manifest.csv"
+            photo_manifest_csv = workspace_dir / "media_manifest.csv"
             with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["relative_path", "start_epoch_ms", "start_local", "photo_order_index"])
+                writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
                 writer.writeheader()
                 for index, name in enumerate(("a", "b", "c", "d", "e", "f", "g", "h")):
                     writer.writerow(
                         {
+                            "day": day_dir.name,
+                            "stream_id": "cam",
+                            "device": "cam",
+                            "media_type": "photo",
+                            "source_root": str(day_dir),
+                            "source_dir": str(day_dir / "cam"),
+                            "source_rel_dir": "cam",
+                            "path": str(day_dir / "cam" / f"{name}.hif"),
                             "relative_path": f"cam/{name}.hif",
-                            "start_epoch_ms": str(index * 1000),
-                            "start_local": f"2026-03-23T10:00:{index:02d}",
+                            "media_id": f"cam/{name}.hif",
+                            "photo_id": f"cam/{name}.hif",
+                            "filename": f"{name}.hif",
+                            "extension": ".hif",
+                            "capture_time_local": f"2026-03-23T10:00:{index:02d}",
+                            "capture_subsec": "000",
                             "photo_order_index": str(index),
+                            "start_local": f"2026-03-23T10:00:{index:02d}",
+                            "start_epoch_ms": str(index * 1000),
+                            "timestamp_source": "test",
+                            "metadata_status": "ok",
                         }
                     )
             output_csv = workspace_dir / "vlm_boundary_test.csv"
@@ -1115,18 +1222,34 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                             "preview_path": f"embedded_jpg/preview/cam/{name}.jpg",
                         }
                     )
-            photo_manifest_csv = workspace_dir / "photo_manifest.csv"
+            photo_manifest_csv = workspace_dir / "media_manifest.csv"
             with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["relative_path", "start_epoch_ms", "start_local", "photo_order_index"])
+                writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
                 writer.writeheader()
                 epoch_values = (0, 1000, 2000, 3000, 20000, 21000, 22000, 23000)
                 for index, (name, epoch_ms) in enumerate(zip(names, epoch_values)):
                     writer.writerow(
                         {
+                            "day": day_dir.name,
+                            "stream_id": "cam",
+                            "device": "cam",
+                            "media_type": "photo",
+                            "source_root": str(day_dir),
+                            "source_dir": str(day_dir / "cam"),
+                            "source_rel_dir": "cam",
+                            "path": str(day_dir / "cam" / f"{name}.hif"),
                             "relative_path": f"cam/{name}.hif",
-                            "start_epoch_ms": str(epoch_ms),
-                            "start_local": f"2026-03-23T10:00:{index:02d}",
+                            "media_id": f"cam/{name}.hif",
+                            "photo_id": f"cam/{name}.hif",
+                            "filename": f"{name}.hif",
+                            "extension": ".hif",
+                            "capture_time_local": f"2026-03-23T10:00:{index:02d}",
+                            "capture_subsec": "000",
                             "photo_order_index": str(index),
+                            "start_local": f"2026-03-23T10:00:{index:02d}",
+                            "start_epoch_ms": str(epoch_ms),
+                            "timestamp_source": "test",
+                            "metadata_status": "ok",
                         }
                     )
             output_csv = workspace_dir / "vlm_boundary_test.csv"

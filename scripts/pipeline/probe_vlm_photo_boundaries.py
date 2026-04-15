@@ -26,6 +26,7 @@ from rich.progress import (
 )
 
 from lib.image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1
+from lib.media_manifest import read_media_manifest, select_photo_rows
 from lib.pipeline_io import atomic_write_json
 from lib.photo_pre_model_annotations import (
     DEFAULT_OUTPUT_DIRNAME as DEFAULT_PHOTO_PRE_MODEL_DIRNAME,
@@ -34,11 +35,11 @@ from lib.photo_pre_model_annotations import (
 )
 
 
-from lib.workspace_dir import resolve_workspace_dir
+from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
 console = Console()
 
 PHOTO_EMBEDDED_MANIFEST_FILENAME = "photo_embedded_manifest.csv"
-PHOTO_MANIFEST_FILENAME = "photo_manifest.csv"
+PHOTO_MANIFEST_FILENAME = "media_manifest.csv"
 PHOTO_BOUNDARY_SCORES_FILENAME = "photo_boundary_scores.csv"
 DEFAULT_OUTPUT_FILENAME = "vlm_boundary_test.csv"
 RUN_METADATA_DIRNAME = "vlm_runs"
@@ -56,9 +57,9 @@ DEFAULT_OLLAMA_THINK = "inherit"
 DEFAULT_RESPONSE_SCHEMA_MODE = "off"
 DEFAULT_JSON_VALIDATION_MODE = "strict"
 DEFAULT_PHOTO_PRE_MODEL_DIR = DEFAULT_PHOTO_PRE_MODEL_DIRNAME
+DEFAULT_PROVIDER = "ollama"
 SEGMENT_TYPES = ("dance", "ceremony", "audience", "rehearsal", "other")
 EMBEDDED_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "thumb_path", "preview_path"})
-PHOTO_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "start_epoch_ms", "start_local", "photo_order_index"})
 PHOTO_BOUNDARY_SCORES_REQUIRED_COLUMNS = frozenset(
     {
         "left_relative_path",
@@ -99,6 +100,7 @@ LEGACY_OUTPUT_HEADERS = [header for header in OUTPUT_HEADERS if header not in {"
 RESUME_CONFIG_KEYS = (
     "embedded_manifest_csv",
     "photo_manifest_csv",
+    "provider",
     "image_variant",
     "window_size",
     "overlap",
@@ -218,6 +220,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help=f"Maximum number of windows to evaluate. Default: {DEFAULT_MAX_BATCHES}",
     )
     parser.add_argument(
+        "--provider",
+        choices=("ollama", "llamacpp", "vllm"),
+        default=DEFAULT_PROVIDER,
+        help=f"VLM provider. Default: {DEFAULT_PROVIDER}",
+    )
+    parser.add_argument(
         "--model",
         default=DEFAULT_MODEL_NAME,
         help=f"Ollama model name. Default: {DEFAULT_MODEL_NAME}",
@@ -322,11 +330,65 @@ def read_embedded_manifest(path: Path) -> List[Dict[str, str]]:
 
 
 def read_photo_manifest(path: Path) -> Dict[str, Dict[str, str]]:
-    with path.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        validate_required_columns(path.name, reader.fieldnames, tuple(PHOTO_MANIFEST_REQUIRED_COLUMNS))
-        rows = [dict(row) for row in reader]
+    rows = select_photo_rows(read_media_manifest(path))
     return {str(row["relative_path"]): row for row in rows}
+
+
+def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.Namespace:
+    config = load_vocatio_config(day_dir)
+
+    def apply_string(attr: str, default_value: str, config_key: str) -> None:
+        if getattr(args, attr) == default_value:
+            configured = str(config.get(config_key, "") or "").strip()
+            if configured:
+                setattr(args, attr, configured)
+
+    def apply_optional_int(attr: str, config_key: str) -> None:
+        if getattr(args, attr) is None:
+            configured = str(config.get(config_key, "") or "").strip()
+            if configured:
+                setattr(args, attr, positive_int_arg(configured))
+
+    def apply_int(attr: str, default_value: int, config_key: str, parser) -> None:
+        if getattr(args, attr) == default_value:
+            configured = str(config.get(config_key, "") or "").strip()
+            if configured:
+                setattr(args, attr, parser(configured))
+
+    def apply_float(attr: str, default_value: float, config_key: str) -> None:
+        if getattr(args, attr) == default_value:
+            configured = str(config.get(config_key, "") or "").strip()
+            if configured:
+                setattr(args, attr, non_negative_float_arg(configured))
+
+    apply_string("provider", DEFAULT_PROVIDER, "VLM_PROVIDER")
+    apply_string("embedded_manifest_csv", PHOTO_EMBEDDED_MANIFEST_FILENAME, "VLM_EMBEDDED_MANIFEST_CSV")
+    apply_string("photo_manifest_csv", PHOTO_MANIFEST_FILENAME, "VLM_PHOTO_MANIFEST_CSV")
+    apply_string("image_variant", DEFAULT_IMAGE_VARIANT, "VLM_IMAGE_VARIANT")
+    apply_int("window_size", DEFAULT_WINDOW_SIZE, "VLM_WINDOW_SIZE", positive_int_arg)
+    apply_int("overlap", DEFAULT_OVERLAP, "VLM_OVERLAP", non_negative_int_arg)
+    apply_int(
+        "boundary_gap_seconds",
+        DEFAULT_BOUNDARY_GAP_SECONDS,
+        "VLM_BOUNDARY_GAP_SECONDS",
+        non_negative_int_arg,
+    )
+    apply_string("model", DEFAULT_MODEL_NAME, "VLM_MODEL")
+    apply_string("ollama_base_url", DEFAULT_OLLAMA_BASE_URL, "VLM_BASE_URL")
+    apply_optional_int("ollama_num_ctx", "VLM_CONTEXT_TOKENS")
+    apply_optional_int("ollama_num_predict", "VLM_MAX_OUTPUT_TOKENS")
+    apply_string("ollama_keep_alive", DEFAULT_OLLAMA_KEEP_ALIVE, "VLM_KEEP_ALIVE")
+    apply_float("timeout_seconds", DEFAULT_TIMEOUT_SECONDS, "VLM_TIMEOUT_SECONDS")
+    apply_float("temperature", DEFAULT_TEMPERATURE, "VLM_TEMPERATURE")
+    apply_string("ollama_think", DEFAULT_OLLAMA_THINK, "VLM_REASONING_LEVEL")
+    apply_string("response_schema_mode", DEFAULT_RESPONSE_SCHEMA_MODE, "VLM_RESPONSE_SCHEMA_MODE")
+    apply_string("json_validation_mode", DEFAULT_JSON_VALIDATION_MODE, "VLM_JSON_VALIDATION_MODE")
+    apply_string("photo_pre_model_dir", DEFAULT_PHOTO_PRE_MODEL_DIR, "VLM_PHOTO_PRE_MODEL_DIR")
+    if args.dump_debug_dir is None:
+        configured_dump_debug_dir = str(config.get("VLM_DUMP_DEBUG_DIR", "") or "").strip()
+        if configured_dump_debug_dir:
+            args.dump_debug_dir = configured_dump_debug_dir
+    return args
 
 
 def read_joined_rows(
@@ -1721,6 +1783,9 @@ def main() -> int:
     day_dir = Path(args.day_dir).resolve()
     if not day_dir.exists() or not day_dir.is_dir():
         raise SystemExit(f"Day directory does not exist: {day_dir}")
+    args = apply_vocatio_defaults(args, day_dir)
+    if args.provider != "ollama":
+        raise SystemExit(f"Unsupported VLM provider for probe_vlm_photo_boundaries.py: {args.provider}")
     workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     embedded_manifest_csv = resolve_path(workspace_dir, args.embedded_manifest_csv)
     photo_manifest_csv = resolve_path(workspace_dir, args.photo_manifest_csv)
@@ -1732,6 +1797,7 @@ def main() -> int:
     args_payload = {
         "day_dir": str(day_dir),
         "run_id": args.run_id,
+        "provider": args.provider,
         "workspace_dir": str(workspace_dir),
         "embedded_manifest_csv": str(embedded_manifest_csv),
         "photo_manifest_csv": str(photo_manifest_csv),
