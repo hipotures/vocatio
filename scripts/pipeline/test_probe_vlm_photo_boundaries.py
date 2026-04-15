@@ -73,6 +73,12 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(args.json_validation_mode, "strict")
         self.assertEqual(args.photo_manifest_csv, "media_manifest.csv")
 
+    def test_parse_args_accepts_all_batches_sentinels(self):
+        zero_args = probe.parse_args(["/tmp/day", "--max-batches", "0"])
+        minus_one_args = probe.parse_args(["/tmp/day", "--max-batches", "-1"])
+        self.assertEqual(zero_args.max_batches, 0)
+        self.assertEqual(minus_one_args.max_batches, -1)
+
     def test_apply_vocatio_defaults_reads_vlm_values(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             day_dir = Path(tmp_dir) / "20260323"
@@ -89,6 +95,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "VLM_WINDOW_SIZE=7",
                         "VLM_OVERLAP=3",
                         "VLM_BOUNDARY_GAP_SECONDS=20",
+                        "VLM_MAX_BATCHES=0",
                         "VLM_CONTEXT_TOKENS=8192",
                         "VLM_MAX_OUTPUT_TOKENS=256",
                         "VLM_KEEP_ALIVE=30m",
@@ -114,6 +121,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(args.window_size, 7)
             self.assertEqual(args.overlap, 3)
             self.assertEqual(args.boundary_gap_seconds, 20)
+            self.assertEqual(args.max_batches, 0)
             self.assertEqual(args.ollama_num_ctx, 8192)
             self.assertEqual(args.ollama_num_predict, 256)
             self.assertEqual(args.ollama_keep_alive, "30m")
@@ -922,38 +930,34 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIn("84 candidate batch(es)", message)
         self.assertIn("gaps > 10s", message)
 
-    def test_build_candidate_batch_message_reports_gap_rows_and_paths(self):
+    def test_build_candidate_batch_message_reports_gap_and_rows(self):
         message = probe.build_candidate_batch_message(
             batch_index=8,
             total_batches=100,
             time_gap_seconds=37,
             start_row=1241,
             end_row=1247,
-            left_start_local="2026-03-23T08:52:34",
-            right_start_local="2026-03-23T08:53:18",
         )
         self.assertIn("Batch 8/100", message)
         self.assertIn("gap 37s", message)
         self.assertIn("rows 1241..1247", message)
-        self.assertIn("08:52:34", message)
-        self.assertIn("08:53:18", message)
 
     def test_build_batch_result_message_reports_cut_and_counters(self):
         message = probe.build_batch_result_message(
             batch_index=8,
+            total_batches=100,
+            time_gap_seconds=37,
+            start_row=1241,
+            end_row=1247,
             decision="cut_after_3",
-            cut_after_global_row="1243",
-            cut_left_start_local="2026-03-23T08:52:34",
-            cut_right_start_local="2026-03-23T08:53:18",
             cuts=12,
             no_cut=58,
             invalid=1,
         )
-        self.assertIn("Result batch 8", message)
+        self.assertIn("Batch 8/100", message)
+        self.assertIn("gap 37s", message)
+        self.assertIn("rows 1241..1247", message)
         self.assertIn("cut_after_3", message)
-        self.assertIn("global row 1243", message)
-        self.assertIn("08:52:34", message)
-        self.assertIn("08:53:18", message)
         self.assertIn("cuts=12", message)
         self.assertIn("no_cut=58", message)
         self.assertIn("invalid=1", message)
@@ -1196,6 +1200,120 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 )
             self.assertEqual(row_count, 2)
             self.assertEqual(observed_line_counts, [0, 2])
+
+    def test_probe_vlm_photo_boundaries_zero_max_batches_processes_all_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            thumb_dir = workspace_dir / "embedded_jpg" / "thumb" / "cam"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "cam"
+            thumb_dir.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            names = tuple(chr(code) for code in range(ord("a"), ord("l")))
+            for name in names:
+                (thumb_dir / f"{name}.jpg").write_bytes(b"x")
+                (preview_dir / f"{name}.jpg").write_bytes(b"x")
+            embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            with embedded_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "thumb_path", "preview_path"])
+                writer.writeheader()
+                for name in names:
+                    writer.writerow(
+                        {
+                            "relative_path": f"cam/{name}.hif",
+                            "thumb_path": f"embedded_jpg/thumb/cam/{name}.jpg",
+                            "preview_path": f"embedded_jpg/preview/cam/{name}.jpg",
+                        }
+                    )
+            photo_manifest_csv = workspace_dir / "media_manifest.csv"
+            with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
+                writer.writeheader()
+                for index, name in enumerate(names):
+                    writer.writerow(
+                        {
+                            "day": day_dir.name,
+                            "stream_id": "cam",
+                            "device": "cam",
+                            "media_type": "photo",
+                            "source_root": str(day_dir),
+                            "source_dir": str(day_dir / "cam"),
+                            "source_rel_dir": "cam",
+                            "path": str(day_dir / "cam" / f"{name}.hif"),
+                            "relative_path": f"cam/{name}.hif",
+                            "media_id": f"cam/{name}.hif",
+                            "photo_id": f"cam/{name}.hif",
+                            "filename": f"{name}.hif",
+                            "extension": ".hif",
+                            "capture_time_local": f"2026-03-23T10:00:{index:02d}",
+                            "capture_subsec": "000",
+                            "photo_order_index": str(index),
+                            "start_local": f"2026-03-23T10:00:{index:02d}",
+                            "start_epoch_ms": str(index * 1000),
+                            "timestamp_source": "test",
+                            "metadata_status": "ok",
+                        }
+                    )
+            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            args_payload = {
+                "embedded_manifest_csv": str(embedded_manifest_csv),
+                "photo_manifest_csv": str(photo_manifest_csv),
+                "image_variant": "thumb",
+                "window_size": 5,
+                "overlap": 2,
+                "boundary_gap_seconds": 0,
+                "max_batches": 0,
+                "model": "qwen3.5:9b",
+                "ollama_base_url": "http://127.0.0.1:11434",
+                "ollama_num_ctx": 16384,
+                "ollama_num_predict": None,
+                "ollama_keep_alive": "15m",
+                "timeout_seconds": 300.0,
+                "temperature": 0.0,
+                "ollama_think": "false",
+                "extra_instructions": "",
+                "extra_instructions_file": None,
+                "effective_extra_instructions": "",
+            }
+            with mock.patch.object(
+                probe,
+                "ollama_post_json",
+                return_value={
+                    "message": {
+                        "content": (
+                            '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
+                            '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                            '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
+                        )
+                    }
+                },
+            ), mock.patch.object(probe, "build_run_id", return_value="vlm-20260414061000"):
+                row_count = probe.probe_vlm_photo_boundaries(
+                    workspace_dir=workspace_dir,
+                    embedded_manifest_csv=embedded_manifest_csv,
+                    photo_manifest_csv=photo_manifest_csv,
+                    output_csv=output_csv,
+                    image_variant="thumb",
+                    window_size=5,
+                    overlap=2,
+                    boundary_gap_seconds=0,
+                    max_batches=0,
+                    model="qwen3.5:9b",
+                    ollama_base_url="http://127.0.0.1:11434",
+                    ollama_num_ctx=16384,
+                    ollama_num_predict=None,
+                    ollama_keep_alive="15m",
+                    timeout_seconds=300.0,
+                    temperature=0.0,
+                    ollama_think="false",
+                    extra_instructions="",
+                    dump_debug_dir=None,
+                    args_payload=args_payload,
+                    new_run=True,
+                )
+            self.assertEqual(row_count, 7)
+            self.assertEqual(len(probe.read_result_rows(output_csv)), 7)
 
     def test_probe_vlm_photo_boundaries_only_evaluates_candidate_gaps(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -151,6 +151,15 @@ def non_negative_int_arg(value: str) -> int:
     return parsed
 
 
+def max_batches_arg(value: str) -> int:
+    parsed = int(value)
+    if parsed in (0, -1):
+        return parsed
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be >= 1, or 0/-1 for all remaining batches")
+    return parsed
+
+
 def non_negative_float_arg(value: str) -> float:
     parsed = float(value)
     if parsed < 0.0:
@@ -215,9 +224,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--max-batches",
-        type=positive_int_arg,
+        type=max_batches_arg,
         default=DEFAULT_MAX_BATCHES,
-        help=f"Maximum number of windows to evaluate. Default: {DEFAULT_MAX_BATCHES}",
+        help=(
+            "Maximum number of windows to evaluate. "
+            f"Use 0 or -1 for all remaining windows. Default: {DEFAULT_MAX_BATCHES}"
+        ),
     )
     parser.add_argument(
         "--provider",
@@ -373,6 +385,7 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
         "VLM_BOUNDARY_GAP_SECONDS",
         non_negative_int_arg,
     )
+    apply_int("max_batches", DEFAULT_MAX_BATCHES, "VLM_MAX_BATCHES", max_batches_arg)
     apply_string("model", DEFAULT_MODEL_NAME, "VLM_MODEL")
     apply_string("ollama_base_url", DEFAULT_OLLAMA_BASE_URL, "VLM_BASE_URL")
     apply_optional_int("ollama_num_ctx", "VLM_CONTEXT_TOKENS")
@@ -1479,9 +1492,10 @@ def build_resume_message(
 ) -> str:
     next_batch = completed_batches + 1
     remaining_batches = max(0, total_batches - completed_batches)
+    requested_text = "all remaining" if requested_batches <= 0 else f"up to {requested_batches} more"
     return (
         f"Continuing VLM run {run_id} from batch {next_batch}; "
-        f"{remaining_batches} remaining, running up to {requested_batches} more batch(es)."
+        f"{remaining_batches} remaining, running {requested_text} batch(es)."
     )
 
 
@@ -1492,15 +1506,6 @@ def build_run_start_message(*, run_id: str, total_batches: int, boundary_gap_sec
     )
 
 
-def format_start_local_time(value: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if "T" in text:
-        return text.split("T", 1)[1]
-    return text
-
-
 def build_candidate_batch_message(
     *,
     batch_index: int,
@@ -1508,34 +1513,24 @@ def build_candidate_batch_message(
     time_gap_seconds: int,
     start_row: int,
     end_row: int,
-    left_start_local: str,
-    right_start_local: str,
 ) -> str:
-    return (
-        f"Batch {batch_index}/{total_batches} | gap {time_gap_seconds}s | rows {start_row}..{end_row} | "
-        f"{format_start_local_time(left_start_local)} -> {format_start_local_time(right_start_local)}"
-    )
+    return f"Batch {batch_index}/{total_batches} | gap {time_gap_seconds}s | rows {start_row}..{end_row}"
 
 
 def build_batch_result_message(
     *,
     batch_index: int,
+    total_batches: int,
+    time_gap_seconds: int,
+    start_row: int,
+    end_row: int,
     decision: str,
-    cut_after_global_row: str,
-    cut_left_start_local: str,
-    cut_right_start_local: str,
     cuts: int,
     no_cut: int,
     invalid: int,
 ) -> str:
-    outcome = decision
-    if cut_after_global_row:
-        outcome = (
-            f"{decision} -> global row {cut_after_global_row} "
-            f"({format_start_local_time(cut_left_start_local)} -> {format_start_local_time(cut_right_start_local)})"
-        )
     return (
-        f"Result batch {batch_index}: {outcome} | "
+        f"Batch {batch_index}/{total_batches} | gap {time_gap_seconds}s | rows {start_row}..{end_row} | {decision} | "
         f"cuts={cuts} no_cut={no_cut} invalid={invalid}"
     )
 
@@ -1592,7 +1587,8 @@ def probe_vlm_photo_boundaries(
         raise ValueError(
             f"Run {run_state['run_id']} already has {completed_batches} batches, but only {len(all_candidates)} windows exist"
         )
-    candidate_windows = all_candidates[completed_batches : completed_batches + max_batches]
+    effective_max_batches = len(all_candidates) if max_batches <= 0 else max_batches
+    candidate_windows = all_candidates[completed_batches : completed_batches + effective_max_batches]
     if not candidate_windows:
         console.print(
             f"No remaining VLM windows for run {run_state['run_id'] or '<new>'}; already processed {completed_batches} batch(es)."
@@ -1671,17 +1667,6 @@ def probe_vlm_photo_boundaries(
             time_gap_seconds = int(candidate["time_gap_seconds"])
             end_index = start_index + window_size
             window_rows = joined_rows[start_index:end_index]
-            progress.console.print(
-                build_candidate_batch_message(
-                    batch_index=batch_index,
-                    total_batches=len(all_candidates),
-                    time_gap_seconds=time_gap_seconds,
-                    start_row=start_index + 1,
-                    end_row=end_index,
-                    left_start_local=str(joined_rows[cut_index]["start_local"]),
-                    right_start_local=str(joined_rows[cut_index + 1]["start_local"]),
-                )
-            )
             gap_hint_lines = build_gap_hint_lines(window_rows, boundary_rows_by_pair)
             pre_model_lines = build_photo_pre_model_lines(window_rows, photo_pre_model_dir)
             prompt = build_user_prompt(
@@ -1757,18 +1742,11 @@ def probe_vlm_photo_boundaries(
             progress.console.print(
                 build_batch_result_message(
                     batch_index=batch_index,
+                    total_batches=len(all_candidates),
+                    time_gap_seconds=time_gap_seconds,
+                    start_row=start_index + 1,
+                    end_row=end_index,
                     decision=str(result_row["decision"]),
-                    cut_after_global_row=str(result_row["cut_after_global_row"]),
-                    cut_left_start_local=(
-                        str(joined_rows[int(result_row["cut_after_global_row"]) - 1]["start_local"])
-                        if str(result_row["cut_after_global_row"])
-                        else ""
-                    ),
-                    cut_right_start_local=(
-                        str(joined_rows[int(result_row["cut_after_global_row"])]["start_local"])
-                        if str(result_row["cut_after_global_row"])
-                        else ""
-                    ),
                     cuts=cut_count,
                     no_cut=no_cut_count,
                     invalid=invalid_count,
