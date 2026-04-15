@@ -2,20 +2,31 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from hashlib import sha1
+import json
+import math
 
 
 def _normalize_timestamp(value: object) -> float:
     if value is None:
         raise ValueError("timestamp is required and must not be blank")
 
+    if isinstance(value, bool):
+        raise ValueError("timestamp must be numeric or ISO-8601")
+
     if isinstance(value, (int, float)):
-        return float(value)
+        normalized = float(value)
+        if not math.isfinite(normalized):
+            raise ValueError("timestamp must be finite")
+        return normalized
 
     text = str(value)
     if not text.strip():
         raise ValueError("timestamp is required and must not be blank")
     try:
-        return float(text)
+        normalized = float(text)
+        if not math.isfinite(normalized):
+            raise ValueError("timestamp must be finite")
+        return normalized
     except ValueError:
         try:
             parsed = datetime.fromisoformat(text)
@@ -39,13 +50,19 @@ def _normalize_order_idx(value: object) -> int:
         raise ValueError(f"order_idx must be an integer: {value}") from exc
 
 
+def _normalize_photo_id(value: object) -> str:
+    if value is None or not str(value).strip():
+        raise ValueError("photo_id is required and must not be blank")
+    return str(value)
+
+
 def sort_photo_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     return sorted(
         rows,
         key=lambda row: (
             _normalize_timestamp(row["timestamp"]),
             _normalize_order_idx(row.get("order_idx")),
-            row["photo_id"],
+            _normalize_photo_id(row.get("photo_id")),
         ),
     )
 
@@ -57,5 +74,9 @@ def canonical_candidate_id(
     center_right_photo_id: str,
     candidate_rule_version: str,
 ) -> str:
-    raw = f"{day_id}|{center_left_photo_id}|{center_right_photo_id}|{candidate_rule_version}"
+    raw = json.dumps(
+        [day_id, center_left_photo_id, center_right_photo_id, candidate_rule_version],
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
     return sha1(raw.encode("utf-8")).hexdigest()[:16]

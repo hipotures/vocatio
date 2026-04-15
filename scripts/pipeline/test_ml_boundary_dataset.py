@@ -67,6 +67,12 @@ def test_sort_photo_rows_handles_mixed_aware_and_naive_iso_as_utc() -> None:
     assert [row["photo_id"] for row in ordered] == ["p1", "p2"]
 
 
+def test_sort_photo_rows_rejects_boolean_or_non_finite_timestamp() -> None:
+    for timestamp in (True, False, float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="timestamp"):
+            sort_photo_rows([{"photo_id": "p1", "order_idx": "1", "timestamp": timestamp}])
+
+
 def test_sort_photo_rows_rejects_invalid_or_blank_timestamp() -> None:
     for timestamp in (None, "", "   ", "not-a-timestamp"):
         with pytest.raises(ValueError, match="timestamp"):
@@ -95,6 +101,18 @@ def test_sort_photo_rows_rejects_non_integral_float_order_idx() -> None:
         sort_photo_rows(
             [{"photo_id": "p1", "order_idx": 2.5, "timestamp": "2025-03-25T08:00:00.000"}]
         )
+
+
+def test_sort_photo_rows_rejects_missing_or_blank_photo_id() -> None:
+    cases = [
+        {"order_idx": "1", "timestamp": "2025-03-25T08:00:00.000"},
+        {"photo_id": "", "order_idx": "1", "timestamp": "2025-03-25T08:00:00.000"},
+        {"photo_id": " ", "order_idx": "1", "timestamp": "2025-03-25T08:00:00.000"},
+    ]
+
+    for row in cases:
+        with pytest.raises(ValueError, match="photo_id"):
+            sort_photo_rows([row])
 
 
 def test_canonical_candidate_id_is_stable() -> None:
@@ -140,3 +158,20 @@ def test_canonical_candidate_id_is_stable() -> None:
     assert changed_left != first
     assert changed_right != first
     assert swapped != first
+
+
+def test_canonical_candidate_id_avoids_delimiter_collision() -> None:
+    first = canonical_candidate_id(
+        day_id="a|b",
+        center_left_photo_id="c",
+        center_right_photo_id="d",
+        candidate_rule_version="e",
+    )
+    second = canonical_candidate_id(
+        day_id="a",
+        center_left_photo_id="b",
+        center_right_photo_id="c|d",
+        candidate_rule_version="e",
+    )
+
+    assert first != second

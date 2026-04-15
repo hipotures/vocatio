@@ -29,3 +29,25 @@ def test_build_final_photo_truth_rejects_duplicate_photo_id() -> None:
 
     with pytest.raises(ValueError, match="duplicate photo_id"):
         build_final_photo_truth(rows)
+
+
+def test_build_final_photo_truth_rejects_missing_or_blank_identity_fields() -> None:
+    cases = [
+        ({}, "photo_id"),
+        ({"photo_id": "", "segment_id": "s1", "segment_type": "performance"}, "photo_id"),
+        ({"photo_id": "p1", "segment_type": "performance"}, "segment_id"),
+        ({"photo_id": "p1", "segment_id": " ", "segment_type": "performance"}, "segment_id"),
+        ({"photo_id": "p1", "segment_id": "s1"}, "segment_type"),
+        ({"photo_id": "p1", "segment_id": "s1", "segment_type": ""}, "segment_type"),
+    ]
+
+    for row, field_name in cases:
+        with pytest.raises(ValueError, match=field_name):
+            build_final_photo_truth([row])
+
+
+def test_build_final_photo_truth_rejects_invalid_segment_type() -> None:
+    row = {"photo_id": "p1", "segment_id": "s1", "segment_type": "reception"}
+
+    with pytest.raises(ValueError, match="segment_type"):
+        build_final_photo_truth([row])
