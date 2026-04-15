@@ -1,22 +1,33 @@
 from __future__ import annotations
 
+from datetime import datetime
 from hashlib import sha1
 
 
-def _normalize_timestamp(value: object) -> tuple[int, object]:
+def _normalize_timestamp(value: object) -> tuple[int, float | datetime]:
+    if value is None:
+        raise ValueError("timestamp is required and must not be blank")
+
     if isinstance(value, (int, float)):
         return (0, float(value))
 
     text = str(value)
+    if not text.strip():
+        raise ValueError("timestamp is required and must not be blank")
     try:
         return (0, float(text))
     except ValueError:
-        return (1, text)
+        try:
+            return (1, datetime.fromisoformat(text))
+        except ValueError as exc:
+            raise ValueError(f"timestamp must be numeric or ISO-8601: {value}") from exc
 
 
 def _normalize_order_idx(value: object) -> int:
     if value in (None, ""):
         raise ValueError("order_idx is required and must not be blank")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"order_idx must be an integer: {value}")
     try:
         return int(value)
     except (TypeError, ValueError) as exc:
