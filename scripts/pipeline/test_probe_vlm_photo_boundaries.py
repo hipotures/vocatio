@@ -620,7 +620,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
 
     def test_append_result_rows_writes_header_and_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
-            output_csv = Path(tmp) / "vlm_boundary_test.csv"
+            output_csv = Path(tmp) / "vlm_boundary_results.csv"
             probe.append_result_rows(
                 output_csv,
                 [
@@ -636,7 +636,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
 
     def test_append_result_rows_appends_without_overwrite_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
-            output_csv = Path(tmp) / "vlm_boundary_test.csv"
+            output_csv = Path(tmp) / "vlm_boundary_results.csv"
             first_row = {header: "" for header in probe.OUTPUT_HEADERS}
             second_row = {header: "" for header in probe.OUTPUT_HEADERS}
             first_row["run_id"] = "vlm-20260414033000"
@@ -705,7 +705,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 config_hash="abc123",
                 embedded_manifest_csv=workspace_dir / "photo_embedded_manifest.csv",
                 photo_manifest_csv=workspace_dir / "photo_manifest.csv",
-                output_csv=workspace_dir / "vlm_boundary_test.csv",
+                output_csv=workspace_dir / "vlm_boundary_results.csv",
                 args_payload={
                     "image_variant": "preview",
                     "window_size": 5,
@@ -730,7 +730,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
 
     def test_read_result_rows_accepts_legacy_header_with_new_run_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
-            output_csv = Path(tmp) / "vlm_boundary_test.csv"
+            output_csv = Path(tmp) / "vlm_boundary_results.csv"
             with output_csv.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
                 writer.writerow(probe.LEGACY_OUTPUT_HEADERS)
@@ -745,7 +745,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
 
     def test_append_result_rows_writes_config_hash_column(self):
         with tempfile.TemporaryDirectory() as tmp:
-            output_csv = Path(tmp) / "vlm_boundary_test.csv"
+            output_csv = Path(tmp) / "vlm_boundary_results.csv"
             row = {header: "" for header in probe.OUTPUT_HEADERS}
             row["run_id"] = "vlm-20260414033000"
             row["config_hash"] = "abc123"
@@ -758,7 +758,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             workspace_dir = Path(tmp) / "_workspace"
             runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
             runs_dir.mkdir(parents=True)
-            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
             with output_csv.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=probe.OUTPUT_HEADERS)
                 writer.writeheader()
@@ -792,7 +792,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             workspace_dir = Path(tmp) / "_workspace"
             runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
             runs_dir.mkdir(parents=True)
-            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
             with output_csv.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=probe.OUTPUT_HEADERS)
                 writer.writeheader()
@@ -827,7 +827,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Requested run_id does not exist"):
                 probe.resolve_run_state(
                     workspace_dir=workspace_dir,
-                    output_csv=workspace_dir / "vlm_boundary_test.csv",
+                    output_csv=workspace_dir / "vlm_boundary_results.csv",
                     config_hash="samehash",
                     new_run=False,
                     run_id="vlm-20260414053012",
@@ -838,7 +838,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             workspace_dir = Path(tmp) / "_workspace"
             runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
             runs_dir.mkdir(parents=True)
-            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
             (runs_dir / "vlm-20260414053113.json").write_text(
                 json.dumps({"run_id": "vlm-20260414053113", "config_hash": "oldhash", "args": {"window_size": 5}}),
                 encoding="utf-8",
@@ -857,7 +857,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             workspace_dir = Path(tmp) / "_workspace"
             runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
             runs_dir.mkdir(parents=True)
-            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
             legacy_args = {
                 "embedded_manifest_csv": "/tmp/a.csv",
                 "photo_manifest_csv": "/tmp/b.csv",
@@ -893,7 +893,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             workspace_dir = Path(tmp) / "_workspace"
             runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
             runs_dir.mkdir(parents=True)
-            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
             (runs_dir / "vlm-20260414053113.json").write_text(
                 json.dumps({"run_id": "vlm-20260414053113", "config_hash": "oldhash", "args": {}}),
                 encoding="utf-8",
@@ -1015,7 +1015,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                             "metadata_status": "ok",
                         }
                     )
-            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
             args_payload = {
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),
@@ -1133,7 +1133,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                             "metadata_status": "ok",
                         }
                     )
-            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
             args_payload = {
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),
@@ -1255,7 +1255,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                             "metadata_status": "ok",
                         }
                     )
-            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
             args_payload = {
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),
@@ -1370,7 +1370,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                             "metadata_status": "ok",
                         }
                     )
-            output_csv = workspace_dir / "vlm_boundary_test.csv"
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
             args_payload = {
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),

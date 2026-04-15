@@ -6,9 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
+
+from lib.image_pipeline_contracts import MEDIA_MANIFEST_HEADERS
 
 
 def load_module(module_name: str, relative_path: str):
@@ -51,8 +52,8 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
             workspace_dir.mkdir(parents=True)
             runs_dir = workspace_dir / "vlm_runs"
             runs_dir.mkdir()
-            output_csv = workspace_dir / "vlm_boundary_test.csv"
-            photo_manifest_csv = workspace_dir / "photo_manifest.csv"
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
+            photo_manifest_csv = workspace_dir / "media_manifest.csv"
             embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
             thumb_dir = workspace_dir / "embedded_jpg" / "thumb" / "cam"
             preview_dir = workspace_dir / "embedded_jpg" / "preview" / "cam"
@@ -62,15 +63,33 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                 (thumb_dir / f"{name}.jpg").write_bytes(f"jpg-{name}".encode("utf-8"))
                 (preview_dir / f"{name}.jpg").write_bytes(f"preview-{name}".encode("utf-8"))
             with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(
-                    handle,
-                    fieldnames=["relative_path", "start_epoch_ms", "start_local", "photo_order_index"],
-                )
+                writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
                 writer.writeheader()
-                writer.writerow({"relative_path": "cam/a.hif", "start_epoch_ms": "1000", "start_local": "2026-03-23T10:00:00", "photo_order_index": "0"})
-                writer.writerow({"relative_path": "cam/b.hif", "start_epoch_ms": "2000", "start_local": "2026-03-23T10:00:01", "photo_order_index": "1"})
-                writer.writerow({"relative_path": "cam/c.hif", "start_epoch_ms": "3000", "start_local": "2026-03-23T10:00:02", "photo_order_index": "2"})
-                writer.writerow({"relative_path": "cam/d.hif", "start_epoch_ms": "4000", "start_local": "2026-03-23T10:00:03", "photo_order_index": "3"})
+                for index, name in enumerate(("a", "b", "c", "d")):
+                    writer.writerow(
+                        {
+                            "day": day_dir.name,
+                            "stream_id": "cam",
+                            "device": "cam",
+                            "media_type": "photo",
+                            "source_root": str(day_dir),
+                            "source_dir": str(day_dir / "cam"),
+                            "source_rel_dir": "cam",
+                            "path": str(day_dir / "cam" / f"{name}.hif"),
+                            "relative_path": f"cam/{name}.hif",
+                            "media_id": f"cam/{name}.hif",
+                            "photo_id": f"cam/{name}.hif",
+                            "filename": f"{name}.hif",
+                            "extension": ".hif",
+                            "capture_time_local": f"2026-03-23T10:00:0{index}",
+                            "capture_subsec": "000",
+                            "photo_order_index": str(index),
+                            "start_local": f"2026-03-23T10:00:0{index}",
+                            "start_epoch_ms": str(1000 + index * 1000),
+                            "timestamp_source": "test",
+                            "metadata_status": "ok",
+                        }
+                    )
             with embedded_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(
                     handle,
@@ -138,8 +157,8 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
             workspace_dir.mkdir(parents=True)
             runs_dir = workspace_dir / "vlm_runs"
             runs_dir.mkdir()
-            output_csv = workspace_dir / "vlm_boundary_test.csv"
-            photo_manifest_csv = workspace_dir / "photo_manifest.csv"
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
+            photo_manifest_csv = workspace_dir / "media_manifest.csv"
             embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
             thumb_dir = workspace_dir / "embedded_jpg" / "thumb" / "cam"
             preview_dir = workspace_dir / "embedded_jpg" / "preview" / "cam"
@@ -149,18 +168,31 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                 (thumb_dir / f"{name}.jpg").write_bytes(f"jpg-{name}".encode("utf-8"))
                 (preview_dir / f"{name}.jpg").write_bytes(f"preview-{name}".encode("utf-8"))
             with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(
-                    handle,
-                    fieldnames=["relative_path", "start_epoch_ms", "start_local", "photo_order_index"],
-                )
+                writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
                 writer.writeheader()
                 for index, name in enumerate(("a", "b", "c", "d", "e", "f")):
                     writer.writerow(
                         {
+                            "day": day_dir.name,
+                            "stream_id": "cam",
+                            "device": "cam",
+                            "media_type": "photo",
+                            "source_root": str(day_dir),
+                            "source_dir": str(day_dir / "cam"),
+                            "source_rel_dir": "cam",
+                            "path": str(day_dir / "cam" / f"{name}.hif"),
                             "relative_path": f"cam/{name}.hif",
+                            "media_id": f"cam/{name}.hif",
+                            "photo_id": f"cam/{name}.hif",
+                            "filename": f"{name}.hif",
+                            "extension": ".hif",
+                            "capture_time_local": f"2026-03-23T10:00:0{index}",
+                            "capture_subsec": "000",
                             "start_epoch_ms": str(1000 + index * 1000),
                             "start_local": f"2026-03-23T10:00:0{index}",
                             "photo_order_index": str(index),
+                            "timestamp_source": "test",
+                            "metadata_status": "ok",
                         }
                     )
             with embedded_manifest_csv.open("w", newline="", encoding="utf-8") as handle:

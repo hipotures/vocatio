@@ -413,7 +413,7 @@ Important behavior:
 
 This creates:
 
-- `vlm_boundary_test.csv`
+- `vlm_boundary_results.csv`
 - `vlm_runs/`
 
 Optional debugging:
