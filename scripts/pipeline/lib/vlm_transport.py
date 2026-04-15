@@ -6,6 +6,8 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 @dataclass(frozen=True)
@@ -307,3 +309,67 @@ def normalize_provider_response(provider: str, model: str, payload: dict[str, An
             raw_response=payload,
         )
     raise VlmTransportError("unsupported_configuration", f"Unsupported VLM provider: {provider}")
+
+
+def _validate_provider_success_payload(provider: str, payload: dict[str, Any]) -> None:
+    if provider == "ollama":
+        message = payload.get("message")
+        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+            raise VlmTransportError(
+                "invalid_response",
+                f"Invalid response payload from {provider}: missing message.content",
+            )
+        return
+    if provider in {"llamacpp", "vllm"}:
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise VlmTransportError(
+                "invalid_response",
+                f"Invalid response payload from {provider}: missing choices[0].message.content",
+            )
+        first_choice = choices[0]
+        message = first_choice.get("message") if isinstance(first_choice, dict) else None
+        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+            raise VlmTransportError(
+                "invalid_response",
+                f"Invalid response payload from {provider}: missing choices[0].message.content",
+            )
+        return
+    raise VlmTransportError("unsupported_configuration", f"Unsupported VLM provider: {provider}")
+
+
+def post_json(base_url: str, path: str, payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
+    request = Request(
+        f"{base_url.rstrip('/')}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout_seconds) as response:
+        response_payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(response_payload, dict):
+        raise VlmTransportError("invalid_response", "VLM transport response must be a JSON object")
+    return response_payload
+
+
+def run_vlm_request(request: VlmRequest) -> VlmResponse:
+    validate_vlm_request(request)
+    payload = build_provider_request_payload(request)
+    path = "/api/chat" if request.provider == "ollama" else "/v1/chat/completions"
+    try:
+        response_payload = post_json(request.base_url, path, payload, request.timeout_seconds)
+    except VlmTransportError:
+        raise
+    except HTTPError as exc:
+        raise VlmTransportError("http", f"HTTP error from {request.provider}: {exc}") from exc
+    except TimeoutError as exc:
+        raise VlmTransportError("timeout", f"Timeout from {request.provider}: {exc}") from exc
+    except URLError as exc:
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, TimeoutError):
+            raise VlmTransportError("timeout", f"Timeout from {request.provider}: {exc}") from exc
+        raise VlmTransportError("connection", f"Connection error from {request.provider}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise VlmTransportError("invalid_response", f"Invalid JSON response from {request.provider}: {exc}") from exc
+    _validate_provider_success_payload(request.provider, response_payload)
+    return normalize_provider_response(request.provider, request.model, response_payload)

@@ -7,6 +7,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+from urllib.error import HTTPError, URLError
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -360,6 +362,136 @@ class VlmTransportPayloadTests(unittest.TestCase):
         self.assertEqual(response.json_payload, {"answer": "fine"})
         self.assertEqual(response.finish_reason, "length")
         self.assertEqual(response.metrics, {"prompt_tokens": 19, "completion_tokens": 5})
+
+
+class VlmTransportExecutionTests(unittest.TestCase):
+    @mock.patch.object(vlm_transport, "post_json")
+    def test_run_vlm_request_uses_api_chat_for_ollama(self, post_json_mock: mock.Mock) -> None:
+        post_json_mock.return_value = {
+            "message": {"content": "ok"},
+            "done_reason": "stop",
+        }
+        request = vlm_transport.VlmRequest(
+            provider="ollama",
+            base_url="http://127.0.0.1:11434",
+            model="demo",
+            messages=[{"role": "user", "content": "hi"}],
+            image_paths=[],
+            timeout_seconds=10.0,
+        )
+
+        response = vlm_transport.run_vlm_request(request)
+
+        self.assertEqual(response.text, "ok")
+        post_json_mock.assert_called_once()
+        self.assertEqual(post_json_mock.call_args.args[1], "/api/chat")
+
+    @mock.patch.object(vlm_transport, "post_json")
+    def test_run_vlm_request_uses_openai_chat_completions_for_llamacpp(
+        self,
+        post_json_mock: mock.Mock,
+    ) -> None:
+        post_json_mock.return_value = {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+        }
+        request = vlm_transport.VlmRequest(
+            provider="llamacpp",
+            base_url="http://127.0.0.1:8002",
+            model="demo",
+            messages=[{"role": "user", "content": "hi"}],
+            image_paths=[],
+            timeout_seconds=10.0,
+        )
+
+        vlm_transport.run_vlm_request(request)
+
+        self.assertEqual(post_json_mock.call_args.args[1], "/v1/chat/completions")
+
+    @mock.patch.object(vlm_transport, "post_json")
+    def test_run_vlm_request_wraps_url_errors_as_connection(
+        self,
+        post_json_mock: mock.Mock,
+    ) -> None:
+        post_json_mock.side_effect = URLError("connection refused")
+        request = vlm_transport.VlmRequest(
+            provider="vllm",
+            base_url="http://127.0.0.1:8000",
+            model="demo",
+            messages=[{"role": "user", "content": "hi"}],
+            image_paths=[],
+            timeout_seconds=10.0,
+        )
+
+        with self.assertRaises(vlm_transport.VlmTransportError) as error:
+            vlm_transport.run_vlm_request(request)
+
+        self.assertEqual(error.exception.category, "connection")
+
+    @mock.patch.object(vlm_transport, "post_json")
+    def test_run_vlm_request_wraps_http_errors_as_http(self, post_json_mock: mock.Mock) -> None:
+        post_json_mock.side_effect = HTTPError(
+            url="http://127.0.0.1:11434/api/chat",
+            code=500,
+            msg="server error",
+            hdrs=None,
+            fp=None,
+        )
+        request = vlm_transport.VlmRequest(
+            provider="ollama",
+            base_url="http://127.0.0.1:11434",
+            model="demo",
+            messages=[{"role": "user", "content": "hi"}],
+            image_paths=[],
+            timeout_seconds=10.0,
+        )
+
+        with self.assertRaises(vlm_transport.VlmTransportError) as error:
+            vlm_transport.run_vlm_request(request)
+
+        self.assertEqual(error.exception.category, "http")
+
+    @mock.patch.object(vlm_transport, "post_json")
+    def test_run_vlm_request_wraps_timeouts_as_timeout(self, post_json_mock: mock.Mock) -> None:
+        post_json_mock.side_effect = TimeoutError("timed out")
+        request = vlm_transport.VlmRequest(
+            provider="vllm",
+            base_url="http://127.0.0.1:8000",
+            model="demo",
+            messages=[{"role": "user", "content": "hi"}],
+            image_paths=[],
+            timeout_seconds=10.0,
+        )
+
+        with self.assertRaises(vlm_transport.VlmTransportError) as error:
+            vlm_transport.run_vlm_request(request)
+
+        self.assertEqual(error.exception.category, "timeout")
+
+    @mock.patch.object(vlm_transport, "post_json")
+    def test_run_vlm_request_rejects_malformed_success_payloads_as_invalid_response(
+        self,
+        post_json_mock: mock.Mock,
+    ) -> None:
+        for provider, base_url, payload in (
+            ("ollama", "http://127.0.0.1:11434", {"message": {}}),
+            ("llamacpp", "http://127.0.0.1:8002", {"choices": [{"message": {}}]}),
+        ):
+            with self.subTest(provider=provider):
+                post_json_mock.reset_mock()
+                post_json_mock.return_value = payload
+                request = vlm_transport.VlmRequest(
+                    provider=provider,
+                    base_url=base_url,
+                    model="demo",
+                    messages=[{"role": "user", "content": "hi"}],
+                    image_paths=[],
+                    timeout_seconds=10.0,
+                )
+
+                with self.assertRaises(vlm_transport.VlmTransportError) as error:
+                    vlm_transport.run_vlm_request(request)
+
+                self.assertEqual(error.exception.category, "invalid_response")
 
 
 if __name__ == "__main__":
