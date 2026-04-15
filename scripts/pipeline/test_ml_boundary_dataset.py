@@ -23,6 +23,17 @@ def test_sort_photo_rows_uses_timestamp_order_idx_photo_id() -> None:
     assert [row["photo_id"] for row in ordered] == ["p0", "p1", "p2", "p3", "p4"]
 
 
+def test_sort_photo_rows_normalizes_numeric_string_timestamps() -> None:
+    rows = [
+        {"photo_id": "p10", "order_idx": "1", "timestamp": "10"},
+        {"photo_id": "p2", "order_idx": "1", "timestamp": "2"},
+    ]
+
+    ordered = sort_photo_rows(rows)
+
+    assert [row["photo_id"] for row in ordered] == ["p2", "p10"]
+
+
 def test_sort_photo_rows_rejects_missing_or_blank_order_idx() -> None:
     with pytest.raises(ValueError, match="order_idx"):
         sort_photo_rows([{"photo_id": "p1", "timestamp": "2025-03-25T08:00:00.000"}])
@@ -30,6 +41,13 @@ def test_sort_photo_rows_rejects_missing_or_blank_order_idx() -> None:
     with pytest.raises(ValueError, match="order_idx"):
         sort_photo_rows(
             [{"photo_id": "p1", "order_idx": "", "timestamp": "2025-03-25T08:00:00.000"}]
+        )
+
+
+def test_sort_photo_rows_rejects_non_numeric_order_idx() -> None:
+    with pytest.raises(ValueError, match="order_idx"):
+        sort_photo_rows(
+            [{"photo_id": "p1", "order_idx": "abc", "timestamp": "2025-03-25T08:00:00.000"}]
         )
 
 
@@ -46,12 +64,33 @@ def test_canonical_candidate_id_is_stable() -> None:
         center_right_photo_id="p4",
         candidate_rule_version="gap-v1",
     )
-    changed = canonical_candidate_id(
-        day_id="20250325",
+    changed_day = canonical_candidate_id(
+        day_id="20250326",
         center_left_photo_id="p3",
         center_right_photo_id="p4",
-        candidate_rule_version="gap-v2",
+        candidate_rule_version="gap-v1",
+    )
+    changed_left = canonical_candidate_id(
+        day_id="20250325",
+        center_left_photo_id="p5",
+        center_right_photo_id="p4",
+        candidate_rule_version="gap-v1",
+    )
+    changed_right = canonical_candidate_id(
+        day_id="20250325",
+        center_left_photo_id="p3",
+        center_right_photo_id="p6",
+        candidate_rule_version="gap-v1",
+    )
+    swapped = canonical_candidate_id(
+        day_id="20250325",
+        center_left_photo_id="p4",
+        center_right_photo_id="p3",
+        candidate_rule_version="gap-v1",
     )
 
     assert first == second
-    assert changed != first
+    assert changed_day != first
+    assert changed_left != first
+    assert changed_right != first
+    assert swapped != first

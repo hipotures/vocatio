@@ -3,17 +3,31 @@ from __future__ import annotations
 from hashlib import sha1
 
 
+def _normalize_timestamp(value: object) -> tuple[int, object]:
+    if isinstance(value, (int, float)):
+        return (0, float(value))
+
+    text = str(value)
+    try:
+        return (0, float(text))
+    except ValueError:
+        return (1, text)
+
+
 def _normalize_order_idx(value: object) -> int:
     if value in (None, ""):
         raise ValueError("order_idx is required and must not be blank")
-    return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"order_idx must be an integer: {value}") from exc
 
 
 def sort_photo_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     return sorted(
         rows,
         key=lambda row: (
-            row["timestamp"],
+            _normalize_timestamp(row["timestamp"]),
             _normalize_order_idx(row.get("order_idx")),
             row["photo_id"],
         ),
