@@ -1,0 +1,18 @@
+from __future__ import annotations
+
+from hashlib import sha1
+
+
+def sort_photo_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    return sorted(rows, key=lambda row: (row["timestamp"], row.get("order_idx", 0), row["photo_id"]))
+
+
+def canonical_candidate_id(
+    *,
+    day_id: str,
+    center_left_photo_id: str,
+    center_right_photo_id: str,
+    candidate_rule_version: str,
+) -> str:
+    raw = f"{day_id}|{center_left_photo_id}|{center_right_photo_id}|{candidate_rule_version}"
+    return sha1(raw.encode("utf-8")).hexdigest()[:16]
