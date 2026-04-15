@@ -1,44 +1,60 @@
 # Vocatio
 
-`vocatio` is a CLI event media workflow focused on stream synchronization and set detection: it aligns photo and video streams in time, transcribes audio from video, extracts announcements, and builds performance/set timelines for review and final export.
+`vocatio` is a CLI event-media workflow with two parallel per-day pipelines:
 
-The pipeline covers:
+- an audio-assisted pipeline that uses synced video and transcription to build performance boundaries
+- an image-only pipeline that works from photos alone when usable audio is unavailable or unreliable
 
-- media metadata export and merge
-- multi-camera video sync estimation
-- WhisperX transcription
-- announcement candidate extraction (rule-based or semantic)
-- performance timeline building
-- photo-to-performance assignment
-- proxy generation and manual review
-- final reviewed-set export (photo/video)
+Both pipelines write artifacts into `DAY/_workspace` and feed the same review GUI.
 
 ## Repository Layout
 
-- `scripts/pipeline/` - all operational pipeline scripts
+- `scripts/pipeline/` - operational pipeline scripts
 - `conf/` - export profiles for reviewed set delivery
 - `docs/PROJECT_INTENT.md` - product direction
 
+## Pipeline Modes
+
+| Mode | Use When | Main Inputs | Main Review Index |
+| --- | --- | --- | --- |
+| Audio-assisted | you have usable video audio and want the strongest boundary detection | `v-*` streams, optional `p-*` streams | `performance_proxy_index.json` |
+| Image-only | you only have photos, or audio/video timing is unusable | `p-*` streams | `performance_proxy_index.image.json` or `performance_proxy_index.image.vlm.json` |
+
 ## Requirements
+
+Common requirements:
 
 - Python 3.10+
 - `ffmpeg` and `ffprobe`
 - `exiftool`
-- `whisperx` (for transcription scripts)
 - `PyYAML`, `rich`, `PySide6`
-- ImageMagick (`magick`) for JPG proxy/export conversion paths
+- ImageMagick (`magick`) for JPG proxy and embedded JPG extraction paths
+
+Audio-assisted extras:
+
+- `whisperx`
+
+Image-only extras:
+
+- `numpy`
+- local DINOv2 runtime for preview embeddings
+
+Optional image-only VLM extras:
+
+- Ollama with a vision-capable model for `probe_vlm_photo_boundaries.py`
+- a local OpenAI-compatible `llama.cpp` server if you want per-photo pre-model annotations
 
 Install Python dependencies in your preferred environment, then run scripts directly with `python3`.
 
 ## Data Model (Per Day)
 
-The pipeline runs per `day_dir` (one event day at a time), for example:
-
-If you process multiple days, run the same sequence for each directory.
+The pipeline runs per `day_dir`, for example:
 
 ```bash
 /data/20260323
 ```
+
+If you process multiple days, run the same sequence for each directory.
 
 By default, generated artifacts are written to:
 
@@ -66,10 +82,11 @@ Prefix meaning:
 
 The pipeline discovers stream directories using these prefixes.
 
+## Audio-Assisted Pipeline
 
-## Pipeline Outputs (Default Filenames)
+This path uses video sync, transcription, and announcement extraction to build performance boundaries, then assigns photos to those intervals.
 
-Main workspace artifacts:
+### Main Workspace Outputs
 
 - `merged_video.csv`
 - `sync_map.csv`
@@ -92,47 +109,47 @@ Directories:
 - `transcripts/`
 - `proxy_jpg/`
 
-## Recommended Execution Order
+### Recommended Execution Order
 
 Replace `DAY` with your day directory path.
 
-### 1. Export per-stream media metadata
+#### 1. Export per-stream media metadata
 
 ```bash
 python3 scripts/pipeline/export_event_media_csv.py DAY
 ```
 
-### 2. Merge video CSV rows
+#### 2. Merge video CSV rows
 
 ```bash
 python3 scripts/pipeline/merge_event_media_csv.py DAY --media-type video
 ```
 
-### 3. Estimate sync map between video streams
+#### 3. Estimate sync map between video streams
 
 ```bash
 python3 scripts/pipeline/estimate_video_sync_map.py DAY
 ```
 
-### 4. Apply sync corrections
+#### 4. Apply sync corrections
 
 ```bash
 python3 scripts/pipeline/apply_video_sync_map.py DAY
 ```
 
-### 5. Transcribe synced videos (WhisperX)
+#### 5. Transcribe synced videos
 
 ```bash
 python3 scripts/pipeline/transcribe_video_batch.py DAY --all-streams
 ```
 
-### 6A. Extract announcement candidates (rule-based)
+#### 6A. Extract announcement candidates (rule-based)
 
 ```bash
 python3 scripts/pipeline/extract_announcement_candidates.py DAY --all-streams
 ```
 
-### 6B. Extract announcement candidates (semantic, optional)
+#### 6B. Extract announcement candidates (semantic, optional)
 
 ```bash
 python3 scripts/pipeline/extract_announcement_candidates_semantic.py DAY --all-streams
@@ -144,31 +161,31 @@ If you use semantic output, pass it explicitly in the next step:
 python3 scripts/pipeline/build_performance_timeline.py DAY --candidates-csv DAY/_workspace/announcement_candidates_semantic.csv
 ```
 
-### 7. Build performance timeline
+#### 7. Build performance timeline
 
 ```bash
 python3 scripts/pipeline/build_performance_timeline.py DAY
 ```
 
-### 8. Assign photos to timeline intervals
+#### 8. Assign photos to timeline intervals
 
 ```bash
 python3 scripts/pipeline/assign_photos_to_timeline.py DAY
 ```
 
-### 9. Generate proxy JPG files
+#### 9. Generate proxy JPG files
 
 ```bash
 python3 scripts/pipeline/generate_photo_proxy_jpg.py DAY --all-streams
 ```
 
-### 10. Build per-performance proxy index
+#### 10. Build per-performance proxy index
 
 ```bash
 python3 scripts/pipeline/build_performance_proxy_index.py DAY
 ```
 
-### 11. Review assignments in GUI
+#### 11. Review assignments in GUI
 
 ```bash
 python3 scripts/pipeline/review_performance_proxy_gui.py DAY
@@ -183,15 +200,13 @@ The GUI also supports exporting an ad-hoc photo selection:
 - enter a JSON filename such as `selected_photos_a.json`
 - the file is written to `DAY/_workspace` unless you enter an absolute path
 
-The selection JSON can later be passed directly to the export script.
-
 Example GUI views:
 
 ![Single preview mode](assets/gui-review-single-view.png)
 
 ![First/Last comparison mode](assets/gui-review-first-last-compare.png)
 
-### 12. Export one reviewed set
+#### 12. Export one reviewed set
 
 ```bash
 python3 scripts/pipeline/copy_reviewed_set_assets.py DAY out 158 --config conf/copy_reviewed_set_assets.default.yaml
@@ -214,6 +229,175 @@ In this mode:
 - the export goes to `out/selected_photos_a/`
 - only the listed photos are exported
 - `--index-json` still works as usual when you need a non-default index
+
+## Image-Only Pipeline
+
+This path builds photo ordering, quality signals, DINOv2 embeddings, and photo boundary candidates directly from images. It has two review flows:
+
+- a deterministic heuristic flow
+- an optional VLM-assisted flow
+
+### Core Image-Only Outputs
+
+- `photo_manifest.csv`
+- `photo_embedded_manifest.csv`
+- `photo_quality.csv`
+- `photo_boundary_features.csv`
+- `photo_boundary_scores.csv`
+- `photo_segments.csv`
+- `performance_proxy_index.image.json`
+
+Directories:
+
+- `embedded_jpg/thumb/`
+- `embedded_jpg/preview/`
+- `features/`
+
+### Image-Only Deterministic Flow
+
+#### 1. Export photo manifest with deterministic ordering
+
+```bash
+python3 scripts/pipeline/export_recursive_photo_csv.py DAY
+```
+
+#### 2. Extract embedded JPG variants
+
+```bash
+python3 scripts/pipeline/extract_embedded_photo_jpg.py DAY
+```
+
+This creates `photo_embedded_manifest.csv` with `thumb_path` and `preview_path`.
+
+#### 3. Build photo quality annotations
+
+```bash
+python3 scripts/pipeline/build_photo_quality_annotations.py DAY
+```
+
+#### 4. Embed preview JPGs with DINOv2
+
+```bash
+python3 scripts/pipeline/embed_photo_previews_dinov2.py DAY
+```
+
+This creates:
+
+- `features/dinov2_embeddings.npy`
+- `features/dinov2_index.csv`
+
+#### 5. Build pairwise photo boundary features
+
+```bash
+python3 scripts/pipeline/build_photo_boundary_features.py DAY
+```
+
+#### 6. Bootstrap image-only boundary scores
+
+```bash
+python3 scripts/pipeline/bootstrap_photo_boundaries.py DAY
+```
+
+#### 7. Build heuristic photo segments
+
+```bash
+python3 scripts/pipeline/build_photo_segments.py DAY
+```
+
+#### 8. Build GUI review index
+
+```bash
+python3 scripts/pipeline/build_photo_review_index.py DAY
+```
+
+#### 9. Review heuristic image-only sets
+
+```bash
+python3 scripts/pipeline/review_performance_proxy_gui.py DAY --index performance_proxy_index.image.json --state review_state.image.json
+```
+
+Use a dedicated `--state` file for image-only review so you do not mix it with the audio-assisted review state.
+
+### Image-Only VLM-Assisted Flow
+
+The VLM flow starts from the same image-only artifacts as the deterministic flow. It optionally adds a lightweight per-photo pre-model pass, then probes only candidate time gaps with a local VLM.
+
+#### Optional: build per-photo pre-model annotations
+
+```bash
+python3 scripts/pipeline/build_photo_pre_model_annotations.py DAY --limit 1000 --workers 4
+```
+
+Default behavior:
+
+- input index: `photo_embedded_manifest.csv`
+- image column: `preview_path`
+- output directory: `DAY/_workspace/photo_pre_model_annotations`
+- resume behavior: existing per-photo JSON files are skipped unless you pass `--overwrite`
+- default `--limit` is `20`, so use a larger explicit value for real runs and rerun the same command until it finishes the remaining photos
+
+#### Probe candidate image boundaries with a local VLM
+
+```bash
+python3 scripts/pipeline/probe_vlm_photo_boundaries.py DAY \
+  --photo-manifest-csv DAY/_workspace/photo_manifest.csv \
+  --image-variant thumb \
+  --window-size 7 \
+  --overlap 2 \
+  --boundary-gap-seconds 10 \
+  --max-batches 100 \
+  --response-schema-mode on \
+  --json-validation-mode strict \
+  --photo-pre-model-dir photo_pre_model_annotations \
+  --new-run
+```
+
+Important behavior:
+
+- only gaps larger than `--boundary-gap-seconds` are probed
+- default `--max-batches` is `10`, so use a larger explicit value for real runs and rerun the same command or continue with `--run-id`
+- `--new-run` starts a fresh VLM run
+- `--run-id ...` resumes a specific existing VLM run
+- `--photo-pre-model-dir ...` is optional; if per-photo annotations exist, they are appended to the prompt frame-by-frame
+
+This creates:
+
+- `vlm_boundary_test.csv`
+- `vlm_runs/`
+
+Optional debugging:
+
+```bash
+python3 scripts/pipeline/probe_vlm_photo_boundaries.py DAY \
+  --photo-manifest-csv DAY/_workspace/photo_manifest.csv \
+  --image-variant thumb \
+  --window-size 7 \
+  --overlap 2 \
+  --boundary-gap-seconds 10 \
+  --max-batches 100 \
+  --dump-debug-dir /tmp \
+  --new-run
+```
+
+#### Build a GUI index for a specific VLM run
+
+```bash
+python3 scripts/pipeline/build_vlm_photo_boundary_gui_index.py DAY --run-id YOUR_RUN_ID
+```
+
+This creates:
+
+- `performance_proxy_index.image.vlm.json`
+
+#### Review VLM-assisted image-only sets
+
+```bash
+python3 scripts/pipeline/review_performance_proxy_gui.py DAY \
+  --index performance_proxy_index.image.vlm.json \
+  --state review_state.image.vlm.json
+```
+
+Use a dedicated VLM review-state file so you do not mix VLM review decisions with the heuristic image-only or audio-assisted states.
 
 ## Export Profiles
 
@@ -247,6 +431,8 @@ Inspect per-script options:
 
 ```bash
 python3 scripts/pipeline/export_event_media_csv.py --help
-python3 scripts/pipeline/build_performance_timeline.py --help
+python3 scripts/pipeline/build_photo_pre_model_annotations.py --help
+python3 scripts/pipeline/probe_vlm_photo_boundaries.py --help
+python3 scripts/pipeline/review_performance_proxy_gui.py --help
 python3 scripts/pipeline/copy_reviewed_set_assets.py --help
 ```
