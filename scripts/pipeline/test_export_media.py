@@ -771,6 +771,68 @@ class ExportMediaCliTests(unittest.TestCase):
                 f"[green]Wrote 3 rows to {output_path}[/green]",
             )
 
+    def test_main_retries_failed_mixed_batch_per_file_and_preserves_good_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            photo_dir = day_dir / "p-a7r5"
+            workspace_dir.mkdir(parents=True)
+            photo_dir.mkdir(parents=True)
+
+            good_path = photo_dir / "good.hif"
+            bad_path = photo_dir / "bad.hif"
+            good_path.write_bytes(b"good")
+            bad_path.write_bytes(b"bad")
+
+            bad_dt = datetime(2026, 3, 23, 10, 0, 2, 789000)
+            bad_epoch_ns = int(bad_dt.timestamp() * 1_000_000_000)
+            os.utime(bad_path, ns=(bad_epoch_ns, bad_epoch_ns))
+
+            call_paths = []
+
+            def fake_run_exiftool(paths, on_batch_processed=None):
+                path_names = sorted(path.name for path in paths)
+                call_paths.append(path_names)
+                if on_batch_processed is not None:
+                    on_batch_processed(len(paths))
+                if path_names == ["bad.hif", "good.hif"]:
+                    raise RuntimeError("mixed batch failed")
+                if path_names == ["good.hif"]:
+                    return [
+                        {
+                            "SourceFile": str(good_path),
+                            "DateTimeOriginal": "2026:03:23 10:00:01",
+                            "SubSecDateTimeOriginal": "2026:03:23 10:00:01.123",
+                            "Model": "ILCE-7RM5",
+                            "Make": "Sony",
+                        }
+                    ]
+                if path_names == ["bad.hif"]:
+                    raise RuntimeError("bad file failed")
+                self.fail(f"Unexpected exiftool paths: {path_names}")
+
+            with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
+                with mock.patch.object(export_media, "run_exiftool", side_effect=fake_run_exiftool):
+                    with mock.patch.object(export_media.console, "print"):
+                        exit_code = export_media.main([str(day_dir)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(call_paths[0], ["bad.hif", "good.hif"])
+            self.assertEqual(
+                {tuple(paths) for paths in call_paths[1:]},
+                {("good.hif",), ("bad.hif",)},
+            )
+
+            rows = media_manifest.read_media_manifest(workspace_dir / "media_manifest.csv")
+            photo_rows = media_manifest.select_photo_rows(rows)
+            self.assertEqual([row["relative_path"] for row in photo_rows], ["p-a7r5/good.hif", "p-a7r5/bad.hif"])
+            self.assertEqual(photo_rows[0]["metadata_status"], "ok")
+            self.assertEqual(photo_rows[0]["model"], "ILCE-7RM5")
+            self.assertEqual(photo_rows[0]["timestamp_source"], "subsec_datetime_original")
+            self.assertEqual(photo_rows[1]["metadata_status"], "error")
+            self.assertEqual(photo_rows[1]["metadata_error"], "Missing metadata")
+            self.assertEqual(photo_rows[1]["timestamp_source"], "file_mtime")
+
 
 if __name__ == "__main__":
     unittest.main()

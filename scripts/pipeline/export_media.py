@@ -651,6 +651,33 @@ def warn_metadata_batch_failure(stream_id: str, batch: Sequence[Path], error: Ex
     )
 
 
+def warn_metadata_file_failure(stream_id: str, path: Path, error: Exception) -> None:
+    console.print(
+        "[yellow]Warning: failed to read metadata for "
+        f"{stream_id} file {path.name}: {error}[/yellow]"
+    )
+
+
+def extract_metadata_batch_fail_open(
+    stream_id: str,
+    batch: Sequence[Path],
+) -> Dict[str, Mapping[str, object]]:
+    try:
+        return metadata_by_source_path(run_exiftool(batch))
+    except Exception as error:
+        warn_metadata_batch_failure(stream_id, batch, error)
+        if len(batch) <= 1:
+            return {}
+
+    metadata_by_path: Dict[str, Mapping[str, object]] = {}
+    for path in batch:
+        try:
+            metadata_by_path.update(metadata_by_source_path(run_exiftool([path])))
+        except Exception as error:
+            warn_metadata_file_failure(stream_id, path, error)
+    return metadata_by_path
+
+
 def extract_metadata_by_stream(
     stream_files: Sequence[tuple[Dict[str, str], Sequence[Path]]],
     jobs: int,
@@ -671,29 +698,19 @@ def extract_metadata_by_stream(
 
     if jobs <= 1 or len(batch_specs) <= 1:
         for stream_id, batch in batch_specs:
-            try:
-                items = run_exiftool(batch)
-            except Exception as error:
-                warn_metadata_batch_failure(stream_id, batch, error)
-                items = []
-            metadata_for_streams[stream_id].update(metadata_by_source_path(items))
+            metadata_for_streams[stream_id].update(extract_metadata_batch_fail_open(stream_id, batch))
             progress.advance(metadata_task, len(batch))
         return metadata_for_streams
 
     max_workers = min(jobs, len(batch_specs))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_batch = {
-            executor.submit(run_exiftool, batch): (stream_id, batch)
+            executor.submit(extract_metadata_batch_fail_open, stream_id, batch): (stream_id, batch)
             for stream_id, batch in batch_specs
         }
         for future in concurrent.futures.as_completed(future_to_batch):
             stream_id, batch = future_to_batch[future]
-            try:
-                items = future.result()
-            except Exception as error:
-                warn_metadata_batch_failure(stream_id, batch, error)
-                items = []
-            metadata_for_streams[stream_id].update(metadata_by_source_path(items))
+            metadata_for_streams[stream_id].update(future.result())
             progress.advance(metadata_task, len(batch))
     return metadata_for_streams
 
