@@ -181,6 +181,18 @@ def _normalize_reasoning_level(reasoning_level: str) -> tuple[str, bool]:
     return reasoning_level, True
 
 
+def _build_ollama_format(response_format: dict[str, Any]) -> dict[str, Any]:
+    if response_format.get("type") != "json_schema":
+        return response_format
+    json_schema = response_format.get("json_schema")
+    if not isinstance(json_schema, dict):
+        return response_format
+    schema = json_schema.get("schema")
+    if isinstance(schema, dict):
+        return schema
+    return response_format
+
+
 def build_provider_request_payload(request: VlmRequest) -> dict[str, Any]:
     if request.provider == "ollama":
         options: dict[str, Any] = {}
@@ -205,7 +217,7 @@ def build_provider_request_payload(request: VlmRequest) -> dict[str, Any]:
             payload["reasoning"] = {"effort": reasoning_effort}
             payload["think"] = think_enabled
         if request.response_format is not None:
-            payload["format"] = request.response_format
+            payload["format"] = _build_ollama_format(request.response_format)
         return payload
     if request.provider in {"llamacpp", "vllm"}:
         payload = {

@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import csv
 import hashlib
 import json
-import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -30,12 +27,11 @@ from lib.media_manifest import read_media_manifest, select_photo_rows
 from lib.pipeline_io import atomic_write_json
 from lib.photo_pre_model_annotations import (
     DEFAULT_OUTPUT_DIRNAME as DEFAULT_PHOTO_PRE_MODEL_DIRNAME,
-    build_annotation_output_path,
     load_photo_pre_model_annotations_by_relative_path,
 )
-
-
+from lib.vlm_transport import VlmRequest, build_provider_request_payload, get_vlm_capabilities, run_vlm_request
 from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
+
 console = Console()
 
 PHOTO_EMBEDDED_MANIFEST_FILENAME = "photo_embedded_manifest.csv"
@@ -827,101 +823,91 @@ def build_user_prompt(
     return prompt
 
 
-def encode_image_base64(path: Path) -> str:
-    return base64.b64encode(path.read_bytes()).decode("ascii")
-
-
-def strip_v1_suffix(api_base_url: str) -> str:
-    text = api_base_url.rstrip("/")
-    if text.endswith("/v1"):
-        return text[:-3]
-    return text
-
-
 def is_ollama_api_base_url(api_base_url: str) -> bool:
-    parsed = urllib.parse.urlparse(api_base_url)
-    if parsed.scheme not in {"http", "https"}:
+    text = api_base_url.strip()
+    if not text.startswith(("http://", "https://")):
         return False
-    if parsed.hostname not in {"127.0.0.1", "localhost"}:
+    without_scheme = text.split("://", 1)[1]
+    host_port = without_scheme.split("/", 1)[0]
+    host = host_port
+    port_text = ""
+    if ":" in host_port:
+        host, port_text = host_port.rsplit(":", 1)
+    if host not in {"127.0.0.1", "localhost"}:
         return False
-    if parsed.port != 11434:
+    if port_text != "11434":
         return False
     return True
 
 
-def build_ollama_extra_body(args: argparse.Namespace) -> Dict[str, Any]:
-    extra_body: Dict[str, Any] = {}
-    if not is_ollama_api_base_url(args.ollama_base_url):
-        return extra_body
-    if args.ollama_think != "inherit":
-        reasoning_effort = "none" if args.ollama_think == "false" else args.ollama_think
-        extra_body["reasoning_effort"] = reasoning_effort
-        extra_body["reasoning"] = {"effort": reasoning_effort}
-        extra_body["think"] = False if args.ollama_think == "false" else True
-    options: Dict[str, Any] = {}
-    if args.ollama_num_predict is not None:
-        options["num_predict"] = args.ollama_num_predict
-    if args.ollama_num_ctx is not None:
-        options["num_ctx"] = args.ollama_num_ctx
-    if options:
-        extra_body["options"] = options
-    return extra_body
-
-
-def ollama_post_json(base_url: str, path: str, payload: Dict[str, Any], timeout_seconds: float) -> Dict[str, Any]:
-    request = urllib.request.Request(
-        strip_v1_suffix(base_url) + path,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def build_ollama_payload(
+def build_vlm_response_format(
     *,
-    model: str,
-    prompt: str,
-    image_paths: Sequence[Path],
-    keep_alive: str,
-    temperature: float,
+    provider: str,
     response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
     response_schema: Optional[Mapping[str, Any]] = None,
-    extra_body: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
-    options: Dict[str, Any] = {"temperature": temperature}
-    payload: Dict[str, Any] = {
-        "model": model,
-        "stream": False,
-        "keep_alive": keep_alive,
-        "options": options,
-        "messages": [
-            {"role": "system", "content": build_system_prompt(response_schema_mode)},
-            {
-                "role": "user",
-                "content": prompt,
-                "images": [encode_image_base64(path) for path in image_paths],
-            },
-        ],
+) -> Optional[Dict[str, Any]]:
+    if response_schema_mode != "on" or response_schema is None:
+        return None
+    capabilities = get_vlm_capabilities(provider)
+    if not capabilities.supports_json_schema:
+        return None
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "photo_boundary_probe",
+            "schema": dict(response_schema),
+        },
     }
-    if extra_body:
-        merged_options = dict(extra_body.get("options", {}))
-        merged_options.update(payload["options"])
-        payload.update({key: value for key, value in extra_body.items() if key != "options"})
-        payload["options"] = merged_options
-    if response_schema is not None:
-        payload["format"] = dict(response_schema)
-    return payload
 
 
-def extract_response_text(response_payload: Mapping[str, Any]) -> str:
-    message = response_payload.get("message")
-    if isinstance(message, Mapping):
-        content = message.get("content")
-        if content is not None:
-            return str(content)
-    return ""
+def build_vlm_request(
+    *,
+    provider: str,
+    base_url: str,
+    response_schema_mode: str,
+    prompt: str,
+    image_paths: Sequence[Path],
+    model: str,
+    timeout_seconds: float,
+    keep_alive: str,
+    temperature: float,
+    context_tokens: Optional[int],
+    max_output_tokens: Optional[int],
+    reasoning_level: str,
+    response_schema: Optional[Mapping[str, Any]],
+) -> VlmRequest:
+    request_context_tokens = context_tokens
+    request_max_output_tokens = max_output_tokens
+    request_keep_alive: Optional[str] = None
+    request_reasoning_level: Optional[str] = None
+    if provider == "ollama":
+        request_keep_alive = keep_alive
+        if is_ollama_api_base_url(base_url):
+            request_reasoning_level = None if reasoning_level == "inherit" else reasoning_level
+        else:
+            request_context_tokens = None
+            request_max_output_tokens = None
+    return VlmRequest(
+        provider=provider,
+        base_url=base_url,
+        model=model,
+        messages=[
+            {"role": "system", "content": build_system_prompt(response_schema_mode)},
+            {"role": "user", "content": prompt},
+        ],
+        image_paths=list(image_paths),
+        timeout_seconds=timeout_seconds,
+        response_format=build_vlm_response_format(
+            provider=provider,
+            response_schema_mode=response_schema_mode,
+            response_schema=response_schema,
+        ),
+        temperature=temperature,
+        context_tokens=request_context_tokens,
+        max_output_tokens=request_max_output_tokens,
+        reasoning_level=request_reasoning_level,
+        keep_alive=request_keep_alive,
+    )
 
 
 def extract_json_object_text(raw_response: str) -> str:
@@ -1541,6 +1527,7 @@ def probe_vlm_photo_boundaries(
     embedded_manifest_csv: Path,
     photo_manifest_csv: Path,
     output_csv: Path,
+    provider: str,
     image_variant: str,
     window_size: int,
     overlap: int,
@@ -1641,13 +1628,6 @@ def probe_vlm_photo_boundaries(
     no_cut_count = sum(1 for row in existing_result_rows if str(row.get("decision", "") or "") == "no_cut")
     invalid_count = sum(1 for row in existing_result_rows if str(row.get("response_status", "") or "") != "ok")
     response_schema = build_response_schema(window_size) if str(args_payload.get("response_schema_mode", "off")) == "on" else None
-    request_args = argparse.Namespace(
-        ollama_base_url=ollama_base_url,
-        ollama_think=ollama_think,
-        ollama_num_predict=ollama_num_predict,
-        ollama_num_ctx=ollama_num_ctx,
-    )
-    extra_body = build_ollama_extra_body(request_args)
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -1676,18 +1656,24 @@ def probe_vlm_photo_boundaries(
                 response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
                 pre_model_lines=pre_model_lines,
             )
-            payload = build_ollama_payload(
-                model=model,
+            request = build_vlm_request(
+                provider=provider,
+                base_url=ollama_base_url,
+                response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
                 prompt=prompt,
                 image_paths=[Path(str(row["image_path"])) for row in window_rows],
+                model=model,
+                timeout_seconds=timeout_seconds,
                 keep_alive=ollama_keep_alive,
                 temperature=temperature,
-                response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
+                context_tokens=ollama_num_ctx,
+                max_output_tokens=ollama_num_predict,
+                reasoning_level=ollama_think,
                 response_schema=response_schema,
-                extra_body=extra_body,
             )
+            request_payload = build_provider_request_payload(request) if dump_debug_dir is not None else None
             try:
-                response_payload = ollama_post_json(ollama_base_url, "/api/chat", payload, timeout_seconds)
+                response = run_vlm_request(request)
             except Exception as error:
                 if dump_debug_dir is not None:
                     dump_debug_artifacts(
@@ -1695,7 +1681,7 @@ def probe_vlm_photo_boundaries(
                         run_id=run_id,
                         batch_index=batch_index,
                         prompt=prompt,
-                        request_payload=payload,
+                        request_payload=request_payload or {},
                         response_payload=None,
                         error_text=str(error),
                     )
@@ -1706,11 +1692,11 @@ def probe_vlm_photo_boundaries(
                     run_id=run_id,
                     batch_index=batch_index,
                     prompt=prompt,
-                    request_payload=payload,
-                    response_payload=response_payload,
+                    request_payload=request_payload or {},
+                    response_payload=response.raw_response,
                     error_text=None,
                 )
-            raw_response = extract_response_text(response_payload)
+            raw_response = response.text
             parsed_response = parse_model_response(
                 raw_response,
                 window_size=window_size,
@@ -1762,8 +1748,6 @@ def main() -> int:
     if not day_dir.exists() or not day_dir.is_dir():
         raise SystemExit(f"Day directory does not exist: {day_dir}")
     args = apply_vocatio_defaults(args, day_dir)
-    if args.provider != "ollama":
-        raise SystemExit(f"Unsupported VLM provider for probe_vlm_photo_boundaries.py: {args.provider}")
     workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     embedded_manifest_csv = resolve_path(workspace_dir, args.embedded_manifest_csv)
     photo_manifest_csv = resolve_path(workspace_dir, args.photo_manifest_csv)
@@ -1806,6 +1790,7 @@ def main() -> int:
         embedded_manifest_csv=embedded_manifest_csv,
         photo_manifest_csv=photo_manifest_csv,
         output_csv=output_csv,
+        provider=args.provider,
         image_variant=args.image_variant,
         window_size=args.window_size,
         overlap=args.overlap,

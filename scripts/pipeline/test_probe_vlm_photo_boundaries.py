@@ -9,9 +9,10 @@ from pathlib import Path
 
 from lib.image_pipeline_contracts import MEDIA_MANIFEST_HEADERS
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
+
+from lib.vlm_transport import VlmResponse, build_provider_request_payload
 
 
 def load_module(module_name: str, relative_path: str):
@@ -518,40 +519,78 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(row["cut_left_relative_path"], "cam/a.jpg")
         self.assertEqual(row["cut_right_relative_path"], "cam/b.jpg")
 
-    def test_build_ollama_extra_body_matches_legacy_reasoning_controls(self):
-        args = probe.parse_args(
-            [
-                "/tmp/day",
-                "--ollama-think",
-                "false",
-                "--ollama-num-ctx",
-                "8192",
-                "--ollama-num-predict",
-                "128",
-            ]
-        )
-        extra_body = probe.build_ollama_extra_body(args)
-        self.assertEqual(extra_body["reasoning_effort"], "none")
-        self.assertEqual(extra_body["reasoning"]["effort"], "none")
-        self.assertIs(extra_body["think"], False)
-        self.assertEqual(extra_body["options"]["num_ctx"], 8192)
-        self.assertEqual(extra_body["options"]["num_predict"], 128)
-
-    def test_build_ollama_payload_includes_schema_format_when_enabled(self):
+    def test_build_vlm_request_maps_ollama_fields_to_transport_request(self):
         schema = probe.build_response_schema(window_size=2)
         with tempfile.TemporaryDirectory() as tmp:
             image_path = Path(tmp) / "a.jpg"
             image_path.write_bytes(b"jpg")
-            payload = probe.build_ollama_payload(
-                model="qwen3.5:9b",
+            request = probe.build_vlm_request(
+                provider="ollama",
+                base_url="http://127.0.0.1:11434",
+                response_schema_mode="on",
                 prompt="prompt",
                 image_paths=[image_path],
+                model="qwen3.5:9b",
+                timeout_seconds=300.0,
                 keep_alive="15m",
                 temperature=0.0,
+                context_tokens=8192,
+                max_output_tokens=128,
+                reasoning_level="false",
                 response_schema=schema,
-                extra_body=None,
             )
+            payload = build_provider_request_payload(request)
+        self.assertEqual(request.provider, "ollama")
+        self.assertEqual(request.base_url, "http://127.0.0.1:11434")
+        self.assertEqual(request.model, "qwen3.5:9b")
+        self.assertEqual(request.timeout_seconds, 300.0)
+        self.assertEqual(request.keep_alive, "15m")
+        self.assertEqual(request.temperature, 0.0)
+        self.assertEqual(request.context_tokens, 8192)
+        self.assertEqual(request.max_output_tokens, 128)
+        self.assertEqual(request.reasoning_level, "false")
+        self.assertEqual(
+            request.response_format,
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "photo_boundary_probe",
+                    "schema": schema,
+                },
+            },
+        )
         self.assertEqual(payload["format"], schema)
+        self.assertEqual(request.messages[0], {"role": "system", "content": probe.build_system_prompt("on")})
+        self.assertEqual(request.messages[1], {"role": "user", "content": "prompt"})
+        self.assertEqual(request.image_paths, [image_path])
+
+    def test_build_vlm_request_omits_ollama_only_fields_for_vllm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "a.jpg"
+            image_path.write_bytes(b"jpg")
+            request = probe.build_vlm_request(
+                provider="vllm",
+                base_url="http://127.0.0.1:8000/v1",
+                response_schema_mode="off",
+                prompt="prompt",
+                image_paths=[image_path],
+                model="Qwen/Qwen2.5-VL-7B-Instruct",
+                timeout_seconds=180.0,
+                keep_alive="15m",
+                temperature=0.1,
+                context_tokens=8192,
+                max_output_tokens=256,
+                reasoning_level="false",
+                response_schema=None,
+            )
+        self.assertEqual(request.provider, "vllm")
+        self.assertEqual(request.base_url, "http://127.0.0.1:8000/v1")
+        self.assertEqual(request.keep_alive, None)
+        self.assertEqual(request.reasoning_level, None)
+        self.assertEqual(request.context_tokens, 8192)
+        self.assertEqual(request.max_output_tokens, 256)
+        self.assertEqual(request.temperature, 0.1)
+        self.assertIsNone(request.response_format)
 
     def test_read_joined_rows_uses_embedded_manifest_order_and_variant_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1052,13 +1091,14 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with mock.patch.object(probe, "build_run_id", return_value="vlm-20260414053113"), mock.patch.object(
-                probe, "ollama_post_json"
-            ) as ollama_mock:
+                probe, "run_vlm_request"
+            ) as run_vlm_mock:
                 row_count = probe.probe_vlm_photo_boundaries(
                     workspace_dir=workspace_dir,
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,
                     output_csv=output_csv,
+                    provider="ollama",
                     image_variant="thumb",
                     window_size=5,
                     overlap=2,
@@ -1078,7 +1118,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     new_run=False,
                 )
             self.assertEqual(row_count, 0)
-            ollama_mock.assert_not_called()
+            run_vlm_mock.assert_not_called()
 
     def test_probe_vlm_photo_boundaries_appends_each_batch_immediately(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1162,17 +1202,29 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         observed_line_counts.append(sum(1 for _ in handle))
                 else:
                     observed_line_counts.append(0)
-                return {
-                    "message": {
-                        "content": (
-                            '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                            '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
-                            '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
-                        )
-                    }
-                }
+                return VlmResponse(
+                    provider="ollama",
+                    model="qwen3.5:9b",
+                    text=(
+                        '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
+                        '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                        '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
+                    ),
+                    json_payload=None,
+                    finish_reason="stop",
+                    metrics={},
+                    raw_response={
+                        "message": {
+                            "content": (
+                                '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
+                                '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                                '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
+                            )
+                        }
+                    },
+                )
 
-            with mock.patch.object(probe, "ollama_post_json", side_effect=fake_ollama), mock.patch.object(
+            with mock.patch.object(probe, "run_vlm_request", side_effect=fake_ollama), mock.patch.object(
                 probe, "build_run_id", return_value="vlm-20260414060000"
             ):
                 row_count = probe.probe_vlm_photo_boundaries(
@@ -1180,6 +1232,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,
                     output_csv=output_csv,
+                    provider="ollama",
                     image_variant="thumb",
                     window_size=5,
                     overlap=2,
@@ -1278,22 +1331,35 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             }
             with mock.patch.object(
                 probe,
-                "ollama_post_json",
-                return_value={
-                    "message": {
-                        "content": (
-                            '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                            '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
-                            '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
-                        )
-                    }
-                },
+                "run_vlm_request",
+                return_value=VlmResponse(
+                    provider="ollama",
+                    model="qwen3.5:9b",
+                    text=(
+                        '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
+                        '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                        '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
+                    ),
+                    json_payload=None,
+                    finish_reason="stop",
+                    metrics={},
+                    raw_response={
+                        "message": {
+                            "content": (
+                                '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
+                                '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                                '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
+                            )
+                        }
+                    },
+                ),
             ), mock.patch.object(probe, "build_run_id", return_value="vlm-20260414061000"):
                 row_count = probe.probe_vlm_photo_boundaries(
                     workspace_dir=workspace_dir,
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,
                     output_csv=output_csv,
+                    provider="ollama",
                     image_variant="thumb",
                     window_size=5,
                     overlap=2,
@@ -1395,22 +1461,35 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
 
             with mock.patch.object(
                 probe,
-                "ollama_post_json",
-                return_value={
-                    "message": {
-                        "content": (
-                            '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                            '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
-                            '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
-                        )
-                    }
-                },
-            ) as ollama_mock, mock.patch.object(probe, "build_run_id", return_value="vlm-20260414070000"):
+                "run_vlm_request",
+                return_value=VlmResponse(
+                    provider="ollama",
+                    model="qwen3.5:9b",
+                    text=(
+                        '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
+                        '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                        '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
+                    ),
+                    json_payload=None,
+                    finish_reason="stop",
+                    metrics={},
+                    raw_response={
+                        "message": {
+                            "content": (
+                                '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
+                                '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                                '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
+                            )
+                        }
+                    },
+                ),
+            ) as run_vlm_mock, mock.patch.object(probe, "build_run_id", return_value="vlm-20260414070000"):
                 row_count = probe.probe_vlm_photo_boundaries(
                     workspace_dir=workspace_dir,
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,
                     output_csv=output_csv,
+                    provider="ollama",
                     image_variant="thumb",
                     window_size=5,
                     overlap=2,
@@ -1430,11 +1509,169 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     new_run=True,
                 )
             self.assertEqual(row_count, 1)
-            ollama_mock.assert_called_once()
+            run_vlm_mock.assert_called_once()
             rows = probe.read_result_rows(output_csv)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["start_row"], "3")
             self.assertEqual(rows[0]["end_row"], "7")
+
+    def test_probe_vlm_photo_boundaries_runs_provider_neutral_transport_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            thumb_dir = workspace_dir / "embedded_jpg" / "thumb" / "cam"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "cam"
+            thumb_dir.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            for name in ("a", "b", "c", "d", "e"):
+                (thumb_dir / f"{name}.jpg").write_bytes(b"x")
+                (preview_dir / f"{name}.jpg").write_bytes(b"x")
+            embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            with embedded_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "thumb_path", "preview_path"])
+                writer.writeheader()
+                for name in ("a", "b", "c", "d", "e"):
+                    writer.writerow(
+                        {
+                            "relative_path": f"cam/{name}.hif",
+                            "thumb_path": f"embedded_jpg/thumb/cam/{name}.jpg",
+                            "preview_path": f"embedded_jpg/preview/cam/{name}.jpg",
+                        }
+                    )
+            photo_manifest_csv = workspace_dir / "media_manifest.csv"
+            with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
+                writer.writeheader()
+                epoch_values = (0, 1000, 2000, 3000, 20000)
+                for index, (name, epoch_ms) in enumerate(zip(("a", "b", "c", "d", "e"), epoch_values)):
+                    writer.writerow(
+                        {
+                            "day": day_dir.name,
+                            "stream_id": "cam",
+                            "device": "cam",
+                            "media_type": "photo",
+                            "source_root": str(day_dir),
+                            "source_dir": str(day_dir / "cam"),
+                            "source_rel_dir": "cam",
+                            "path": str(day_dir / "cam" / f"{name}.hif"),
+                            "relative_path": f"cam/{name}.hif",
+                            "media_id": f"cam/{name}.hif",
+                            "photo_id": f"cam/{name}.hif",
+                            "filename": f"{name}.hif",
+                            "extension": ".hif",
+                            "capture_time_local": f"2026-03-23T10:00:{index:02d}",
+                            "capture_subsec": "000",
+                            "photo_order_index": str(index),
+                            "start_local": f"2026-03-23T10:00:{index:02d}",
+                            "start_epoch_ms": str(epoch_ms),
+                            "timestamp_source": "test",
+                            "metadata_status": "ok",
+                        }
+                    )
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
+            args_payload = {
+                "embedded_manifest_csv": str(embedded_manifest_csv),
+                "photo_manifest_csv": str(photo_manifest_csv),
+                "provider": "vllm",
+                "image_variant": "thumb",
+                "window_size": 5,
+                "overlap": 2,
+                "boundary_gap_seconds": 10,
+                "max_batches": 1,
+                "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+                "ollama_base_url": "http://127.0.0.1:8000/v1",
+                "ollama_num_ctx": 8192,
+                "ollama_num_predict": 256,
+                "ollama_keep_alive": "15m",
+                "timeout_seconds": 180.0,
+                "temperature": 0.1,
+                "ollama_think": "false",
+                "extra_instructions": "",
+                "extra_instructions_file": None,
+                "effective_extra_instructions": "",
+                "response_schema_mode": "on",
+            }
+            response = VlmResponse(
+                provider="vllm",
+                model="Qwen/Qwen2.5-VL-7B-Instruct",
+                text=(
+                    '{"boundary_after_frame":"frame_04","left_segment_type":"dance","right_segment_type":"ceremony",'
+                    '"frame_notes":{"frame_01":"same dancer","frame_02":"same dancer","frame_03":"same dancer",'
+                    '"frame_04":"same dancer","frame_05":"host on stage"},'
+                    '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 4."}'
+                ),
+                json_payload=None,
+                finish_reason="stop",
+                metrics={"prompt_tokens": 12},
+                raw_response={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"boundary_after_frame":"frame_04","left_segment_type":"dance","right_segment_type":"ceremony",'
+                                    '"frame_notes":{"frame_01":"same dancer","frame_02":"same dancer","frame_03":"same dancer",'
+                                    '"frame_04":"same dancer","frame_05":"host on stage"},'
+                                    '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 4."}'
+                                )
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ]
+                },
+            )
+
+            with mock.patch.object(probe, "run_vlm_request", return_value=response) as run_vlm_mock, mock.patch.object(
+                probe, "build_run_id", return_value="vlm-20260414071000"
+            ):
+                row_count = probe.probe_vlm_photo_boundaries(
+                    workspace_dir=workspace_dir,
+                    embedded_manifest_csv=embedded_manifest_csv,
+                    photo_manifest_csv=photo_manifest_csv,
+                    output_csv=output_csv,
+                    provider="vllm",
+                    image_variant="thumb",
+                    window_size=5,
+                    overlap=2,
+                    boundary_gap_seconds=10,
+                    max_batches=1,
+                    model="Qwen/Qwen2.5-VL-7B-Instruct",
+                    ollama_base_url="http://127.0.0.1:8000/v1",
+                    ollama_num_ctx=8192,
+                    ollama_num_predict=256,
+                    ollama_keep_alive="15m",
+                    timeout_seconds=180.0,
+                    temperature=0.1,
+                    ollama_think="false",
+                    extra_instructions="",
+                    dump_debug_dir=None,
+                    json_validation_mode="strict",
+                    args_payload=args_payload,
+                    new_run=True,
+                )
+
+            self.assertEqual(row_count, 1)
+            run_vlm_mock.assert_called_once()
+            request = run_vlm_mock.call_args.args[0]
+            self.assertEqual(request.provider, "vllm")
+            self.assertEqual(request.base_url, "http://127.0.0.1:8000/v1")
+            self.assertEqual(request.keep_alive, None)
+            self.assertEqual(request.reasoning_level, None)
+            self.assertEqual(request.context_tokens, 8192)
+            self.assertEqual(request.max_output_tokens, 256)
+            self.assertEqual(
+                request.response_format,
+                {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "photo_boundary_probe",
+                        "schema": probe.build_response_schema(window_size=5),
+                    },
+                },
+            )
+            rows = probe.read_result_rows(output_csv)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["decision"], "cut_after_4")
 
     def test_dump_debug_artifacts_writes_prompt_request_and_response(self):
         with tempfile.TemporaryDirectory() as tmp:
