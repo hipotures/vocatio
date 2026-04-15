@@ -17,7 +17,7 @@ from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 DEFAULT_OUTPUT_FILENAME = probe.DEFAULT_OUTPUT_FILENAME
-DEFAULT_GUI_INDEX_FILENAME = "performance_proxy_index.image.vlm.json"
+DEFAULT_GUI_INDEX_FILENAME = "performance_proxy_index.json"
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:

@@ -85,6 +85,11 @@ LONG_SET_THRESHOLD_SECONDS = 360
 PHOTO_GAP_THRESHOLD_SECONDS = 600
 PHOTO_BOUNDARY_SCORES_FILENAME = "photo_boundary_scores.csv"
 PHOTO_SEGMENTS_FILENAME = "photo_segments.csv"
+DEFAULT_INDEX_FILENAME = "performance_proxy_index.json"
+LEGACY_INDEX_FILENAMES = (
+    "performance_proxy_index.image.vlm.json",
+    "performance_proxy_index.image.json",
+)
 
 BOUNDARY_DIAGNOSTIC_REQUIRED_COLUMNS = frozenset(
     {
@@ -125,8 +130,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--index",
-        default="performance_proxy_index.json",
-        help="Index filename inside workspace or absolute path. Default: performance_proxy_index.json",
+        default=DEFAULT_INDEX_FILENAME,
+        help=f"Index filename inside workspace or absolute path. Default: {DEFAULT_INDEX_FILENAME}",
     )
     parser.add_argument(
         "--state",
@@ -2192,7 +2197,17 @@ def main() -> int:
 
     index_path = Path(args.index)
     if not index_path.is_absolute():
-        index_path = workspace_dir / index_path
+        requested_index_path = workspace_dir / index_path
+        if requested_index_path.exists():
+            index_path = requested_index_path
+        elif str(args.index).strip() == DEFAULT_INDEX_FILENAME:
+            fallback_path = next(
+                (workspace_dir / name for name in LEGACY_INDEX_FILENAMES if (workspace_dir / name).exists()),
+                None,
+            )
+            index_path = fallback_path if fallback_path is not None else requested_index_path
+        else:
+            index_path = requested_index_path
     if not index_path.exists():
         print(f"Error: index not found: {index_path}")
         return 1

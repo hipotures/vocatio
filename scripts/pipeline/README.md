@@ -76,7 +76,7 @@ Image-only stage 1 pipeline:
 - `build_photo_boundary_features.py` -> `_workspace/photo_boundary_features.csv`
 - `bootstrap_photo_boundaries.py` -> `_workspace/photo_boundary_scores.csv`
 - `build_photo_segments.py` -> `_workspace/photo_segments.csv`
-- `build_photo_review_index.py` -> `_workspace/performance_proxy_index.image.json`
+- `build_photo_review_index.py` -> `_workspace/performance_proxy_index.json`
 
 Manual smoke checklist:
 
@@ -89,5 +89,5 @@ python3 scripts/pipeline/build_photo_boundary_features.py /data/20260323
 python3 scripts/pipeline/bootstrap_photo_boundaries.py /data/20260323
 python3 scripts/pipeline/build_photo_segments.py /data/20260323
 python3 scripts/pipeline/build_photo_review_index.py /data/20260323
-python3 scripts/pipeline/review_performance_proxy_gui.py /data/20260323 --index performance_proxy_index.image.json
+python3 scripts/pipeline/review_performance_proxy_gui.py /data/20260323 --index performance_proxy_index.json
 ```

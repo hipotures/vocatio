@@ -217,13 +217,13 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
             run_id="vlm-20260414124712",
             run_row_count=200,
             payload={"photo_count": 602, "performance_count": 37},
-            gui_index_output=Path("/tmp/performance_proxy_index.image.vlm.json"),
+            gui_index_output=Path("/tmp/performance_proxy_index.json"),
         )
         self.assertIn("vlm-20260414124712", message)
         self.assertIn("200 VLM rows", message)
         self.assertIn("602 photos", message)
         self.assertIn("37 set", message)
-        self.assertIn("/tmp/performance_proxy_index.image.vlm.json", message)
+        self.assertIn("/tmp/performance_proxy_index.json", message)
 
 
 if __name__ == "__main__":

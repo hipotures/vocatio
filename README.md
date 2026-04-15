@@ -18,7 +18,7 @@ Both pipelines write artifacts into `DAY/_workspace` and feed the same review GU
 | Mode | Use When | Main Inputs | Main Review Index |
 | --- | --- | --- | --- |
 | Audio-assisted | you have usable video audio and want the strongest boundary detection | `v-*` streams, optional `p-*` streams | `performance_proxy_index.json` |
-| Image-only | you only have photos, or audio/video timing is unusable | `p-*` streams | `performance_proxy_index.image.json` or `performance_proxy_index.image.vlm.json` |
+| Image-only | you only have photos, or audio/video timing is unusable | `p-*` streams | `performance_proxy_index.json` |
 
 ## Requirements
 
@@ -294,7 +294,7 @@ This path builds photo ordering, quality signals, DINOv2 embeddings, and photo b
 - `photo_boundary_features.csv`
 - `photo_boundary_scores.csv`
 - `photo_segments.csv`
-- `performance_proxy_index.image.json`
+- `performance_proxy_index.json`
 
 Directories:
 
@@ -364,7 +364,7 @@ python3 scripts/pipeline/build_photo_review_index.py DAY
 #### 9. Review heuristic image-only sets
 
 ```bash
-python3 scripts/pipeline/review_performance_proxy_gui.py DAY --index performance_proxy_index.image.json --state review_state.image.json
+python3 scripts/pipeline/review_performance_proxy_gui.py DAY --index performance_proxy_index.json --state review_state.json
 ```
 
 Use a dedicated `--state` file for image-only review so you do not mix it with the audio-assisted review state.
@@ -438,13 +438,13 @@ python3 scripts/pipeline/build_vlm_photo_boundary_gui_index.py DAY --run-id YOUR
 
 This creates:
 
-- `performance_proxy_index.image.vlm.json`
+- `performance_proxy_index.json`
 
 #### Review VLM-assisted image-only sets
 
 ```bash
 python3 scripts/pipeline/review_performance_proxy_gui.py DAY \
-  --index performance_proxy_index.image.vlm.json \
+  --index performance_proxy_index.json \
   --state review_state.image.vlm.json
 ```
 

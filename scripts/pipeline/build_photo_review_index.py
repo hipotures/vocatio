@@ -39,7 +39,7 @@ from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
 PHOTO_EMBEDDED_MANIFEST_FILENAME = "photo_embedded_manifest.csv"
-PHOTO_REVIEW_INDEX_FILENAME = "performance_proxy_index.image.json"
+PHOTO_REVIEW_INDEX_FILENAME = "performance_proxy_index.json"
 MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "path", "photo_order_index", "start_local", "start_epoch_ms"})
 EMBEDDED_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "preview_path"})
 UNCERTAIN_BOUNDARY_SCORE_THRESHOLD = 0.95
@@ -79,7 +79,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Overwrite an existing performance_proxy_index.image.json output",
+        help="Overwrite an existing performance_proxy_index.json output",
     )
     return parser.parse_args(argv)
 

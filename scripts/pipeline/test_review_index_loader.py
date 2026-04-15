@@ -15,7 +15,7 @@ from lib import review_index_loader
 
 class ReviewIndexLoaderTests(unittest.TestCase):
     def write_payload(self, workspace_dir: Path, payload: dict) -> Path:
-        index_path = workspace_dir / "performance_proxy_index.image.json"
+        index_path = workspace_dir / "performance_proxy_index.json"
         index_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
         return index_path
 

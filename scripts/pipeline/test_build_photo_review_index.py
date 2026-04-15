@@ -190,7 +190,7 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
             boundary_scores_csv = workspace_dir / "photo_boundary_scores.csv"
             segments_csv = workspace_dir / "photo_segments.csv"
-            output_path = workspace_dir / "performance_proxy_index.image.json"
+            output_path = workspace_dir / "performance_proxy_index.json"
 
             self.write_manifest(manifest_csv, day_dir, relative_paths)
             self.write_embedded_manifest(embedded_manifest_csv, relative_paths)
@@ -273,7 +273,7 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
             boundary_scores_csv = workspace_dir / "photo_boundary_scores.csv"
             segments_csv = workspace_dir / "photo_segments.csv"
-            output_path = workspace_dir / "performance_proxy_index.image.json"
+            output_path = workspace_dir / "performance_proxy_index.json"
 
             self.write_manifest(manifest_csv, day_dir, relative_paths)
             self.write_embedded_manifest(embedded_manifest_csv, relative_paths)
@@ -373,7 +373,7 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
             boundary_scores_csv = workspace_dir / "photo_boundary_scores.csv"
             segments_csv = workspace_dir / "photo_segments.csv"
-            output_path = workspace_dir / "performance_proxy_index.image.json"
+            output_path = workspace_dir / "performance_proxy_index.json"
 
             self.write_manifest(manifest_csv, day_dir, relative_paths)
             self.write_embedded_manifest(embedded_manifest_csv, relative_paths)
@@ -473,7 +473,7 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
             boundary_scores_csv = workspace_dir / "photo_boundary_scores.csv"
             segments_csv = workspace_dir / "photo_segments.csv"
-            output_path = workspace_dir / "performance_proxy_index.image.json"
+            output_path = workspace_dir / "performance_proxy_index.json"
 
             self.write_manifest(manifest_csv, day_dir, relative_paths)
             self.write_embedded_manifest(embedded_manifest_csv, [relative_paths[1], relative_paths[0], relative_paths[2]])
@@ -536,7 +536,7 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
             boundary_scores_csv = workspace_dir / "photo_boundary_scores.csv"
             segments_csv = workspace_dir / "photo_segments.csv"
-            output_path = workspace_dir / "performance_proxy_index.image.json"
+            output_path = workspace_dir / "performance_proxy_index.json"
 
             self.write_manifest(manifest_csv, day_dir, relative_paths)
             self.write_embedded_manifest(embedded_manifest_csv, relative_paths)
@@ -578,7 +578,7 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             embedded_manifest_csv = external_workspace / "photo_embedded_manifest.csv"
             boundary_scores_csv = external_workspace / "photo_boundary_scores.csv"
             segments_csv = external_workspace / "photo_segments.csv"
-            output_path = external_workspace / "performance_proxy_index.image.json"
+            output_path = external_workspace / "performance_proxy_index.json"
 
             self.write_manifest(manifest_csv, day_dir, relative_paths)
             self.write_embedded_manifest(embedded_manifest_csv, relative_paths)
