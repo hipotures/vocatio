@@ -557,15 +557,24 @@ def detect_streams(day_dir: Path) -> Dict[str, Dict[str, str]]:
 def collect_files(stream_dir: Path, media_type: str) -> List[Path]:
     allowed_extensions = PHOTO_EXTENSIONS if media_type == "photo" else VIDEO_EXTENSIONS
     files: List[Path] = []
-    for path in sorted(stream_dir.iterdir()):
-        if path.is_symlink():
+    for root, dirnames, filenames in os.walk(stream_dir, topdown=True, followlinks=False):
+        root_path = Path(root)
+        relative_root = root_path.relative_to(stream_dir)
+        dirnames[:] = sorted(
+            dirname
+            for dirname in dirnames
+            if dirname != "_workspace" and not (root_path / dirname).is_symlink()
+        )
+        if "_workspace" in relative_root.parts:
             continue
-        if not path.is_file():
-            continue
-        if path.suffix.lower() not in allowed_extensions:
-            continue
-        files.append(path)
-    return files
+        for filename in sorted(filenames):
+            path = root_path / filename
+            if path.is_symlink():
+                continue
+            if path.suffix.lower() not in allowed_extensions:
+                continue
+            files.append(path)
+    return sorted(files, key=lambda path: path.relative_to(stream_dir).as_posix())
 
 
 def metadata_by_source_path(items: Iterable[Mapping[str, object]]) -> Dict[str, Mapping[str, object]]:
@@ -728,6 +737,21 @@ def filter_streams_by_media_types(
     }
 
 
+def final_manifest_sort_key(row: Mapping[str, str]) -> tuple[object, ...]:
+    if row.get("media_type") == "photo":
+        return (
+            0,
+            int(row.get("photo_order_index") or "0"),
+            row.get("relative_path", ""),
+        )
+    return (
+        1,
+        row.get("start_local", ""),
+        row.get("stream_id", ""),
+        row.get("relative_path", ""),
+    )
+
+
 def selected_streams(
     streams: Dict[str, Dict[str, str]],
     targets: Optional[Sequence[str]],
@@ -842,14 +866,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     assign_photo_order_indexes(ordered_photo_rows)
     rows = ordered_photo_rows + video_rows
-    rows.sort(
-        key=lambda row: (
-            row.get("start_local", ""),
-            row.get("media_type", ""),
-            row.get("stream_id", ""),
-            row.get("relative_path", ""),
-        )
-    )
+    rows.sort(key=final_manifest_sort_key)
     write_media_manifest_csv(output_path, rows)
     console.print(f"[green]Wrote {len(rows)} rows to {output_path}[/green]")
     return 0

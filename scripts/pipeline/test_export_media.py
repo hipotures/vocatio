@@ -833,6 +833,123 @@ class ExportMediaCliTests(unittest.TestCase):
             self.assertEqual(photo_rows[1]["metadata_error"], "Missing metadata")
             self.assertEqual(photo_rows[1]["timestamp_source"], "file_mtime")
 
+    def test_main_discovers_nested_photo_files_recursively(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            photo_dir = day_dir / "p-a7r5"
+            nested_dir = photo_dir / "raw"
+            ignored_workspace_dir = photo_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            nested_dir.mkdir(parents=True)
+            ignored_workspace_dir.mkdir(parents=True)
+
+            nested_photo_path = nested_dir / "nested.hif"
+            ignored_workspace_photo = ignored_workspace_dir / "ignored.hif"
+            ignored_text_path = nested_dir / "notes.txt"
+            nested_photo_path.write_bytes(b"nested")
+            ignored_workspace_photo.write_bytes(b"ignored")
+            ignored_text_path.write_text("ignore", encoding="utf-8")
+
+            seen_path_sets = []
+
+            def fake_run_exiftool(paths, on_batch_processed=None):
+                seen_path_sets.append([path.relative_to(day_dir).as_posix() for path in paths])
+                if on_batch_processed is not None:
+                    on_batch_processed(len(paths))
+                self.assertEqual(paths, [nested_photo_path])
+                return [
+                    {
+                        "SourceFile": str(nested_photo_path),
+                        "DateTimeOriginal": "2026:03:23 10:00:01",
+                        "SubSecDateTimeOriginal": "2026:03:23 10:00:01.123",
+                        "Model": "ILCE-7RM5",
+                        "Make": "Sony",
+                    }
+                ]
+
+            with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
+                with mock.patch.object(export_media, "run_exiftool", side_effect=fake_run_exiftool):
+                    with mock.patch.object(export_media.console, "print"):
+                        exit_code = export_media.main([str(day_dir), "--media-types", "photo"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(seen_path_sets, [["p-a7r5/raw/nested.hif"]])
+
+            rows = media_manifest.read_media_manifest(workspace_dir / "media_manifest.csv")
+            photo_rows = media_manifest.select_photo_rows(rows)
+            self.assertEqual(len(photo_rows), 1)
+            self.assertEqual(photo_rows[0]["relative_path"], "p-a7r5/raw/nested.hif")
+            self.assertEqual(photo_rows[0]["source_rel_dir"], "p-a7r5/raw")
+            self.assertEqual(photo_rows[0]["metadata_status"], "ok")
+
+    def test_main_preserves_photo_row_order_after_final_manifest_sort(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            photo_dir = day_dir / "p-a7r5"
+            video_dir = day_dir / "v-gh7"
+            workspace_dir.mkdir(parents=True)
+            photo_dir.mkdir(parents=True)
+            video_dir.mkdir(parents=True)
+
+            offset_first_path = photo_dir / "offset-first.hif"
+            utc_later_path = photo_dir / "utc-later.hif"
+            video_path = video_dir / "20260323_091500_3840x2160_60fps_123456.mp4"
+            offset_first_path.write_bytes(b"offset-first")
+            utc_later_path.write_bytes(b"utc-later")
+            video_path.write_bytes(b"video")
+
+            def fake_run_exiftool(paths, on_batch_processed=None):
+                if on_batch_processed is not None:
+                    on_batch_processed(len(paths))
+                path_names = sorted(path.name for path in paths)
+                if path_names == ["offset-first.hif", "utc-later.hif"]:
+                    return [
+                        {
+                            "SourceFile": str(offset_first_path),
+                            "DateTimeOriginal": "2026:03:23 10:00:00+02:00",
+                            "SubSecDateTimeOriginal": "2026:03:23 10:00:00.100+02:00",
+                            "Model": "ILCE-7RM5",
+                            "Make": "Sony",
+                        },
+                        {
+                            "SourceFile": str(utc_later_path),
+                            "DateTimeOriginal": "2026:03:23 09:30:00+00:00",
+                            "SubSecDateTimeOriginal": "2026:03:23 09:30:00.050+00:00",
+                            "Model": "ILCE-7RM5",
+                            "Make": "Sony",
+                        },
+                    ]
+                if path_names == ["20260323_091500_3840x2160_60fps_123456.mp4"]:
+                    return [
+                        {
+                            "SourceFile": str(video_path),
+                            "TrackCreateDate": "2026:03:23 09:15:00+00:00",
+                            "Duration": "5.0",
+                            "ImageWidth": "3840",
+                            "ImageHeight": "2160",
+                            "VideoFrameRate": "60",
+                        }
+                    ]
+                self.fail(f"Unexpected exiftool paths: {path_names}")
+
+            with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
+                with mock.patch.object(export_media, "run_exiftool", side_effect=fake_run_exiftool):
+                    with mock.patch.object(export_media.console, "print"):
+                        exit_code = export_media.main([str(day_dir)])
+
+            self.assertEqual(exit_code, 0)
+            rows = media_manifest.read_media_manifest(workspace_dir / "media_manifest.csv")
+            photo_rows = media_manifest.select_photo_rows(rows)
+            self.assertEqual(
+                [(row["relative_path"], row["photo_order_index"]) for row in photo_rows],
+                [
+                    ("p-a7r5/offset-first.hif", "0"),
+                    ("p-a7r5/utc-later.hif", "1"),
+                ],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
