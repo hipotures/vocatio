@@ -9,14 +9,16 @@ from lib.ml_boundary_dataset import canonical_candidate_id, sort_photo_rows
 
 def test_sort_photo_rows_uses_timestamp_order_idx_photo_id() -> None:
     rows = [
-        {"photo_id": "p10", "order_idx": "10", "timestamp": "2025-03-25T08:00:00.000"},
+        {"photo_id": "p3", "order_idx": "10", "timestamp": "2025-03-25T08:00:00.000"},
+        {"photo_id": "p4", "order_idx": "2", "timestamp": "2025-03-25T08:00:01.000"},
         {"photo_id": "p2", "order_idx": "2", "timestamp": "2025-03-25T08:00:00.000"},
-        {"photo_id": "p1", "order_idx": 1, "timestamp": "2025-03-25T08:00:00.000"},
+        {"photo_id": "p0", "order_idx": "99", "timestamp": "2025-03-25T07:59:59.000"},
+        {"photo_id": "p1", "order_idx": 2, "timestamp": "2025-03-25T08:00:00.000"},
     ]
 
     ordered = sort_photo_rows(rows)
 
-    assert [row["photo_id"] for row in ordered] == ["p1", "p2", "p10"]
+    assert [row["photo_id"] for row in ordered] == ["p0", "p1", "p2", "p3", "p4"]
 
 
 def test_canonical_candidate_id_is_stable() -> None:
