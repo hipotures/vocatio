@@ -232,7 +232,16 @@ def build_provider_request_payload(request: VlmRequest) -> dict[str, Any]:
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         if request.response_format is not None:
-            payload["response_format"] = request.response_format
+            if request.provider == "llamacpp":
+                response_type = str(request.response_format.get("type", "") or "").strip()
+                json_schema = request.response_format.get("json_schema")
+                if response_type == "json_schema" and isinstance(json_schema, dict):
+                    schema = json_schema.get("schema")
+                    payload["json_schema"] = schema if isinstance(schema, dict) else json_schema
+                else:
+                    payload["response_format"] = request.response_format
+            else:
+                payload["response_format"] = request.response_format
         return payload
     raise VlmTransportError("unsupported_configuration", f"Unsupported VLM provider: {request.provider}")
 

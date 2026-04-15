@@ -308,6 +308,31 @@ class VlmTransportPayloadTests(unittest.TestCase):
         self.assertEqual(payload["messages"][0]["content"][0]["text"], "Describe image.")
         self.assertTrue(payload["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
 
+    def test_build_llamacpp_request_payload_moves_json_schema_to_top_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "example.jpg"
+            image_path.write_bytes(b"jpg")
+            request = vlm_transport.VlmRequest(
+                provider="llamacpp",
+                base_url="http://127.0.0.1:8002",
+                model="unsloth/Qwen3.5-4B-GGUF:UD-Q4_K_XL",
+                messages=[{"role": "user", "content": "Describe image."}],
+                image_paths=[image_path],
+                timeout_seconds=60.0,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}},
+                },
+            )
+
+            payload = vlm_transport.build_provider_request_payload(request)
+
+        self.assertNotIn("response_format", payload)
+        self.assertEqual(
+            payload["json_schema"],
+            {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+        )
+
     def test_build_vllm_request_payload_maps_neutral_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             image_path = Path(tmp_dir) / "example.jpg"
