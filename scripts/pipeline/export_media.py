@@ -3,20 +3,24 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
+import json
 import math
 import os
 import re
+import subprocess
 import tempfile
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from rich.console import Console
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
+    Progress,
     SpinnerColumn,
     TaskProgressColumn,
     TextColumn,
@@ -64,6 +68,9 @@ VIDEO_TIME_FIELDS: Sequence[tuple[str, str]] = (
     ("FileCreateDate", "file_create_date"),
     ("FileModifyDate", "file_modify_date"),
 )
+PHOTO_EXTENSIONS = {".arw", ".cr3", ".hif", ".heif", ".jpg", ".jpeg", ".nef"}
+VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mts"}
+EXIFTOOL_BATCH_SIZE = 1000
 
 
 def positive_int_arg(value: str) -> int:
@@ -547,6 +554,150 @@ def detect_streams(day_dir: Path) -> Dict[str, Dict[str, str]]:
     return streams
 
 
+def collect_files(stream_dir: Path, media_type: str) -> List[Path]:
+    allowed_extensions = PHOTO_EXTENSIONS if media_type == "photo" else VIDEO_EXTENSIONS
+    files: List[Path] = []
+    for path in sorted(stream_dir.iterdir()):
+        if path.is_symlink():
+            continue
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in allowed_extensions:
+            continue
+        files.append(path)
+    return files
+
+
+def metadata_by_source_path(items: Iterable[Mapping[str, object]]) -> Dict[str, Mapping[str, object]]:
+    output: Dict[str, Mapping[str, object]] = {}
+    for item in items:
+        source_file = str(item.get("SourceFile") or "").strip()
+        if not source_file:
+            continue
+        output[source_file] = item
+    return output
+
+
+def resolve_workspace_dir(day_dir: Path, workspace_value: Optional[str]) -> Path:
+    if workspace_value:
+        return Path(workspace_value).resolve()
+    return day_dir / "_workspace"
+
+
+def resolve_output_path(workspace_dir: Path, output_value: str) -> Path:
+    candidate = Path(output_value)
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (workspace_dir / candidate).resolve()
+
+
+def exiftool_base_command() -> List[str]:
+    return [
+        "exiftool",
+        "-api",
+        "QuickTimeUTC=1",
+        "-json",
+        "-n",
+        "-CreateDate",
+        "-TrackCreateDate",
+        "-MediaCreateDate",
+        "-DateTimeOriginal",
+        "-SubSecDateTimeOriginal",
+        "-SubSecCreateDate",
+        "-FileModifyDate",
+        "-FileCreateDate",
+        "-Duration",
+        "-ImageWidth",
+        "-ImageHeight",
+        "-VideoFrameRate",
+        "-Model",
+        "-Make",
+    ]
+
+
+def run_exiftool(
+    paths: Sequence[Path],
+    on_batch_processed: Optional[Callable[[int], None]] = None,
+) -> List[Dict[str, object]]:
+    if not paths:
+        return []
+    items: List[Dict[str, object]] = []
+    for index in range(0, len(paths), EXIFTOOL_BATCH_SIZE):
+        batch = paths[index:index + EXIFTOOL_BATCH_SIZE]
+        cmd = exiftool_base_command()
+        cmd.extend(str(path) for path in batch)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                cmd,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
+        payload = result.stdout.strip()
+        if payload:
+            loaded = json.loads(payload)
+            if isinstance(loaded, list):
+                items.extend(item for item in loaded if isinstance(item, dict))
+        if on_batch_processed is not None:
+            on_batch_processed(len(batch))
+    return items
+
+
+def warn_metadata_batch_failure(stream_id: str, batch: Sequence[Path], error: Exception) -> None:
+    console.print(
+        "[yellow]Warning: failed to read metadata for "
+        f"{stream_id} batch ({len(batch)} file(s)): {error}[/yellow]"
+    )
+
+
+def extract_metadata_by_stream(
+    stream_files: Sequence[tuple[Dict[str, str], Sequence[Path]]],
+    jobs: int,
+    progress: Progress,
+    metadata_task: object,
+) -> Dict[str, Dict[str, Mapping[str, object]]]:
+    metadata_for_streams: Dict[str, Dict[str, Mapping[str, object]]] = {
+        info["stream_id"]: {}
+        for info, _files in stream_files
+    }
+    batch_specs = [
+        (info["stream_id"], files[index:index + EXIFTOOL_BATCH_SIZE])
+        for info, files in stream_files
+        for index in range(0, len(files), EXIFTOOL_BATCH_SIZE)
+    ]
+    if not batch_specs:
+        return metadata_for_streams
+
+    if jobs <= 1 or len(batch_specs) <= 1:
+        for stream_id, batch in batch_specs:
+            try:
+                items = run_exiftool(batch)
+            except Exception as error:
+                warn_metadata_batch_failure(stream_id, batch, error)
+                items = []
+            metadata_for_streams[stream_id].update(metadata_by_source_path(items))
+            progress.advance(metadata_task, len(batch))
+        return metadata_for_streams
+
+    max_workers = min(jobs, len(batch_specs))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_batch = {
+            executor.submit(run_exiftool, batch): (stream_id, batch)
+            for stream_id, batch in batch_specs
+        }
+        for future in concurrent.futures.as_completed(future_to_batch):
+            stream_id, batch = future_to_batch[future]
+            try:
+                items = future.result()
+            except Exception as error:
+                warn_metadata_batch_failure(stream_id, batch, error)
+                items = []
+            metadata_for_streams[stream_id].update(metadata_by_source_path(items))
+            progress.advance(metadata_task, len(batch))
+    return metadata_for_streams
+
+
 def filter_streams_by_media_types(
     streams: Dict[str, Dict[str, str]],
     media_types: str,
@@ -582,6 +733,14 @@ def main(argv: list[str] | None = None) -> int:
     if not DAY_PATTERN.match(day_dir.name):
         console.print(f"[red]Error: expected a day directory like 20260323, got {day_dir.name}.[/red]")
         return 1
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
+    if workspace_dir.exists() and not workspace_dir.is_dir():
+        console.print(f"[red]Error: workspace path is not a directory: {workspace_dir}[/red]")
+        return 1
+    output_path = resolve_output_path(workspace_dir, args.output)
+    if output_path.exists() and output_path.is_dir():
+        console.print(f"[red]Error: output path is a directory: {output_path}[/red]")
+        return 1
 
     streams = detect_streams(day_dir)
     if not streams:
@@ -608,10 +767,75 @@ def main(argv: list[str] | None = None) -> int:
         for info in streams_to_process:
             console.print(f"{info['stream_id']}  {info['media_type']}  {info['source_dir']}")
         return 0
-    console.print(
-        "[red]Error: export orchestration is not implemented yet. Use --list-targets to inspect detected streams.[/red]"
+
+    stream_files = [
+        (info, collect_files(Path(info["source_dir"]), info["media_type"]))
+        for info in streams_to_process
+    ]
+    total_files = sum(len(files) for _info, files in stream_files)
+    if total_files == 0:
+        console.print(
+            "[red]Error: no supported media files found in selected streams under "
+            f"{day_dir}.[/red]"
+        )
+        return 1
+
+    photo_rows_with_sort: List[tuple[tuple[datetime, str, str], Dict[str, str]]] = []
+    video_rows: List[Dict[str, str]] = []
+    with Progress(*build_progress_columns(), expand=False, console=console) as progress:
+        discover_task = progress.add_task("Discover files".ljust(25), total=total_files)
+        progress.update(discover_task, completed=total_files)
+        metadata_task = progress.add_task("Read metadata".ljust(25), total=total_files)
+        row_task = progress.add_task("Build manifest rows".ljust(25), total=total_files)
+        metadata_for_streams = extract_metadata_by_stream(
+            stream_files,
+            args.jobs,
+            progress,
+            metadata_task,
+        )
+
+        for info, files in stream_files:
+            stream_metadata = metadata_for_streams.get(info["stream_id"], {})
+            for path in files:
+                metadata = stream_metadata.get(str(path))
+                if info["media_type"] == "photo":
+                    sort_key, row = build_photo_manifest_entry(
+                        day_dir,
+                        info["stream_id"],
+                        info["device"],
+                        path,
+                        metadata,
+                    )
+                    photo_rows_with_sort.append((sort_key, row))
+                else:
+                    video_rows.append(
+                        build_video_manifest_entry(
+                            day_dir,
+                            info["stream_id"],
+                            info["device"],
+                            path,
+                            metadata,
+                        )
+                    )
+                progress.advance(row_task)
+
+    ordered_photo_rows = [
+        row
+        for _sort_key, row in sorted(photo_rows_with_sort, key=lambda item: item[0])
+    ]
+    assign_photo_order_indexes(ordered_photo_rows)
+    rows = ordered_photo_rows + video_rows
+    rows.sort(
+        key=lambda row: (
+            row.get("start_local", ""),
+            row.get("media_type", ""),
+            row.get("stream_id", ""),
+            row.get("relative_path", ""),
+        )
     )
-    return 1
+    write_media_manifest_csv(output_path, rows)
+    console.print(f"[green]Wrote {len(rows)} rows to {output_path}[/green]")
+    return 0
 
 
 if __name__ == "__main__":

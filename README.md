@@ -64,6 +64,22 @@ DAY/_workspace
 
 You can override this with `--workspace-dir`.
 
+## Unified Media Export
+
+Use `export_media.py` to build the canonical single-manifest export for a day:
+
+```bash
+python3 scripts/pipeline/export_media.py DAY
+```
+
+By default this writes:
+
+```bash
+DAY/_workspace/media_manifest.csv
+```
+
+Use `--list-targets` to inspect detected `p-*` and `v-*` streams without writing output. `--media-types photo` and `--media-types video` remain available for staged debugging and migration checks.
+
 ## Expected Day Directory Structure
 
 Example under `/data/DAY/`:

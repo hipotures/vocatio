@@ -33,6 +33,26 @@ export_media = load_module("export_media_test", "scripts/pipeline/export_media.p
 media_manifest = importlib.import_module("scripts.pipeline.lib.media_manifest")
 
 
+class DummyProgress:
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def add_task(self, description, total=0):
+        return description
+
+    def update(self, task_id, **kwargs) -> None:
+        return None
+
+    def advance(self, task_id, advance=1) -> None:
+        return None
+
+
 class ExportMediaCliTests(unittest.TestCase):
     def test_parse_args_defaults(self) -> None:
         args = export_media.parse_args(["/data/20260323"])
@@ -566,13 +586,17 @@ class ExportMediaCliTests(unittest.TestCase):
     def test_main_list_targets_prints_selected_streams_and_returns_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
             (day_dir / "p-a7r5").mkdir(parents=True)
             (day_dir / "v-gh7").mkdir(parents=True)
+            workspace_dir.mkdir()
+            output_path = workspace_dir / "media_manifest.csv"
 
             with mock.patch.object(export_media.console, "print") as console_print:
                 exit_code = export_media.main([str(day_dir), "--list-targets"])
 
             self.assertEqual(exit_code, 0)
+            self.assertFalse(output_path.exists())
             self.assertEqual(
                 [call.args[0] for call in console_print.call_args_list],
                 [
@@ -663,19 +687,89 @@ class ExportMediaCliTests(unittest.TestCase):
             "[red]Error: requested targets matched no streams for media-types=video: p-a7r5[/red]",
         )
 
-    def test_main_rejects_export_execution_until_orchestration_exists(self) -> None:
+    def test_main_writes_media_manifest_and_keeps_rows_when_metadata_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"
-            (day_dir / "p-a7r5").mkdir(parents=True)
+            workspace_dir = day_dir / "_workspace"
+            photo_dir = day_dir / "p-a7r5"
+            video_dir = day_dir / "v-gh7"
+            workspace_dir.mkdir(parents=True)
+            photo_dir.mkdir(parents=True)
+            video_dir.mkdir(parents=True)
 
-            with mock.patch.object(export_media.console, "print") as console_print:
-                exit_code = export_media.main([str(day_dir)])
+            early_photo_path = photo_dir / "early.hif"
+            late_photo_path = photo_dir / "late.hif"
+            video_path = video_dir / "20260323_100005_3840x2160_60fps_123456.mp4"
 
-        self.assertEqual(exit_code, 1)
-        self.assertEqual(
-            console_print.call_args_list[0].args[0],
-            "[red]Error: export orchestration is not implemented yet. Use --list-targets to inspect detected streams.[/red]",
-        )
+            early_photo_path.write_bytes(b"early")
+            late_photo_path.write_bytes(b"late")
+            video_path.write_bytes(b"video")
+
+            early_dt = datetime(2026, 3, 23, 10, 0, 0, 456000)
+            early_epoch_ns = int(early_dt.timestamp() * 1_000_000_000)
+            os.utime(early_photo_path, ns=(early_epoch_ns, early_epoch_ns))
+
+            def fake_run_exiftool(paths, on_batch_processed=None):
+                if on_batch_processed is not None:
+                    on_batch_processed(len(paths))
+                path_names = sorted(path.name for path in paths)
+                if path_names == ["early.hif", "late.hif"]:
+                    return [
+                        {
+                            "SourceFile": str(late_photo_path),
+                            "DateTimeOriginal": "2026:03:23 10:00:01",
+                            "SubSecDateTimeOriginal": "2026:03:23 10:00:01.123",
+                            "Model": "ILCE-7RM5",
+                            "Make": "Sony",
+                        }
+                    ]
+                if path_names == ["20260323_100005_3840x2160_60fps_123456.mp4"]:
+                    raise RuntimeError("exiftool failed")
+                self.fail(f"Unexpected exiftool paths: {path_names}")
+
+            with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
+                with mock.patch.object(export_media, "run_exiftool", side_effect=fake_run_exiftool, create=True):
+                    with mock.patch.object(export_media.console, "print") as console_print:
+                        exit_code = export_media.main([str(day_dir)])
+
+            self.assertEqual(exit_code, 0)
+            output_path = workspace_dir / "media_manifest.csv"
+            self.assertTrue(output_path.exists())
+
+            rows = media_manifest.read_media_manifest(output_path)
+            self.assertEqual([row["relative_path"] for row in rows], [
+                "p-a7r5/early.hif",
+                "p-a7r5/late.hif",
+                "v-gh7/20260323_100005_3840x2160_60fps_123456.mp4",
+            ])
+
+            photo_rows = media_manifest.select_photo_rows(rows)
+            self.assertEqual(
+                [(row["relative_path"], row["photo_order_index"]) for row in photo_rows],
+                [
+                    ("p-a7r5/early.hif", "0"),
+                    ("p-a7r5/late.hif", "1"),
+                ],
+            )
+            self.assertEqual(photo_rows[0]["metadata_status"], "error")
+            self.assertEqual(photo_rows[0]["timestamp_source"], "file_mtime")
+            self.assertEqual(photo_rows[1]["metadata_status"], "ok")
+            self.assertEqual(photo_rows[1]["model"], "ILCE-7RM5")
+
+            video_rows = media_manifest.select_video_rows(rows)
+            self.assertEqual(len(video_rows), 1)
+            self.assertEqual(video_rows[0]["relative_path"], "v-gh7/20260323_100005_3840x2160_60fps_123456.mp4")
+            self.assertEqual(video_rows[0]["metadata_status"], "error")
+            self.assertEqual(video_rows[0]["timestamp_source"], "filename_pattern")
+            self.assertEqual(video_rows[0]["duration_seconds"], "0")
+            self.assertEqual(video_rows[0]["width"], "3840")
+            self.assertEqual(video_rows[0]["height"], "2160")
+            self.assertEqual(video_rows[0]["fps"], "60")
+
+            self.assertEqual(
+                console_print.call_args_list[-1].args[0],
+                f"[green]Wrote 3 rows to {output_path}[/green]",
+            )
 
 
 if __name__ == "__main__":
