@@ -79,6 +79,11 @@ def test_sort_photo_rows_rejects_invalid_or_blank_timestamp() -> None:
             sort_photo_rows([{"photo_id": "p1", "order_idx": "1", "timestamp": timestamp}])
 
 
+def test_sort_photo_rows_rejects_missing_timestamp_key() -> None:
+    with pytest.raises(ValueError, match="timestamp"):
+        sort_photo_rows([{"photo_id": "p1", "order_idx": "1"}])
+
+
 def test_sort_photo_rows_rejects_missing_or_blank_order_idx() -> None:
     with pytest.raises(ValueError, match="order_idx"):
         sort_photo_rows([{"photo_id": "p1", "timestamp": "2025-03-25T08:00:00.000"}])
@@ -94,6 +99,14 @@ def test_sort_photo_rows_rejects_non_numeric_order_idx() -> None:
         sort_photo_rows(
             [{"photo_id": "p1", "order_idx": "abc", "timestamp": "2025-03-25T08:00:00.000"}]
         )
+
+
+def test_sort_photo_rows_rejects_boolean_order_idx() -> None:
+    for order_idx in (True, False):
+        with pytest.raises(ValueError, match="order_idx"):
+            sort_photo_rows(
+                [{"photo_id": "p1", "order_idx": order_idx, "timestamp": "2025-03-25T08:00:00.000"}]
+            )
 
 
 def test_sort_photo_rows_rejects_non_integral_float_order_idx() -> None:

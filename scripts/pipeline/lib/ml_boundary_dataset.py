@@ -42,6 +42,8 @@ def _normalize_timestamp(value: object) -> float:
 def _normalize_order_idx(value: object) -> int:
     if value in (None, ""):
         raise ValueError("order_idx is required and must not be blank")
+    if isinstance(value, bool):
+        raise ValueError(f"order_idx must be an integer: {value}")
     if isinstance(value, float) and not value.is_integer():
         raise ValueError(f"order_idx must be an integer: {value}")
     try:
@@ -60,7 +62,7 @@ def sort_photo_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     return sorted(
         rows,
         key=lambda row: (
-            _normalize_timestamp(row["timestamp"]),
+            _normalize_timestamp(row.get("timestamp")),
             _normalize_order_idx(row.get("order_idx")),
             _normalize_photo_id(row.get("photo_id")),
         ),
