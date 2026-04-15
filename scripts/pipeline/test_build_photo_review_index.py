@@ -198,7 +198,7 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             self.write_segments(segments_csv, relative_paths)
             self.create_preview_files(workspace_dir, relative_paths)
 
-            performance_count = build_index.build_photo_review_index(
+            performance_count, photo_count = build_index.build_photo_review_index(
                 workspace_dir=workspace_dir,
                 manifest_csv=manifest_csv,
                 segments_csv=segments_csv,
@@ -208,6 +208,7 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             )
 
             self.assertEqual(performance_count, 2)
+            self.assertEqual(photo_count, 5)
             payload = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["day"], "20260323")
             self.assertEqual(payload["workspace_dir"], str(workspace_dir))
@@ -544,7 +545,7 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             self.write_segments(segments_csv, relative_paths)
             self.create_preview_files(workspace_dir, relative_paths)
 
-            performance_count = build_index.build_photo_review_index(
+            performance_count, photo_count = build_index.build_photo_review_index(
                 day_dir=day_dir,
                 workspace_dir=workspace_dir,
                 manifest_csv=manifest_csv,
@@ -555,6 +556,7 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             )
 
             self.assertEqual(performance_count, 2)
+            self.assertEqual(photo_count, 5)
             payload = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["workspace_dir"], str(workspace_dir))
 
@@ -586,7 +588,7 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             self.write_segments(segments_csv, relative_paths)
             self.create_preview_files(external_workspace, relative_paths)
 
-            performance_count = build_index.build_photo_review_index(
+            performance_count, photo_count = build_index.build_photo_review_index(
                 day_dir=day_dir,
                 workspace_dir=workspace_link,
                 manifest_csv=manifest_csv,
@@ -597,6 +599,7 @@ class BuildPhotoReviewIndexTests(unittest.TestCase):
             )
 
             self.assertEqual(performance_count, 2)
+            self.assertEqual(photo_count, 5)
             payload = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["workspace_dir"], str(workspace_link))
 

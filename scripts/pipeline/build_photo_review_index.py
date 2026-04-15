@@ -447,6 +447,9 @@ def build_performance_payloads(
     segment_rows: Sequence[Mapping[str, object]],
     preview_by_relative_path: Mapping[str, Mapping[str, str]],
     boundary_rows: Sequence[Mapping[str, str]],
+    *,
+    progress: Progress,
+    task_id: int,
 ) -> List[Dict[str, object]]:
     performance_rows: List[Dict[str, object]] = []
     segment_confidence_by_cut_index: Dict[int, tuple[float, float]] = {}
@@ -470,66 +473,56 @@ def build_performance_payloads(
     }
     uncertain_cut_indexes = {cut_index for cut_index, reason in uncertain_cut_reasons.items() if reason}
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(bar_width=40),
-        MofNCompleteColumn(),
-        TaskProgressColumn(),
-        TimeElapsedColumn(),
-        expand=False,
-        console=console,
-    ) as progress:
-        task = progress.add_task("Build review index".ljust(25), total=len(segment_rows))
-        for segment_row in segment_rows:
-            start_index = int(segment_row["start_index"])
-            end_index = int(segment_row["end_index"])
-            left_cut_index = start_index - 1 if start_index > 0 else None
-            right_cut_index = end_index if end_index < len(manifest_rows) - 1 else None
-            review_first_photo = left_cut_index is not None and left_cut_index in uncertain_cut_indexes
-            review_last_photo = right_cut_index is not None and right_cut_index in uncertain_cut_indexes
-            photos: List[Dict[str, object]] = []
-            for photo_index in range(start_index, end_index + 1):
-                manifest_row = manifest_rows[photo_index]
-                preview_row = preview_by_relative_path[str(manifest_row["relative_path"])]
-                assignment_status = "assigned"
-                assignment_reason = ""
-                if review_first_photo and photo_index == start_index:
-                    assignment_status = "review"
-                    assignment_reason = uncertain_cut_reasons.get(left_cut_index, "") if left_cut_index is not None else ""
-                if review_last_photo and photo_index == end_index:
-                    assignment_status = "review"
-                    assignment_reason = (
-                        uncertain_cut_reasons.get(right_cut_index, "") if right_cut_index is not None else ""
-                    )
-                photos.append(
-                    build_photo_payload(
-                        manifest_row,
-                        preview_row,
-                        assignment_status=assignment_status,
-                        assignment_reason=assignment_reason,
-                        seconds_to_boundary=nearest_boundary_seconds(
-                            manifest_rows,
-                            photo_index,
-                            start_index if left_cut_index is not None else None,
-                            end_index if right_cut_index is not None else None,
-                        ),
-                    )
+    progress.update(task_id, description="Build review index".ljust(25))
+    for segment_row in segment_rows:
+        start_index = int(segment_row["start_index"])
+        end_index = int(segment_row["end_index"])
+        left_cut_index = start_index - 1 if start_index > 0 else None
+        right_cut_index = end_index if end_index < len(manifest_rows) - 1 else None
+        review_first_photo = left_cut_index is not None and left_cut_index in uncertain_cut_indexes
+        review_last_photo = right_cut_index is not None and right_cut_index in uncertain_cut_indexes
+        photos: List[Dict[str, object]] = []
+        for photo_index in range(start_index, end_index + 1):
+            manifest_row = manifest_rows[photo_index]
+            preview_row = preview_by_relative_path[str(manifest_row["relative_path"])]
+            assignment_status = "assigned"
+            assignment_reason = ""
+            if review_first_photo and photo_index == start_index:
+                assignment_status = "review"
+                assignment_reason = uncertain_cut_reasons.get(left_cut_index, "") if left_cut_index is not None else ""
+            if review_last_photo and photo_index == end_index:
+                assignment_status = "review"
+                assignment_reason = (
+                    uncertain_cut_reasons.get(right_cut_index, "") if right_cut_index is not None else ""
                 )
-            performance_rows.append(
-                {
-                    "set_id": str(segment_row["set_id"]),
-                    "performance_number": str(segment_row["performance_number"]),
-                    "segment_index": str(segment_row["segment_index"]),
-                    "timeline_status": IMAGE_ONLY_TIMELINE_STATUS,
-                    "duplicate_status": "normal",
-                    "performance_start_local": str(segment_row["start_local"]),
-                    "performance_end_local": str(segment_row["end_local"]),
-                    "segment_confidence": str(segment_row["segment_confidence"]),
-                    "photos": photos,
-                }
+            photos.append(
+                build_photo_payload(
+                    manifest_row,
+                    preview_row,
+                    assignment_status=assignment_status,
+                    assignment_reason=assignment_reason,
+                    seconds_to_boundary=nearest_boundary_seconds(
+                        manifest_rows,
+                        photo_index,
+                        start_index if left_cut_index is not None else None,
+                        end_index if right_cut_index is not None else None,
+                    ),
+                )
             )
-            progress.advance(task)
+        performance_rows.append(
+            {
+                "set_id": str(segment_row["set_id"]),
+                "performance_number": str(segment_row["performance_number"]),
+                "segment_index": str(segment_row["segment_index"]),
+                "timeline_status": IMAGE_ONLY_TIMELINE_STATUS,
+                "duplicate_status": "normal",
+                "performance_start_local": str(segment_row["start_local"]),
+                "performance_end_local": str(segment_row["end_local"]),
+                "segment_confidence": str(segment_row["segment_confidence"]),
+                "photos": photos,
+            }
+        )
+        progress.advance(task_id)
     return performance_rows
 
 
@@ -542,14 +535,42 @@ def build_photo_review_index(
     embedded_manifest_csv: Path,
     boundary_scores_csv: Path,
     output_path: Path,
-) -> int:
+) -> tuple[int, int]:
     declared_day_dir = day_dir if day_dir is not None else workspace_dir.parent
-    manifest_rows = read_photo_manifest(declared_day_dir, manifest_csv)
-    preview_by_relative_path = read_embedded_manifest(workspace_dir, embedded_manifest_csv, manifest_rows)
-    boundary_rows = read_boundary_scores(boundary_scores_csv)
-    validate_boundary_alignment(manifest_rows, boundary_rows)
-    segment_rows = read_segments(segments_csv, manifest_rows)
-    performances = build_performance_payloads(manifest_rows, segment_rows, preview_by_relative_path, boundary_rows)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        expand=False,
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("Read manifest".ljust(25), total=5)
+        manifest_rows = read_photo_manifest(declared_day_dir, manifest_csv)
+        progress.advance(task_id)
+        progress.update(task_id, description="Read embedded JPGs".ljust(25))
+        preview_by_relative_path = read_embedded_manifest(workspace_dir, embedded_manifest_csv, manifest_rows)
+        progress.advance(task_id)
+        progress.update(task_id, description="Read boundary scores".ljust(25))
+        boundary_rows = read_boundary_scores(boundary_scores_csv)
+        progress.advance(task_id)
+        progress.update(task_id, description="Validate alignment".ljust(25))
+        validate_boundary_alignment(manifest_rows, boundary_rows)
+        progress.advance(task_id)
+        progress.update(task_id, description="Read segments".ljust(25))
+        segment_rows = read_segments(segments_csv, manifest_rows)
+        progress.update(task_id, total=5 + len(segment_rows))
+        progress.advance(task_id)
+        performances = build_performance_payloads(
+            manifest_rows,
+            segment_rows,
+            preview_by_relative_path,
+            boundary_rows,
+            progress=progress,
+            task_id=task_id,
+        )
     payload = {
         "day": declared_day_dir.name,
         "workspace_dir": str(workspace_dir),
@@ -559,7 +580,7 @@ def build_photo_review_index(
         "performances": performances,
     }
     atomic_write_json(output_path, payload)
-    return len(performances)
+    return len(performances), len(manifest_rows)
 
 
 def main() -> int:
@@ -583,7 +604,7 @@ def main() -> int:
         raise SystemExit(f"Boundary scores CSV does not exist: {boundary_scores_csv}")
     if output_path.exists() and not args.overwrite:
         raise SystemExit(f"Output JSON already exists: {output_path}. Use --overwrite to replace it.")
-    performance_count = build_photo_review_index(
+    performance_count, photo_count = build_photo_review_index(
         day_dir=day_dir,
         workspace_dir=workspace_dir,
         manifest_csv=manifest_csv,
@@ -594,7 +615,7 @@ def main() -> int:
     )
     console.print(
         f"Wrote {performance_count} image-only review sets "
-        f"({len(read_photo_manifest(day_dir, manifest_csv))} photos) to {output_path}"
+        f"({photo_count} photos) to {output_path}"
     )
     return 0
 
