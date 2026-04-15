@@ -6,6 +6,7 @@ dependencies = [
     "rich==15.0.0",
     "torch==2.11.0+cu128",
     "torchvision==0.26.0+cu128",
+    "xformers>=0.0.35",
 ]
 
 [tool.uv.sources]
