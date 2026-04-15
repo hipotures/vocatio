@@ -20,13 +20,29 @@ from rich.progress import (
 )
 
 from lib.image_pipeline_contracts import MEDIA_MANIFEST_HEADERS
-from lib.photo_time_order import pick_capture_time_parts
+from lib.photo_time_order import (
+    CaptureTimeParts,
+    format_capture_subsec,
+    format_capture_time_local,
+    format_start_epoch_ms,
+    format_start_local,
+    normalize_sort_datetime,
+    parse_exif_datetime,
+    pick_capture_time_parts,
+)
 
 
 console = Console()
 DAY_PATTERN = re.compile(r"^\d{8}$")
 STREAM_PATTERN = re.compile(r"^(?P<prefix>[pv])-(?P<device>[A-Za-z0-9._-]+)$")
-PHOTO_FALLBACK_SORT_DT = datetime.max
+PHOTO_FALLBACK_TIME_FIELDS: Sequence[tuple[str, str]] = (
+    ("SubSecCreateDate", "subsec_create_date"),
+    ("SubSecDateTimeOriginal", "subsec_datetime_original"),
+    ("CreateDate", "create_date"),
+    ("DateTimeOriginal", "datetime_original"),
+    ("FileCreateDate", "file_create_date"),
+    ("FileModifyDate", "file_modify_date"),
+)
 
 
 def positive_int_arg(value: str) -> int:
@@ -100,13 +116,60 @@ def metadata_text(metadata: Optional[Mapping[str, object]], key: str) -> str:
     return str(metadata.get(key) or "")
 
 
+def capture_time_parts(
+    value: datetime,
+    capture_subsec: str,
+    timestamp_source: str,
+    aware_value: Optional[datetime] = None,
+) -> CaptureTimeParts:
+    return CaptureTimeParts(
+        capture_time_local=format_capture_time_local(value),
+        capture_subsec=format_capture_subsec(capture_subsec),
+        timestamp_source=timestamp_source,
+        start_local=format_start_local(value),
+        start_epoch_ms=format_start_epoch_ms(value, aware_value),
+        sort_dt=normalize_sort_datetime(value, aware_value),
+    )
+
+
+def capture_subsec_from_datetime(value: datetime) -> str:
+    return f"{value.microsecond:06d}".rstrip("0")
+
+
+def file_mtime_datetime(path: Path) -> datetime:
+    return datetime.fromtimestamp(path.stat().st_mtime)
+
+
+def pick_fallback_capture_time_parts(
+    metadata: Optional[Mapping[str, object]],
+    path: Path,
+) -> CaptureTimeParts:
+    if metadata is not None:
+        for field_name, source_name in PHOTO_FALLBACK_TIME_FIELDS:
+            parsed = parse_exif_datetime(metadata.get(field_name))
+            if parsed is None:
+                continue
+            return capture_time_parts(
+                value=parsed.local_dt,
+                capture_subsec=parsed.fraction,
+                timestamp_source=source_name,
+                aware_value=parsed.aware_dt,
+            )
+    mtime = file_mtime_datetime(path)
+    return capture_time_parts(
+        value=mtime,
+        capture_subsec=capture_subsec_from_datetime(mtime),
+        timestamp_source="file_mtime",
+    )
+
+
 def build_photo_manifest_entry(
     day_dir: Path,
     stream_id: str,
     device: str,
     path: Path,
     metadata: Optional[Mapping[str, object]],
-) -> tuple[tuple[int, datetime, str, str], Dict[str, str]]:
+) -> tuple[tuple[datetime, str, str], Dict[str, str]]:
     relative_path = path.relative_to(day_dir).as_posix()
     source_dir = path.parent
     source_rel_dir = source_dir.relative_to(day_dir).as_posix()
@@ -138,16 +201,18 @@ def build_photo_manifest_entry(
         }
     )
     if metadata is None:
+        time_parts = pick_fallback_capture_time_parts(metadata, path)
         row["metadata_status"] = "error"
         row["metadata_error"] = "Missing metadata"
-        return (1, PHOTO_FALLBACK_SORT_DT, "", relative_path), row
-
-    try:
-        time_parts = pick_capture_time_parts(metadata)
-    except ValueError as error:
-        row["metadata_status"] = "partial"
-        row["metadata_error"] = str(error)
-        return (1, PHOTO_FALLBACK_SORT_DT, "", relative_path), row
+    else:
+        try:
+            time_parts = pick_capture_time_parts(metadata)
+            row["metadata_status"] = "ok"
+            row["metadata_error"] = ""
+        except ValueError as error:
+            time_parts = pick_fallback_capture_time_parts(metadata, path)
+            row["metadata_status"] = "partial"
+            row["metadata_error"] = str(error)
 
     row.update(
         {
@@ -156,11 +221,9 @@ def build_photo_manifest_entry(
             "start_local": time_parts.start_local,
             "start_epoch_ms": time_parts.start_epoch_ms,
             "timestamp_source": time_parts.timestamp_source,
-            "metadata_status": "ok",
-            "metadata_error": "",
         }
     )
-    return (0, time_parts.sort_dt, row["capture_subsec"], relative_path), row
+    return (time_parts.sort_dt, row["capture_subsec"], relative_path), row
 
 
 def assign_photo_order_indexes(rows: Sequence[Dict[str, str]]) -> None:

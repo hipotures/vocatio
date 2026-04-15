@@ -5,9 +5,11 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -87,7 +89,14 @@ class ExportMediaCliTests(unittest.TestCase):
             )
 
             self.assertEqual(list(row.keys()), export_media.MEDIA_MANIFEST_HEADERS)
-            self.assertEqual(sort_key[-1], "p-a7r5/raw/A0001.ARW")
+            self.assertEqual(
+                sort_key,
+                (
+                    datetime(2026, 3, 23, 8, 0, 0, 123000),
+                    "123",
+                    "p-a7r5/raw/A0001.ARW",
+                ),
+            )
             self.assertEqual(row["day"], "20260323")
             self.assertEqual(row["stream_id"], "p-a7r5")
             self.assertEqual(row["device"], "a7r5")
@@ -122,6 +131,42 @@ class ExportMediaCliTests(unittest.TestCase):
             self.assertEqual(row["track_create_date_raw"], "")
             self.assertEqual(row["media_create_date_raw"], "")
 
+    def test_build_photo_manifest_entry_uses_fallback_timestamp_fields_for_unusable_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            stream_dir = day_dir / "p-a7r5"
+            stream_dir.mkdir(parents=True)
+            photo_path = stream_dir / "fallback.jpg"
+            photo_path.write_bytes(b"x")
+
+            sort_key, row = export_media.build_photo_manifest_entry(
+                day_dir=day_dir,
+                stream_id="p-a7r5",
+                device="a7r5",
+                path=photo_path,
+                metadata={
+                    "DateTimeOriginal": "not-a-date",
+                    "FileCreateDate": "2026:03:23 10:00:07.125+02:00",
+                    "FileModifyDate": "2026:03:23 10:00:09.250+02:00",
+                },
+            )
+
+            self.assertEqual(
+                sort_key,
+                (
+                    datetime(2026, 3, 23, 8, 0, 7, 125000),
+                    "125",
+                    "p-a7r5/fallback.jpg",
+                ),
+            )
+            self.assertEqual(row["capture_time_local"], "2026-03-23T10:00:07")
+            self.assertEqual(row["capture_subsec"], "125")
+            self.assertEqual(row["start_local"], "2026-03-23T10:00:07.125")
+            self.assertEqual(row["start_epoch_ms"], "1774252807125")
+            self.assertEqual(row["timestamp_source"], "file_create_date")
+            self.assertEqual(row["metadata_status"], "partial")
+            self.assertEqual(row["metadata_error"], "Could not determine capture time from trusted EXIF metadata")
+
     def test_build_photo_manifest_entry_keeps_row_when_metadata_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"
@@ -129,6 +174,9 @@ class ExportMediaCliTests(unittest.TestCase):
             stream_dir.mkdir(parents=True)
             photo_path = stream_dir / "missing.jpg"
             photo_path.write_bytes(b"x")
+            fallback_dt = datetime(2026, 3, 23, 10, 0, 5, 456000)
+            fallback_epoch_ns = int(fallback_dt.timestamp() * 1_000_000_000)
+            os.utime(photo_path, ns=(fallback_epoch_ns, fallback_epoch_ns))
 
             sort_key, row = export_media.build_photo_manifest_entry(
                 day_dir=day_dir,
@@ -139,15 +187,22 @@ class ExportMediaCliTests(unittest.TestCase):
             )
 
             self.assertEqual(list(row.keys()), export_media.MEDIA_MANIFEST_HEADERS)
-            self.assertEqual(sort_key[-1], "p-a7r5/missing.jpg")
+            self.assertEqual(
+                sort_key,
+                (
+                    datetime(2026, 3, 23, 10, 0, 5, 456000),
+                    "456",
+                    "p-a7r5/missing.jpg",
+                ),
+            )
             self.assertEqual(row["relative_path"], "p-a7r5/missing.jpg")
             self.assertEqual(row["media_id"], "p-a7r5/missing.jpg")
             self.assertEqual(row["photo_id"], "p-a7r5/missing.jpg")
-            self.assertEqual(row["capture_time_local"], "")
-            self.assertEqual(row["capture_subsec"], "")
-            self.assertEqual(row["start_local"], "")
-            self.assertEqual(row["start_epoch_ms"], "")
-            self.assertEqual(row["timestamp_source"], "")
+            self.assertEqual(row["capture_time_local"], "2026-03-23T10:00:05")
+            self.assertEqual(row["capture_subsec"], "456")
+            self.assertEqual(row["start_local"], "2026-03-23T10:00:05.456")
+            self.assertEqual(row["start_epoch_ms"], "1774260005456")
+            self.assertEqual(row["timestamp_source"], "file_mtime")
             self.assertEqual(row["metadata_status"], "error")
             self.assertEqual(row["metadata_error"], "Missing metadata")
             self.assertEqual(row["actual_size_bytes"], "1")
