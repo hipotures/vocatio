@@ -27,6 +27,8 @@ This design does not cover:
 - Gemma 4 fine-tuning implementation
 - adding VLM outputs as training features in the first iteration
 
+For clarity, v1 may use precomputed per-photo structured descriptor fields if they are produced independently from the candidate-boundary decision task and written as stable per-photo artifacts. V1 must not use current boundary-probing VLM outputs, boundary decisions, or any candidate-level VLM verifier outputs as model features.
+
 ## Existing Context
 
 The repository already has a mature image-only pipeline that provides:
@@ -135,8 +137,16 @@ Each candidate record should include at least:
 - `frame_05_relpath`
 - `window_photo_ids`
 - `window_relative_paths`
-- `frame_01_thumb_path` through `frame_05_thumb_path` when thumbnails exist
-- `frame_01_preview_path` through `frame_05_preview_path` when previews exist
+- `frame_01_thumb_path`
+- `frame_02_thumb_path`
+- `frame_03_thumb_path`
+- `frame_04_thumb_path`
+- `frame_05_thumb_path`
+- `frame_01_preview_path`
+- `frame_02_preview_path`
+- `frame_03_preview_path`
+- `frame_04_preview_path`
+- `frame_05_preview_path`
 - `left_segment_id`
 - `right_segment_id`
 - `left_segment_type`
@@ -194,6 +204,19 @@ The tabular verifier does not consume unordered candidate summaries. It consumes
 
 The model input schema is a derived feature view built from candidate records and optional descriptor artifacts. It is separate from both the candidate record schema and the diagnostic metadata.
 
+## Dataset Attrition and Coverage Report
+
+Dataset generation and validation must produce an explicit attrition report with at least:
+
+- `candidate_count_generated`
+- `candidate_count_excluded_missing_window`
+- `candidate_count_excluded_missing_artifacts`
+- `candidate_count_retained`
+- `true_boundary_coverage_before_exclusions`
+- `true_boundary_coverage_after_exclusions`
+
+These metrics are required because verifier quality must be interpreted together with the amount of candidate data that survived preprocessing and validation.
+
 ## Feature Groups
 
 ### 1. Time and sequence features
@@ -218,6 +241,19 @@ Required examples:
 Raw gap information is allowed in the tabular verifier because this model is explicitly intended to use structured features. This is different from the VLM prompt, where gap text previously caused shortcut behavior.
 
 This ordered feature family is the main way the tabular baseline captures local sequential structure without changing the task into a full-sequence model.
+
+For the fixed 5-photo window in v1, these quantities are defined as:
+
+- `gap_12 = timestamp(frame_02) - timestamp(frame_01)`
+- `gap_23 = timestamp(frame_03) - timestamp(frame_02)`
+- `gap_34 = timestamp(frame_04) - timestamp(frame_03)`
+- `gap_45 = timestamp(frame_05) - timestamp(frame_04)`
+- `center_gap_seconds = gap_34`
+- `left_internal_gap_mean = mean(gap_12, gap_23)`
+- `right_internal_gap_mean = mean(gap_45)`
+- `local_gap_median = median(gap_12, gap_23, gap_34, gap_45)`
+- `gap_ratio = gap_34 / local_gap_median`, with the denominator protected against zero by the implementation
+- `gap_is_local_outlier = 1` when `gap_34` exceeds a chosen local outlier threshold derived from the non-central window gaps, otherwise `0`
 
 ### 2. Descriptor-difference features
 
@@ -251,6 +287,20 @@ If DINO or similar image embeddings are available, the tabular feature view shou
 - `cross_boundary_outlier_score`
 
 These embedding-derived distances are part of the primary mechanism by which the tabular verifier captures local visual continuity while still remaining a structured model.
+
+Because the existing image-only pipeline already produces DINOv2 embeddings and boundary-oriented image features, v1 should treat DINO-derived ordered distance features as part of the required tabular baseline whenever the benchmark dataset is built from days for which DINO artifacts can be generated. The baseline is therefore not purely metadata-only; it is a structured sequence-aware model that also consumes ordered image-distance features.
+
+For the fixed 5-photo window in v1, the embedding-derived quantities are defined as:
+
+- `embed_dist_12 = distance(embed(frame_01), embed(frame_02))`
+- `embed_dist_23 = distance(embed(frame_02), embed(frame_03))`
+- `embed_dist_34 = distance(embed(frame_03), embed(frame_04))`
+- `embed_dist_45 = distance(embed(frame_04), embed(frame_05))`
+- `left_consistency_score = mean(embed_dist_12, embed_dist_23)`
+- `right_consistency_score = mean(embed_dist_45)`
+- `cross_boundary_outlier_score = embed_dist_34 / median(embed_dist_12, embed_dist_23, embed_dist_45)`, with the denominator protected against zero by the implementation
+
+If a future corpus cannot provide DINO artifacts consistently, that corpus should be treated as a separately declared benchmark configuration rather than silently weakening the baseline.
 
 ### 3. Candidate provenance features
 
@@ -372,6 +422,14 @@ After applying candidate predictions back to a day:
 - `split_run_count`
 
 This second level is the most important operational score because it reflects how much manual cleanup the user still needs to do in the GUI.
+
+For v1, these GUI-cost-oriented quantities are defined as:
+
+- `merge_run_count` = number of maximal contiguous runs of false positive predicted boundaries inside a single reviewed segment, because one merge action in the GUI can often collapse one contiguous run
+- `split_run_count` = number of missed reviewed boundaries, counted at the reviewed boundary level, because each missed boundary typically requires one split action
+- `estimated_correction_actions = merge_run_count + split_run_count`
+
+These metrics are intended to approximate review effort more faithfully than raw error counts alone.
 
 ### Candidate-generator diagnostics
 
