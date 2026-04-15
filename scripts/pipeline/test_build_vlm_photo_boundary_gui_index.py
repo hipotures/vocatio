@@ -140,6 +140,7 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             payload, run_row_count = builder.build_gui_index_for_run(
+                day_dir=day_dir,
                 workspace_dir=workspace_dir,
                 run_metadata={"run_id": "vlm-20260414053012", "args": {"image_variant": "thumb"}, "embedded_manifest_csv": str(embedded_manifest_csv), "photo_manifest_csv": str(photo_manifest_csv), "output_csv": str(output_csv)},
                 output_csv=output_csv,
@@ -228,6 +229,7 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                 "output_csv": str(output_csv),
             }
             payload, run_row_count = builder.build_gui_index_for_run(
+                day_dir=day_dir,
                 workspace_dir=workspace_dir,
                 run_metadata=run_metadata,
                 output_csv=output_csv,
@@ -256,6 +258,94 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
         self.assertIn("602 photos", message)
         self.assertIn("37 set", message)
         self.assertIn("/tmp/performance_proxy_index.json", message)
+
+    def test_build_gui_index_for_run_uses_day_dir_name_with_external_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            day_dir = root / "20250325"
+            day_dir.mkdir(parents=True)
+            workspace_dir = root / "external-workspace"
+            workspace_dir.mkdir(parents=True)
+            runs_dir = workspace_dir / "vlm_runs"
+            runs_dir.mkdir()
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
+            photo_manifest_csv = workspace_dir / "media_manifest.csv"
+            embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            thumb_dir = workspace_dir / "embedded_jpg" / "thumb" / "cam"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "cam"
+            thumb_dir.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            source_dir = day_dir / "cam"
+            source_dir.mkdir(parents=True)
+            for index, name in enumerate(("a", "b")):
+                (thumb_dir / f"{name}.jpg").write_bytes(f"jpg-{name}".encode("utf-8"))
+                (preview_dir / f"{name}.jpg").write_bytes(f"preview-{name}".encode("utf-8"))
+                (source_dir / f"{name}.hif").write_bytes(b"x")
+            with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
+                writer.writeheader()
+                for index, name in enumerate(("a", "b")):
+                    writer.writerow(
+                        {
+                            "day": day_dir.name,
+                            "stream_id": "cam",
+                            "device": "cam",
+                            "media_type": "photo",
+                            "source_root": str(day_dir),
+                            "source_dir": str(source_dir),
+                            "source_rel_dir": "cam",
+                            "path": str(source_dir / f"{name}.hif"),
+                            "relative_path": f"cam/{name}.hif",
+                            "media_id": f"cam/{name}.hif",
+                            "photo_id": f"cam/{name}.hif",
+                            "filename": f"{name}.hif",
+                            "extension": ".hif",
+                            "capture_time_local": f"2025-03-25T10:00:0{index}",
+                            "capture_subsec": "000",
+                            "photo_order_index": str(index),
+                            "start_local": f"2025-03-25T10:00:0{index}",
+                            "start_epoch_ms": str(1000 + index * 1000),
+                            "timestamp_source": "test",
+                            "metadata_status": "ok",
+                        }
+                    )
+            with embedded_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "thumb_path", "preview_path"])
+                writer.writeheader()
+                for name in ("a", "b"):
+                    writer.writerow(
+                        {
+                            "relative_path": f"cam/{name}.hif",
+                            "thumb_path": f"embedded_jpg/thumb/cam/{name}.jpg",
+                            "preview_path": f"embedded_jpg/preview/cam/{name}.jpg",
+                        }
+                    )
+            with output_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=builder.probe.OUTPUT_HEADERS)
+                writer.writeheader()
+                row = {header: "" for header in builder.probe.OUTPUT_HEADERS}
+                row["run_id"] = "vlm-20260415192254"
+                row["generated_at"] = "2026-04-15T19:22:54+02:00"
+                row["image_variant"] = "thumb"
+                row["decision"] = "no_cut"
+                row["reason"] = "same"
+                row["response_status"] = "ok"
+                row["relative_paths_json"] = json.dumps(["cam/a.hif", "cam/b.hif"])
+                writer.writerow(row)
+            payload, run_row_count = builder.build_gui_index_for_run(
+                day_dir=day_dir,
+                workspace_dir=workspace_dir,
+                run_metadata={
+                    "run_id": "vlm-20260415192254",
+                    "args": {"image_variant": "thumb"},
+                    "embedded_manifest_csv": str(embedded_manifest_csv),
+                    "photo_manifest_csv": str(photo_manifest_csv),
+                    "output_csv": str(output_csv),
+                },
+                output_csv=output_csv,
+            )
+            self.assertEqual(run_row_count, 1)
+            self.assertEqual(payload["day"], day_dir.name)
 
 
 if __name__ == "__main__":

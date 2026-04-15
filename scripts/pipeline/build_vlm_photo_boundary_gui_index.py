@@ -67,6 +67,7 @@ def select_run_metadata(*, workspace_dir: Path, run_id: Optional[str]) -> Dict[s
 
 def build_gui_index_for_run(
     *,
+    day_dir: Path,
     workspace_dir: Path,
     run_metadata: Mapping[str, Any],
     output_csv: Path,
@@ -89,7 +90,7 @@ def build_gui_index_for_run(
     if not ordered_rows:
         raise ValueError(f"No joined manifest rows found for run_id={run_id}")
     payload = probe.build_gui_index_payload(
-        day_name=workspace_dir.parent.name,
+        day_name=day_dir.name,
         workspace_dir=workspace_dir,
         image_variant=image_variant,
         run_id=run_id,
@@ -125,6 +126,7 @@ def main() -> int:
         raise SystemExit(f"Probe CSV does not exist: {output_csv}")
     run_metadata = select_run_metadata(workspace_dir=workspace_dir, run_id=args.run_id)
     payload, run_row_count = build_gui_index_for_run(
+        day_dir=day_dir,
         workspace_dir=workspace_dir,
         run_metadata=run_metadata,
         output_csv=output_csv,
