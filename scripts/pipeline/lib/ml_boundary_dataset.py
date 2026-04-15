@@ -3,8 +3,21 @@ from __future__ import annotations
 from hashlib import sha1
 
 
+def _normalize_order_idx(value: object) -> int:
+    if value in (None, ""):
+        return 0
+    return int(value)
+
+
 def sort_photo_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
-    return sorted(rows, key=lambda row: (row["timestamp"], row.get("order_idx", 0), row["photo_id"]))
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["timestamp"],
+            _normalize_order_idx(row.get("order_idx", 0)),
+            row["photo_id"],
+        ),
+    )
 
 
 def canonical_candidate_id(
