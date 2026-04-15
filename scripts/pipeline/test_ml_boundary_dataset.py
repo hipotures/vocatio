@@ -34,6 +34,39 @@ def test_sort_photo_rows_normalizes_numeric_string_timestamps() -> None:
     assert [row["photo_id"] for row in ordered] == ["p2", "p10"]
 
 
+def test_sort_photo_rows_orders_mixed_numeric_and_iso_timestamps() -> None:
+    rows = [
+        {"photo_id": "p2", "order_idx": "1", "timestamp": "1970-01-01T00:00:01+00:00"},
+        {"photo_id": "p1", "order_idx": "1", "timestamp": "0"},
+    ]
+
+    ordered = sort_photo_rows(rows)
+
+    assert [row["photo_id"] for row in ordered] == ["p1", "p2"]
+
+
+def test_sort_photo_rows_orders_iso_timestamps_with_timezone_offsets() -> None:
+    rows = [
+        {"photo_id": "p2", "order_idx": "1", "timestamp": "2025-03-25T08:30:00+00:00"},
+        {"photo_id": "p1", "order_idx": "1", "timestamp": "2025-03-25T10:00:00+02:00"},
+    ]
+
+    ordered = sort_photo_rows(rows)
+
+    assert [row["photo_id"] for row in ordered] == ["p1", "p2"]
+
+
+def test_sort_photo_rows_handles_mixed_aware_and_naive_iso_as_utc() -> None:
+    rows = [
+        {"photo_id": "p2", "order_idx": "1", "timestamp": "2025-03-25T08:00:00+00:00"},
+        {"photo_id": "p1", "order_idx": "1", "timestamp": "2025-03-25T08:00:00"},
+    ]
+
+    ordered = sort_photo_rows(rows)
+
+    assert [row["photo_id"] for row in ordered] == ["p1", "p2"]
+
+
 def test_sort_photo_rows_rejects_invalid_or_blank_timestamp() -> None:
     for timestamp in (None, "", "   ", "not-a-timestamp"):
         with pytest.raises(ValueError, match="timestamp"):
