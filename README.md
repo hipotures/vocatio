@@ -255,6 +255,7 @@ This path builds photo ordering, quality signals, DINOv2 embeddings, and photo b
 
 ### Core Image-Only Outputs
 
+- `media_manifest.csv`
 - `photo_manifest.csv`
 - `photo_embedded_manifest.csv`
 - `photo_quality.csv`
@@ -271,13 +272,23 @@ Directories:
 
 ### Image-Only Deterministic Flow
 
-#### 1. Export photo manifest with deterministic ordering
+#### 1. Export the canonical unified media manifest
+
+```bash
+python3 scripts/pipeline/export_media.py DAY
+```
+
+This writes `DAY/_workspace/media_manifest.csv` and is the canonical exporter for image-only work as well.
+
+#### 2. Write the compatibility photo manifest used by current image-only tools
 
 ```bash
 python3 scripts/pipeline/export_recursive_photo_csv.py DAY
 ```
 
-#### 2. Extract embedded JPG variants
+Use this compatibility step while the remaining image-only scripts still read `photo_manifest.csv` directly.
+
+#### 3. Extract embedded JPG variants
 
 ```bash
 python3 scripts/pipeline/extract_embedded_photo_jpg.py DAY
@@ -285,13 +296,13 @@ python3 scripts/pipeline/extract_embedded_photo_jpg.py DAY
 
 This creates `photo_embedded_manifest.csv` with `thumb_path` and `preview_path`.
 
-#### 3. Build photo quality annotations
+#### 4. Build photo quality annotations
 
 ```bash
 python3 scripts/pipeline/build_photo_quality_annotations.py DAY
 ```
 
-#### 4. Embed preview JPGs with DINOv2
+#### 5. Embed preview JPGs with DINOv2
 
 ```bash
 python3 scripts/pipeline/embed_photo_previews_dinov2.py DAY
@@ -302,31 +313,31 @@ This creates:
 - `features/dinov2_embeddings.npy`
 - `features/dinov2_index.csv`
 
-#### 5. Build pairwise photo boundary features
+#### 6. Build pairwise photo boundary features
 
 ```bash
 python3 scripts/pipeline/build_photo_boundary_features.py DAY
 ```
 
-#### 6. Bootstrap image-only boundary scores
+#### 7. Bootstrap image-only boundary scores
 
 ```bash
 python3 scripts/pipeline/bootstrap_photo_boundaries.py DAY
 ```
 
-#### 7. Build heuristic photo segments
+#### 8. Build heuristic photo segments
 
 ```bash
 python3 scripts/pipeline/build_photo_segments.py DAY
 ```
 
-#### 8. Build GUI review index
+#### 9. Build GUI review index
 
 ```bash
 python3 scripts/pipeline/build_photo_review_index.py DAY
 ```
 
-#### 9. Review heuristic image-only sets
+#### 10. Review heuristic image-only sets
 
 ```bash
 python3 scripts/pipeline/review_performance_proxy_gui.py DAY --index performance_proxy_index.image.json --state review_state.image.json

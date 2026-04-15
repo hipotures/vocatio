@@ -211,6 +211,18 @@ def pick_fallback_capture_time_parts(
     )
 
 
+def placeholder_photo_capture_time_parts(day_dir: Path) -> CaptureTimeParts:
+    if DAY_PATTERN.match(day_dir.name):
+        placeholder_dt = datetime.strptime(day_dir.name, "%Y%m%d")
+    else:
+        placeholder_dt = datetime(1970, 1, 1)
+    return capture_time_parts(
+        value=placeholder_dt,
+        capture_subsec="0",
+        timestamp_source="placeholder",
+    )
+
+
 def build_photo_manifest_entry(
     day_dir: Path,
     stream_id: str,
@@ -251,6 +263,8 @@ def build_photo_manifest_entry(
     )
     if not metadata:
         time_parts = pick_fallback_capture_time_parts(metadata, path_stat)
+        if time_parts is None:
+            time_parts = placeholder_photo_capture_time_parts(day_dir)
         row["metadata_status"] = "error"
         row["metadata_error"] = "Missing metadata"
     else:
@@ -260,6 +274,8 @@ def build_photo_manifest_entry(
             row["metadata_error"] = ""
         except ValueError as error:
             time_parts = pick_fallback_capture_time_parts(metadata, path_stat)
+            if time_parts is None:
+                time_parts = placeholder_photo_capture_time_parts(day_dir)
             row["metadata_status"] = "partial"
             row["metadata_error"] = str(error)
 
@@ -744,8 +760,15 @@ def final_manifest_sort_key(row: Mapping[str, str]) -> tuple[object, ...]:
             int(row.get("photo_order_index") or "0"),
             row.get("relative_path", ""),
         )
+
+    start_epoch_ms_text = str(row.get("start_epoch_ms") or "").strip()
+    try:
+        start_epoch_ms = int(start_epoch_ms_text)
+    except ValueError:
+        start_epoch_ms = 2**63 - 1
     return (
         1,
+        start_epoch_ms,
         row.get("start_local", ""),
         row.get("stream_id", ""),
         row.get("relative_path", ""),
@@ -762,7 +785,14 @@ def selected_streams(
     if missing:
         console.print(f"[red]Error: unknown targets: {', '.join(missing)}[/red]")
         return None
-    return [streams[target] for target in targets]
+    ordered_unique_targets: List[str] = []
+    seen_targets = set()
+    for target in targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        ordered_unique_targets.append(target)
+    return [streams[target] for target in ordered_unique_targets]
 
 
 def main(argv: list[str] | None = None) -> int:

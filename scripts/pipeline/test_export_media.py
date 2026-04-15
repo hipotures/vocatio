@@ -286,20 +286,27 @@ class ExportMediaCliTests(unittest.TestCase):
             self.assertEqual(
                 sort_key,
                 (
-                    datetime.max,
-                    "",
+                    datetime(2026, 3, 23, 0, 0, 0),
+                    "0",
                     "p-a7r5/broken.jpg",
                 ),
             )
             self.assertEqual(row["relative_path"], "p-a7r5/broken.jpg")
-            self.assertEqual(row["capture_time_local"], "")
-            self.assertEqual(row["capture_subsec"], "")
-            self.assertEqual(row["start_local"], "")
-            self.assertEqual(row["start_epoch_ms"], "")
-            self.assertEqual(row["timestamp_source"], "")
+            self.assertEqual(row["capture_time_local"], "2026-03-23T00:00:00")
+            self.assertEqual(row["capture_subsec"], "0")
+            self.assertEqual(row["start_local"], "2026-03-23T00:00:00")
+            self.assertEqual(row["start_epoch_ms"], "1774224000000")
+            self.assertEqual(row["timestamp_source"], "placeholder")
             self.assertEqual(row["metadata_status"], "error")
             self.assertEqual(row["metadata_error"], "Missing metadata")
             self.assertEqual(row["actual_size_bytes"], "")
+
+            output_path = day_dir / "_workspace" / "media_manifest.csv"
+            export_media.assign_photo_order_indexes([row])
+            export_media.write_media_manifest_csv(output_path, [row])
+            loaded_rows = media_manifest.read_media_manifest(output_path)
+            self.assertEqual(len(loaded_rows), 1)
+            self.assertEqual(loaded_rows[0]["relative_path"], "p-a7r5/broken.jpg")
 
     def test_build_video_manifest_entry_populates_video_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -603,6 +610,21 @@ class ExportMediaCliTests(unittest.TestCase):
                     f"p-a7r5  photo  {day_dir / 'p-a7r5'}",
                     f"v-gh7  video  {day_dir / 'v-gh7'}",
                 ],
+            )
+
+    def test_main_list_targets_deduplicates_duplicate_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            (day_dir / "p-a7r5").mkdir(parents=True)
+            (day_dir / "v-gh7").mkdir(parents=True)
+
+            with mock.patch.object(export_media.console, "print") as console_print:
+                exit_code = export_media.main([str(day_dir), "--list-targets", "--targets", "p-a7r5", "p-a7r5"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(
+                [call.args[0] for call in console_print.call_args_list],
+                [f"p-a7r5  photo  {day_dir / 'p-a7r5'}"],
             )
 
     def test_main_rejects_missing_day_directory(self) -> None:
@@ -948,6 +970,57 @@ class ExportMediaCliTests(unittest.TestCase):
                     ("p-a7r5/offset-first.hif", "0"),
                     ("p-a7r5/utc-later.hif", "1"),
                 ],
+            )
+
+    def test_main_orders_video_rows_by_actual_start_instant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            video_dir = day_dir / "v-gh7"
+            workspace_dir.mkdir(parents=True)
+            video_dir.mkdir(parents=True)
+
+            offset_earlier_path = video_dir / "offset-earlier.mp4"
+            utc_later_path = video_dir / "utc-later.mp4"
+            offset_earlier_path.write_bytes(b"offset-earlier")
+            utc_later_path.write_bytes(b"utc-later")
+
+            def fake_run_exiftool(paths, on_batch_processed=None):
+                if on_batch_processed is not None:
+                    on_batch_processed(len(paths))
+                path_names = sorted(path.name for path in paths)
+                if path_names == ["offset-earlier.mp4", "utc-later.mp4"]:
+                    return [
+                        {
+                            "SourceFile": str(offset_earlier_path),
+                            "TrackCreateDate": "2026:03:23 10:00:00+02:00",
+                            "Duration": "5.0",
+                            "ImageWidth": "3840",
+                            "ImageHeight": "2160",
+                            "VideoFrameRate": "60",
+                        },
+                        {
+                            "SourceFile": str(utc_later_path),
+                            "TrackCreateDate": "2026:03:23 09:30:00+00:00",
+                            "Duration": "5.0",
+                            "ImageWidth": "3840",
+                            "ImageHeight": "2160",
+                            "VideoFrameRate": "60",
+                        },
+                    ]
+                self.fail(f"Unexpected exiftool paths: {path_names}")
+
+            with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
+                with mock.patch.object(export_media, "run_exiftool", side_effect=fake_run_exiftool):
+                    with mock.patch.object(export_media.console, "print"):
+                        exit_code = export_media.main([str(day_dir), "--media-types", "video"])
+
+            self.assertEqual(exit_code, 0)
+            rows = media_manifest.read_media_manifest(workspace_dir / "media_manifest.csv")
+            video_rows = media_manifest.select_video_rows(rows)
+            self.assertEqual(
+                [row["relative_path"] for row in video_rows],
+                ["v-gh7/offset-earlier.mp4", "v-gh7/utc-later.mp4"],
             )
 
 
