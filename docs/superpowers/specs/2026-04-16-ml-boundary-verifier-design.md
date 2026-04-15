@@ -23,6 +23,7 @@ This design does not cover:
 
 - replacing the candidate generator
 - replacing the review GUI
+- changing the task into boundary localization or `boundary_position`
 - Gemma 4 fine-tuning implementation
 - adding VLM outputs as training features in the first iteration
 
@@ -101,7 +102,19 @@ Each candidate record contains a fixed local window around the candidate center.
 
 The window definition is fixed and must not vary across records in v1.
 
-## Dataset Record Shape
+The task definition must remain a candidate-gap verifier. `boundary` is not a localization target. The candidate generator already proposes a concrete gap location, and the verifier only decides whether that specific candidate gap is a true split.
+
+### Edge-window policy
+
+V1 requires a full ordered window of 5 photos around every candidate.
+
+- if a full window cannot be constructed, exclude the candidate from training and evaluation
+- record the exclusion reason explicitly in dataset diagnostics
+- do not use padding
+- do not use variable window sizes
+- do not use silent fallback behavior
+
+## Candidate Record Schema
 
 Each candidate record should include at least:
 
@@ -110,18 +123,76 @@ Each candidate record should include at least:
 - `window_size`
 - `center_left_photo_id`
 - `center_right_photo_id`
+- `frame_01_photo_id`
+- `frame_02_photo_id`
+- `frame_03_photo_id`
+- `frame_04_photo_id`
+- `frame_05_photo_id`
+- `frame_01_relpath`
+- `frame_02_relpath`
+- `frame_03_relpath`
+- `frame_04_relpath`
+- `frame_05_relpath`
 - `window_photo_ids`
 - `window_relative_paths`
+- `frame_01_thumb_path` through `frame_05_thumb_path` when thumbnails exist
+- `frame_01_preview_path` through `frame_05_preview_path` when previews exist
 - `left_segment_id`
 - `right_segment_id`
+- `left_segment_type`
+- `right_segment_type`
 - `segment_type`
 - `boundary`
-- `center_gap_seconds`
-- `was_user_corrected`
-- `is_hard_negative`
+- `candidate_rule_name`
+- `candidate_rule_version`
+- `candidate_rule_params_json`
+- `descriptor_schema_version`
 - `split_name`
 
 Records should be stored in a tabular format suitable for AutoGluon, ideally Parquet plus an explicit manifest CSV or JSON for diagnostics.
+
+The canonical training label remains:
+
+- `segment_type` = type of the segment on the right side of the candidate
+
+The additional `left_segment_type` and `right_segment_type` fields are required provenance and diagnostics fields for transition analysis and later Gemma dataset export.
+
+## Training Labels
+
+The supervised training labels in v1 are:
+
+- `segment_type`
+- `boundary`
+
+These labels are derived from reviewed final truth and are distinct from record provenance and diagnostic metadata.
+
+## Diagnostic Metadata
+
+Some fields are required for sampling, diagnostics, and analysis, but they are not legal production features because they are not available for unseen candidate gaps at inference time.
+
+Examples:
+
+- `was_user_corrected`
+- `is_hard_negative`
+- any similar post-review provenance flags
+- `split_name`
+
+These fields may be preserved as columns in the dataset artifacts for bookkeeping and analysis.
+
+These fields may be used for:
+
+- diagnostics
+- stratified evaluation
+- hard-negative mining
+- sampling policy
+
+These fields must not be included in the feature set used by the production model.
+
+## Model Input Feature Schema
+
+The tabular verifier does not consume unordered candidate summaries. It consumes ordered, position-aware features derived from a fixed local candidate window.
+
+The model input schema is a derived feature view built from candidate records and optional descriptor artifacts. It is separate from both the candidate record schema and the diagnostic metadata.
 
 ## Feature Groups
 
@@ -129,22 +200,35 @@ Records should be stored in a tabular format suitable for AutoGluon, ideally Par
 
 These are derived from timestamps and local gap structure around the candidate.
 
-Examples:
+Required examples:
 
-- `center_gap_seconds`
-- `left_gap_mean`
-- `right_gap_mean`
+- `gap_12`
+- `gap_23`
+- `gap_34`
+- `gap_45`
+- `center_gap_seconds = gap_34`
+- `left_internal_gap_mean`
+- `right_internal_gap_mean`
 - `local_gap_median`
-- `gap_ratio`
+- `gap_ratio = gap_34 / local_gap_median`
 - `gap_is_local_outlier`
 - `max_gap_in_window`
 - `gap_variance`
 
 Raw gap information is allowed in the tabular verifier because this model is explicitly intended to use structured features. This is different from the VLM prompt, where gap text previously caused shortcut behavior.
 
+This ordered feature family is the main way the tabular baseline captures local sequential structure without changing the task into a full-sequence model.
+
 ### 2. Descriptor-difference features
 
 These are derived from existing per-photo annotation JSON, but only as stable structured signals. Raw natural-language descriptions are not used.
+
+Hard rules:
+
+- every categorical descriptor feature must use a canonical vocabulary
+- missing values must be represented explicitly, not silently collapsed
+- add `*_missing` flags or equivalent missingness indicators where useful
+- `visible_person_count` is a weak feature only and must never be interpreted as a direct proxy for solo versus group
 
 Examples:
 
@@ -156,15 +240,28 @@ Examples:
 - descriptor consistency score within right half of window
 - left/right group-change flags
 
-`visible_person_count` must be treated as a weak feature only. It cannot be interpreted as a direct proxy for solo versus group because group performances often produce single-person frames.
+If DINO or similar image embeddings are available, the tabular feature view should also include ordered local-distance features such as:
 
-### 3. Candidate metadata features
+- `embed_dist_12`
+- `embed_dist_23`
+- `embed_dist_34`
+- `embed_dist_45`
+- `left_consistency_score`
+- `right_consistency_score`
+- `cross_boundary_outlier_score`
 
-Examples:
+These embedding-derived distances are part of the primary mechanism by which the tabular verifier captures local visual continuity while still remaining a structured model.
 
-- candidate rank within day
-- whether candidate was selected only by time-gap rule or also by a secondary heuristic if such a rule exists later
-- whether the candidate was explicitly corrected by the user during review
+### 3. Candidate provenance features
+
+These fields belong in the candidate record schema for auditability and dataset reproducibility:
+
+- `candidate_rule_name`
+- `candidate_rule_version`
+- `candidate_rule_params_json`
+- `descriptor_schema_version`
+
+These are required dataset provenance fields. They are not production-time model inputs unless a specific future experiment explicitly promotes a safe subset into a stable inference feature contract.
 
 ## Experimental Variants
 
@@ -178,11 +275,9 @@ Input:
 
 Modeling:
 
-- AutoGluon tabular predictors
-- multi-label prediction implemented as ordered predictors
-- recommended order:
-  1. `segment_type`
-  2. `boundary`, conditioned on predicted or true `segment_type`
+- two independent AutoGluon predictors trained on the same candidate rows
+  - predictor A: `segment_type`
+  - predictor B: `boundary`
 
 This is the production candidate for v1.
 
@@ -199,6 +294,19 @@ This should be implemented using AutoMM in AutoGluon. The goal is not to make im
 
 This variant must use the same splits and report format as the tabular baseline.
 
+If multiple image columns are used, frame order must remain explicit and position-stable. The image branch must consume ordered frame positions such as `frame_01` through `frame_05`, not an unordered bag of images.
+
+### Optional chaining experiment
+
+Chained prediction is allowed only as an experiment after the independent baseline exists.
+
+In this variant:
+
+- `segment_type` is predicted first
+- out-of-fold `segment_type` probabilities may be added as extra features for the `boundary` predictor
+
+True `segment_type` labels must not be injected into the `boundary` model during training in a way that would create train/inference skew.
+
 ### Not included in v1
 
 The following are intentionally excluded from the first verifier project:
@@ -207,6 +315,8 @@ The following are intentionally excluded from the first verifier project:
 - preview images in the first benchmark matrix
 - full-resolution images
 - end-to-end sequence models over all photos
+- replacing the candidate generator
+- changing the target into `boundary_position`
 
 ## Data Splits
 
@@ -221,6 +331,13 @@ Recommended split structure:
 - test: a separate set of full days, ideally including different years, different cameras, or visibly different visual conditions
 
 The system should support explicit split manifests rather than hidden random splits.
+
+Hard requirements:
+
+- validation and test splits must each contain examples of `performance`, `ceremony`, and `warmup` whenever those classes exist in the available corpus
+- at least one held-out split should represent clear domain shift, such as a different year, camera generation, or visibly different image conditions
+
+`split_name` is dataset bookkeeping only. Train, validation, and test assignment must be driven by explicit split manifests, not by hidden random row-level splits.
 
 ## Metrics
 
@@ -250,6 +367,9 @@ After applying candidate predictions back to a day:
 - missed split count
 - merge error count
 - number of predicted segments versus reviewed segments
+- `estimated_correction_actions`
+- `merge_run_count`
+- `split_run_count`
 
 This second level is the most important operational score because it reflects how much manual cleanup the user still needs to do in the GUI.
 
@@ -288,6 +408,14 @@ Responsibilities:
 - derive labels and candidate metadata
 - write candidate-level dataset artifacts
 
+Implementation conventions:
+
+- the script lives under `scripts/pipeline/`
+- CLI-first structure with `parse_args()` and `main()`
+- use `pathlib.Path`
+- use English for code, CLI help, logs, and comments
+- use the repository-standard `rich.progress` layout for batch processing
+
 ### `validate_ml_boundary_dataset.py`
 
 Responsibilities:
@@ -297,6 +425,15 @@ Responsibilities:
 - verify label completeness
 - verify window consistency
 - report class balance and hard-negative coverage
+- report explicit exclusion reasons for candidates rejected due to missing full windows or missing required artifacts
+
+Implementation conventions:
+
+- the script lives under `scripts/pipeline/`
+- CLI-first structure with `parse_args()` and `main()`
+- use `pathlib.Path`
+- use English for code, CLI help, logs, and comments
+- use the repository-standard `rich.progress` layout for batch processing
 
 ### `train_ml_boundary_verifier.py`
 
@@ -305,6 +442,14 @@ Responsibilities:
 - run AutoGluon tabular baseline
 - optionally run AutoMM thumbnail experiment
 - save models, metadata, feature config, and training summaries
+
+Implementation conventions:
+
+- the script lives under `scripts/pipeline/`
+- CLI-first structure with `parse_args()` and `main()`
+- use `pathlib.Path`
+- use English for code, CLI help, logs, and comments
+- use the repository-standard `rich.progress` layout for batch processing
 
 ### `evaluate_ml_boundary_verifier.py`
 
@@ -315,6 +460,14 @@ Responsibilities:
 - reconstruct per-day segment outputs
 - compute operational metrics
 - write comparison reports
+
+Implementation conventions:
+
+- the script lives under `scripts/pipeline/`
+- CLI-first structure with `parse_args()` and `main()`
+- use `pathlib.Path`
+- use English for code, CLI help, logs, and comments
+- use the repository-standard `rich.progress` layout for batch processing
 
 ## Dataset Reuse for Gemma 4
 
