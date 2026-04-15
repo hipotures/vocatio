@@ -207,6 +207,77 @@ class ExportMediaCliTests(unittest.TestCase):
             self.assertEqual(row["metadata_error"], "Missing metadata")
             self.assertEqual(row["actual_size_bytes"], "1")
 
+    def test_build_photo_manifest_entry_treats_empty_metadata_mapping_as_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            stream_dir = day_dir / "p-a7r5"
+            stream_dir.mkdir(parents=True)
+            photo_path = stream_dir / "empty.jpg"
+            photo_path.write_bytes(b"xy")
+            fallback_dt = datetime(2026, 3, 23, 10, 0, 4)
+            fallback_epoch_ns = int(fallback_dt.timestamp() * 1_000_000_000)
+            os.utime(photo_path, ns=(fallback_epoch_ns, fallback_epoch_ns))
+
+            sort_key, row = export_media.build_photo_manifest_entry(
+                day_dir=day_dir,
+                stream_id="p-a7r5",
+                device="a7r5",
+                path=photo_path,
+                metadata={},
+            )
+
+            self.assertEqual(
+                sort_key,
+                (
+                    datetime(2026, 3, 23, 10, 0, 4),
+                    "0",
+                    "p-a7r5/empty.jpg",
+                ),
+            )
+            self.assertEqual(row["capture_time_local"], "2026-03-23T10:00:04")
+            self.assertEqual(row["capture_subsec"], "0")
+            self.assertEqual(row["start_local"], "2026-03-23T10:00:04")
+            self.assertEqual(row["start_epoch_ms"], "1774260004000")
+            self.assertEqual(row["timestamp_source"], "file_mtime")
+            self.assertEqual(row["metadata_status"], "error")
+            self.assertEqual(row["metadata_error"], "Missing metadata")
+            self.assertEqual(row["actual_size_bytes"], "2")
+
+    def test_build_photo_manifest_entry_keeps_row_when_stat_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            stream_dir = day_dir / "p-a7r5"
+            stream_dir.mkdir(parents=True)
+            photo_path = stream_dir / "broken.jpg"
+            photo_path.write_bytes(b"z")
+
+            with mock.patch.object(type(photo_path), "stat", side_effect=OSError("stat failed")):
+                sort_key, row = export_media.build_photo_manifest_entry(
+                    day_dir=day_dir,
+                    stream_id="p-a7r5",
+                    device="a7r5",
+                    path=photo_path,
+                    metadata={},
+                )
+
+            self.assertEqual(
+                sort_key,
+                (
+                    datetime.max,
+                    "",
+                    "p-a7r5/broken.jpg",
+                ),
+            )
+            self.assertEqual(row["relative_path"], "p-a7r5/broken.jpg")
+            self.assertEqual(row["capture_time_local"], "")
+            self.assertEqual(row["capture_subsec"], "")
+            self.assertEqual(row["start_local"], "")
+            self.assertEqual(row["start_epoch_ms"], "")
+            self.assertEqual(row["timestamp_source"], "")
+            self.assertEqual(row["metadata_status"], "error")
+            self.assertEqual(row["metadata_error"], "Missing metadata")
+            self.assertEqual(row["actual_size_bytes"], "")
+
     def test_assign_photo_order_indexes_sets_dense_order(self) -> None:
         rows = [
             {"relative_path": "p-a7r5/c.jpg", "photo_order_index": ""},

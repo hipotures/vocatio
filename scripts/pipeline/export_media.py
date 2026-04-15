@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -136,15 +137,30 @@ def capture_subsec_from_datetime(value: datetime) -> str:
     return f"{value.microsecond:06d}".rstrip("0")
 
 
-def file_mtime_datetime(path: Path) -> datetime:
-    return datetime.fromtimestamp(path.stat().st_mtime)
+def safe_path_stat(path: Path) -> Optional[os.stat_result]:
+    try:
+        return path.stat()
+    except OSError:
+        return None
+
+
+def actual_size_bytes_text(path_stat: Optional[os.stat_result]) -> str:
+    if path_stat is None:
+        return ""
+    return str(path_stat.st_size)
+
+
+def file_mtime_datetime(path_stat: Optional[os.stat_result]) -> Optional[datetime]:
+    if path_stat is None:
+        return None
+    return datetime.fromtimestamp(path_stat.st_mtime)
 
 
 def pick_fallback_capture_time_parts(
     metadata: Optional[Mapping[str, object]],
-    path: Path,
-) -> CaptureTimeParts:
-    if metadata is not None:
+    path_stat: Optional[os.stat_result],
+) -> Optional[CaptureTimeParts]:
+    if metadata:
         for field_name, source_name in PHOTO_FALLBACK_TIME_FIELDS:
             parsed = parse_exif_datetime(metadata.get(field_name))
             if parsed is None:
@@ -155,7 +171,9 @@ def pick_fallback_capture_time_parts(
                 timestamp_source=source_name,
                 aware_value=parsed.aware_dt,
             )
-    mtime = file_mtime_datetime(path)
+    mtime = file_mtime_datetime(path_stat)
+    if mtime is None:
+        return None
     return capture_time_parts(
         value=mtime,
         capture_subsec=capture_subsec_from_datetime(mtime),
@@ -173,6 +191,7 @@ def build_photo_manifest_entry(
     relative_path = path.relative_to(day_dir).as_posix()
     source_dir = path.parent
     source_rel_dir = source_dir.relative_to(day_dir).as_posix()
+    path_stat = safe_path_stat(path)
     row = empty_media_row()
     row.update(
         {
@@ -191,7 +210,7 @@ def build_photo_manifest_entry(
             "extension": path.suffix.lower(),
             "model": metadata_text(metadata, "Model"),
             "make": metadata_text(metadata, "Make"),
-            "actual_size_bytes": str(path.stat().st_size),
+            "actual_size_bytes": actual_size_bytes_text(path_stat),
             "create_date_raw": metadata_text(metadata, "CreateDate"),
             "datetime_original_raw": metadata_text(metadata, "DateTimeOriginal"),
             "subsec_datetime_original_raw": metadata_text(metadata, "SubSecDateTimeOriginal"),
@@ -200,8 +219,8 @@ def build_photo_manifest_entry(
             "file_create_date_raw": metadata_text(metadata, "FileCreateDate"),
         }
     )
-    if metadata is None:
-        time_parts = pick_fallback_capture_time_parts(metadata, path)
+    if not metadata:
+        time_parts = pick_fallback_capture_time_parts(metadata, path_stat)
         row["metadata_status"] = "error"
         row["metadata_error"] = "Missing metadata"
     else:
@@ -210,20 +229,21 @@ def build_photo_manifest_entry(
             row["metadata_status"] = "ok"
             row["metadata_error"] = ""
         except ValueError as error:
-            time_parts = pick_fallback_capture_time_parts(metadata, path)
+            time_parts = pick_fallback_capture_time_parts(metadata, path_stat)
             row["metadata_status"] = "partial"
             row["metadata_error"] = str(error)
 
     row.update(
         {
-            "capture_time_local": time_parts.capture_time_local,
-            "capture_subsec": time_parts.capture_subsec,
-            "start_local": time_parts.start_local,
-            "start_epoch_ms": time_parts.start_epoch_ms,
-            "timestamp_source": time_parts.timestamp_source,
+            "capture_time_local": time_parts.capture_time_local if time_parts is not None else "",
+            "capture_subsec": time_parts.capture_subsec if time_parts is not None else "",
+            "start_local": time_parts.start_local if time_parts is not None else "",
+            "start_epoch_ms": time_parts.start_epoch_ms if time_parts is not None else "",
+            "timestamp_source": time_parts.timestamp_source if time_parts is not None else "",
         }
     )
-    return (time_parts.sort_dt, row["capture_subsec"], relative_path), row
+    sort_dt = time_parts.sort_dt if time_parts is not None else datetime.max
+    return (sort_dt, row["capture_subsec"], relative_path), row
 
 
 def assign_photo_order_indexes(rows: Sequence[Dict[str, str]]) -> None:
