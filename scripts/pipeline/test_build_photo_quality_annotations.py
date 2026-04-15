@@ -118,6 +118,30 @@ class BuildPhotoQualityAnnotationsTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             build_mock.assert_called_once_with(workspace_dir, manifest_csv, output_csv, jobs=4)
 
+    def test_main_uses_workspace_dir_from_vocatio_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            day_dir = root_dir / "20260323"
+            workspace_dir = root_dir / "fast-workspace"
+            day_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+            (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+            manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            output_csv = workspace_dir / "photo_quality.csv"
+            manifest_csv.write_text("relative_path,preview_path\n", encoding="utf-8")
+
+            argv = [
+                "build_photo_quality_annotations.py",
+                str(day_dir),
+                "--overwrite",
+            ]
+            with mock.patch.object(sys, "argv", argv):
+                with mock.patch.object(quality, "build_photo_quality_annotations", return_value=3) as build_mock:
+                    exit_code = quality.main()
+
+            self.assertEqual(exit_code, 0)
+            build_mock.assert_called_once_with(workspace_dir, manifest_csv, output_csv, jobs=4)
+
     def test_build_photo_quality_annotations_reads_preview_jpegs_from_embedded_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"
