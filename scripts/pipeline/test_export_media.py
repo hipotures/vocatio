@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,6 +33,12 @@ class ExportMediaCliTests(unittest.TestCase):
         self.assertEqual(args.media_types, "all")
         self.assertEqual(args.jobs, 4)
         self.assertFalse(args.list_targets)
+
+    def test_parse_args_rejects_empty_targets_option(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                export_media.parse_args(["/data/20260323", "--targets"])
+        self.assertEqual(ctx.exception.code, 2)
 
     def test_detect_streams_finds_photo_and_video_prefixes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -136,6 +144,20 @@ class ExportMediaCliTests(unittest.TestCase):
         self.assertEqual(
             console_print.call_args_list[0].args[0],
             f"[red]Error: no streams matched media-types=video in {day_dir}.[/red]",
+        )
+
+    def test_main_reports_media_type_mismatch_for_existing_requested_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            (day_dir / "p-a7r5").mkdir(parents=True)
+
+            with mock.patch.object(export_media.console, "print") as console_print:
+                exit_code = export_media.main([str(day_dir), "--list-targets", "--targets", "p-a7r5", "--media-types", "video"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(
+            console_print.call_args_list[0].args[0],
+            "[red]Error: requested targets matched no streams for media-types=video: p-a7r5[/red]",
         )
 
     def test_main_rejects_export_execution_until_orchestration_exists(self) -> None:

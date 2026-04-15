@@ -50,7 +50,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--targets",
-        nargs="*",
+        nargs="+",
         help='Optional stream IDs to scan, for example "p-a7r5" "v-gh7"',
     )
     parser.add_argument(
@@ -144,14 +144,21 @@ def main(argv: list[str] | None = None) -> int:
         console.print(f"[red]Error: no p-/v- streams found in {day_dir}.[/red]")
         return 1
 
-    streams = filter_streams_by_media_types(streams, args.media_types)
-    if not streams:
-        console.print(f"[red]Error: no streams matched media-types={args.media_types} in {day_dir}.[/red]")
-        return 1
-
     streams_to_process = selected_streams(streams, args.targets)
     if streams_to_process is None:
         return 1
+
+    if args.media_types != "all":
+        streams_to_process = [info for info in streams_to_process if info["media_type"] == args.media_types]
+        if not streams_to_process:
+            if args.targets:
+                console.print(
+                    "[red]Error: requested targets matched no streams for "
+                    f"media-types={args.media_types}: {', '.join(args.targets)}[/red]"
+                )
+            else:
+                console.print(f"[red]Error: no streams matched media-types={args.media_types} in {day_dir}.[/red]")
+            return 1
 
     if args.list_targets:
         for info in streams_to_process:
