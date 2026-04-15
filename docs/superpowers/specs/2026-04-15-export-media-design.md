@@ -57,6 +57,8 @@ The new design creates one canonical manifest and shifts downstream adaptation t
 - `sequence`
 - `embedded_size_bytes`
 - `actual_size_bytes`
+- `metadata_status`
+- `metadata_error`
 - `create_date_raw`
 - `datetime_original_raw`
 - `subsec_datetime_original_raw`
@@ -239,6 +241,15 @@ This avoids a broad downstream rename migration and lets later steps consume fil
   - otherwise empty
 - `actual_size_bytes`
   - actual file size
+- `metadata_status`
+  - per-file extraction status
+  - expected values:
+    - `ok`
+    - `partial`
+    - `error`
+- `metadata_error`
+  - short machine-readable or human-readable extraction error summary
+  - empty when `metadata_status=ok`
 - raw metadata fields stay unchanged:
   - `create_date_raw`
   - `track_create_date_raw`
@@ -310,6 +321,13 @@ It must produce:
 - `capture_time_local`
 - `capture_subsec`
 
+If EXIF data is missing or partially unreadable, the exporter must still emit a photo row:
+
+- use the best available fallback timestamp logic
+- keep the row in the manifest
+- set `metadata_status` to `partial` or `error`
+- populate `metadata_error`
+
 ### Videos
 
 For videos, the exporter must preserve the current normalized per-stream video fields used by the audio-assisted pipeline:
@@ -319,6 +337,14 @@ For videos, the exporter must preserve the current normalized per-stream video f
 - width/height/fps
 - raw QuickTime date fields
 
+If video metadata is missing or partially unreadable, the exporter must still emit a video row:
+
+- keep the row in the manifest
+- fill any available metadata fields
+- leave unavailable fields empty
+- set `metadata_status` to `partial` or `error`
+- populate `metadata_error`
+
 ### Atomic write behavior
 
 The manifest write must remain atomic:
@@ -326,6 +352,21 @@ The manifest write must remain atomic:
 - write to a sibling temp file
 - validate output rows
 - replace final output with `os.replace`
+
+### Failure policy
+
+The exporter must be fail-open at the per-file level and must not abort the whole day because one file has broken metadata.
+
+Rules:
+
+- do not silently skip a supported media file
+- do not stop the entire export because one file has unreadable EXIF or container metadata
+- always emit one manifest row for every supported file that was discovered
+- represent metadata extraction problems through:
+  - `metadata_status`
+  - `metadata_error`
+
+Only unsupported file extensions should be excluded during discovery.
 
 ### Progress UX
 
