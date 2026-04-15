@@ -6,6 +6,8 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from lib.image_pipeline_contracts import MEDIA_MANIFEST_HEADERS
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
@@ -27,18 +29,40 @@ bootstrap = load_module("bootstrap_photo_boundaries_for_segments_test", "scripts
 
 class BuildPhotoSegmentsTests(unittest.TestCase):
     def write_manifest(self, path: Path, rows: list[dict[str, str]]) -> None:
+        day_dir = path.parent.parent
         with path.open("w", newline="", encoding="utf-8") as handle:
             normalized_rows = []
             for row in rows:
-                normalized_row = dict(row)
+                normalized_row = {header: "" for header in MEDIA_MANIFEST_HEADERS}
+                normalized_row.update(dict(row))
                 if "start_epoch_ms" not in normalized_row:
                     start_dt = datetime.fromisoformat(normalized_row["start_local"])
                     normalized_row["start_epoch_ms"] = str(int(start_dt.timestamp() * 1000))
+                relative_path = str(normalized_row["relative_path"])
+                source_path = day_dir / relative_path
+                normalized_row.update(
+                    {
+                        "day": day_dir.name,
+                        "stream_id": relative_path.split("/", 1)[0] if "/" in relative_path else "p-test",
+                        "device": "test-device",
+                        "media_type": "photo",
+                        "source_root": str(day_dir),
+                        "source_dir": str(source_path.parent),
+                        "source_rel_dir": str(Path(relative_path).parent).replace("\\", "/"),
+                        "path": str(source_path),
+                        "relative_path": relative_path,
+                        "media_id": relative_path,
+                        "photo_id": relative_path,
+                        "filename": source_path.name,
+                        "extension": source_path.suffix.lower(),
+                        "capture_time_local": normalized_row["start_local"],
+                        "capture_subsec": "000",
+                        "timestamp_source": "test",
+                        "metadata_status": "ok",
+                    }
+                )
                 normalized_rows.append(normalized_row)
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=["relative_path", "path", "photo_order_index", "start_local", "start_epoch_ms"],
-            )
+            writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
             writer.writeheader()
             writer.writerows(normalized_rows)
 
@@ -124,7 +148,7 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
             day_dir = Path(tmp) / "20260323"
             workspace_dir = day_dir / "_workspace"
             workspace_dir.mkdir(parents=True)
-            manifest_csv = workspace_dir / "photo_manifest.csv"
+            manifest_csv = workspace_dir / "media_manifest.csv"
             scores_csv = workspace_dir / "photo_boundary_scores.csv"
             output_csv = workspace_dir / "photo_segments.csv"
             manifest_rows = [
@@ -181,7 +205,7 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
             day_dir = Path(tmp) / "20260323"
             workspace_dir = day_dir / "_workspace"
             workspace_dir.mkdir(parents=True)
-            manifest_csv = workspace_dir / "photo_manifest.csv"
+            manifest_csv = workspace_dir / "media_manifest.csv"
             scores_csv = workspace_dir / "photo_boundary_scores.csv"
             output_csv = workspace_dir / "photo_segments.csv"
             manifest_rows = self.build_manifest_rows(day_dir, 16, datetime(2026, 3, 23, 10, 0, 0))
@@ -232,7 +256,7 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
             day_dir = Path(tmp) / "20260323"
             workspace_dir = day_dir / "_workspace"
             workspace_dir.mkdir(parents=True)
-            manifest_csv = workspace_dir / "photo_manifest.csv"
+            manifest_csv = workspace_dir / "media_manifest.csv"
             scores_csv = workspace_dir / "photo_boundary_scores.csv"
             output_csv = workspace_dir / "photo_segments.csv"
             manifest_rows = self.build_manifest_rows(day_dir, 18, datetime(2026, 3, 23, 10, 0, 0))
@@ -263,7 +287,7 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
             day_dir = Path(tmp) / "20260323"
             workspace_dir = day_dir / "_workspace"
             workspace_dir.mkdir(parents=True)
-            manifest_csv = workspace_dir / "photo_manifest.csv"
+            manifest_csv = workspace_dir / "media_manifest.csv"
             scores_csv = workspace_dir / "photo_boundary_scores.csv"
             output_csv = workspace_dir / "photo_segments.csv"
             manifest_rows = self.build_manifest_rows(day_dir, 10, datetime(2026, 3, 23, 10, 0, 0))
@@ -289,7 +313,7 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
             day_dir = Path(tmp) / "20260323"
             workspace_dir = day_dir / "_workspace"
             workspace_dir.mkdir(parents=True)
-            manifest_csv = workspace_dir / "photo_manifest.csv"
+            manifest_csv = workspace_dir / "media_manifest.csv"
             scores_csv = workspace_dir / "photo_boundary_scores.csv"
             output_csv = workspace_dir / "photo_segments.csv"
             manifest_rows = self.build_manifest_rows(day_dir, 3, datetime(2026, 3, 23, 10, 0, 0))
@@ -312,7 +336,7 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
             day_dir = Path(tmp) / "20260323"
             workspace_dir = day_dir / "_workspace"
             workspace_dir.mkdir(parents=True)
-            manifest_csv = workspace_dir / "photo_manifest.csv"
+            manifest_csv = workspace_dir / "media_manifest.csv"
             scores_csv = workspace_dir / "photo_boundary_scores.csv"
             output_csv = workspace_dir / "photo_segments.csv"
             manifest_rows = self.build_manifest_rows(day_dir, 3, datetime(2026, 3, 23, 10, 0, 0))
@@ -336,7 +360,7 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
             day_dir = Path(tmp) / "20260323"
             workspace_dir = day_dir / "_workspace"
             workspace_dir.mkdir(parents=True)
-            manifest_csv = workspace_dir / "photo_manifest.csv"
+            manifest_csv = workspace_dir / "media_manifest.csv"
             features_csv = workspace_dir / "photo_boundary_features.csv"
             scores_csv = workspace_dir / "photo_boundary_scores.csv"
             output_csv = workspace_dir / "photo_segments.csv"
@@ -416,7 +440,7 @@ class BuildPhotoSegmentsTests(unittest.TestCase):
             day_dir = Path(tmp) / "20260323"
             workspace_dir = day_dir / "_workspace"
             workspace_dir.mkdir(parents=True)
-            manifest_csv = workspace_dir / "photo_manifest.csv"
+            manifest_csv = workspace_dir / "media_manifest.csv"
             scores_csv = workspace_dir / "photo_boundary_scores.csv"
             output_csv = workspace_dir / "photo_segments.csv"
             manifest_rows = self.build_manifest_rows(day_dir, 3, datetime(2026, 3, 23, 10, 0, 0))

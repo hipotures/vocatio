@@ -22,7 +22,8 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from lib.image_pipeline_contracts import PHOTO_MANIFEST_REQUIRED_COLUMNS, validate_required_columns
+from lib.image_pipeline_contracts import validate_required_columns
+from lib.media_manifest import read_media_manifest, select_photo_rows
 from lib.pipeline_io import atomic_write_csv
 
 
@@ -56,7 +57,6 @@ PHOTO_BOUNDARY_FEATURE_HEADERS = [
     "contrast_delta",
 ]
 
-PHOTO_BOUNDARY_MANIFEST_REQUIRED_COLUMNS = frozenset(set(PHOTO_MANIFEST_REQUIRED_COLUMNS) | {"start_local", "start_epoch_ms"})
 PHOTO_QUALITY_REQUIRED_COLUMNS = frozenset(
     {
         "relative_path",
@@ -107,7 +107,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--manifest-csv",
-        help="Input manifest CSV filename or absolute path. Default: WORKSPACE/photo_manifest.csv",
+        help="Input manifest CSV filename or absolute path. Default: WORKSPACE/media_manifest.csv",
     )
     parser.add_argument(
         "--quality-csv",
@@ -137,7 +137,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def resolve_manifest_path(workspace_dir: Path, manifest_value: Optional[str]) -> Path:
     if not manifest_value:
-        return workspace_dir / "photo_manifest.csv"
+        return workspace_dir / "media_manifest.csv"
     candidate = Path(manifest_value)
     if candidate.is_absolute():
         return candidate
@@ -258,10 +258,7 @@ def format_float(value: float) -> str:
 
 
 def read_photo_manifest(path: Path) -> List[Dict[str, str]]:
-    with path.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        validate_required_columns(path.name, PHOTO_BOUNDARY_MANIFEST_REQUIRED_COLUMNS, reader.fieldnames)
-        rows = [dict(row) for row in reader]
+    rows = select_photo_rows(read_media_manifest(path))
     if not rows:
         raise ValueError(f"{path.name} contains no rows")
     normalized_rows: List[Dict[str, str]] = []
@@ -374,7 +371,7 @@ def validate_row_counts(
     embeddings: np.ndarray,
 ) -> None:
     counts = {
-        "photo_manifest.csv": len(manifest_rows),
+        "media_manifest.csv": len(manifest_rows),
         "photo_quality.csv": len(quality_rows),
         "dinov2_index.csv": len(index_rows),
         "dinov2_embeddings.npy": int(embeddings.shape[0]),
@@ -447,10 +444,10 @@ def compute_boundary_rows(
             right_quality = quality_rows[index + 1]
             left_start_local = str(left_manifest["start_local"])
             right_start_local = str(right_manifest["start_local"])
-            left_start_epoch_ms = parse_epoch_ms(str(left_manifest["start_epoch_ms"]), "photo_manifest.csv start_epoch_ms")
+            left_start_epoch_ms = parse_epoch_ms(str(left_manifest["start_epoch_ms"]), "media_manifest.csv start_epoch_ms")
             right_start_epoch_ms = parse_epoch_ms(
                 str(right_manifest["start_epoch_ms"]),
-                "photo_manifest.csv start_epoch_ms",
+                "media_manifest.csv start_epoch_ms",
             )
             time_gap_seconds = float(right_start_epoch_ms - left_start_epoch_ms) / 1000.0
             distance = distances[index]

@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 from rich.progress import TimeElapsedColumn, TimeRemainingColumn
 
+from lib.image_pipeline_contracts import MEDIA_MANIFEST_HEADERS
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
@@ -34,14 +36,18 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
     def write_stage1_artifacts(
         self,
         workspace_dir: Path,
+        day_dir: Path | None = None,
+        *,
         manifest_rows: list[dict[str, str]],
         quality_rows: list[dict[str, str]],
         index_rows: list[dict[str, str]],
         embeddings: np.ndarray,
     ) -> tuple[Path, Path, Path, Path]:
+        if day_dir is None:
+            day_dir = workspace_dir.parent
         features_dir = workspace_dir / "features"
         features_dir.mkdir(parents=True, exist_ok=True)
-        manifest_csv = workspace_dir / "photo_manifest.csv"
+        manifest_csv = workspace_dir / "media_manifest.csv"
         quality_csv = workspace_dir / "photo_quality.csv"
         index_csv = features_dir / "dinov2_index.csv"
         embeddings_path = features_dir / "dinov2_embeddings.npy"
@@ -50,22 +56,43 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
         with manifest_csv.open("w", newline="", encoding="utf-8") as handle:
             normalized_manifest_rows = []
             for row in manifest_rows:
-                normalized_row = dict(row)
-                if "start_epoch_ms" not in normalized_row:
+                normalized_row = {header: "" for header in MEDIA_MANIFEST_HEADERS}
+                normalized_row.update(dict(row))
+                if not str(normalized_row.get("start_epoch_ms") or "").strip():
                     try:
                         start_dt = boundary.parse_local_datetime(
                             normalized_row["start_local"],
-                            "photo_manifest.csv start_local",
+                            "media_manifest.csv start_local",
                         )
                     except ValueError:
                         normalized_row["start_epoch_ms"] = ""
                     else:
                         normalized_row["start_epoch_ms"] = str(int(start_dt.timestamp() * 1000))
+                relative_path = str(normalized_row["relative_path"])
+                source_path = day_dir / relative_path
+                normalized_row.update(
+                    {
+                        "day": day_dir.name,
+                        "stream_id": relative_path.split("/", 1)[0] if "/" in relative_path else "p-test",
+                        "device": "test-device",
+                        "media_type": "photo",
+                        "source_root": str(day_dir),
+                        "source_dir": str(source_path.parent),
+                        "source_rel_dir": str(Path(relative_path).parent).replace("\\", "/"),
+                        "path": str(source_path),
+                        "relative_path": relative_path,
+                        "media_id": relative_path,
+                        "photo_id": relative_path,
+                        "filename": source_path.name,
+                        "extension": source_path.suffix.lower(),
+                        "capture_time_local": normalized_row["start_local"],
+                        "capture_subsec": "000",
+                        "timestamp_source": "test",
+                        "metadata_status": "ok",
+                    }
+                )
                 normalized_manifest_rows.append(normalized_row)
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=["relative_path", "path", "photo_order_index", "start_local", "start_epoch_ms"],
-            )
+            writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
             writer.writeheader()
             writer.writerows(normalized_manifest_rows)
 
@@ -124,6 +151,7 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
             workspace_dir.mkdir(parents=True)
             manifest_csv, quality_csv, features_dir, output_csv = self.write_stage1_artifacts(
                 workspace_dir=workspace_dir,
+                day_dir=Path(tmp) / "20260323",
                 manifest_rows=[
                     {
                         "relative_path": "hour10/early.jpg",
@@ -205,6 +233,7 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
             workspace_dir.mkdir(parents=True)
             manifest_csv, quality_csv, features_dir, output_csv = self.write_stage1_artifacts(
                 workspace_dir,
+                day_dir,
                 manifest_rows=[
                     {
                         "relative_path": "hour10/a.jpg",
@@ -541,6 +570,7 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
                         "path": str(day_dir / "a.jpg"),
                         "photo_order_index": "0",
                         "start_local": " 2026-03-23T10:00:00 ",
+                        "start_epoch_ms": "1774260000000",
                     },
                     {
                         "relative_path": "b.jpg",
@@ -612,6 +642,7 @@ class BuildPhotoBoundaryFeaturesTests(unittest.TestCase):
                         "path": str(day_dir / "b.jpg"),
                         "photo_order_index": "1",
                         "start_local": "2026-03-23T10:00:01+00:00",
+                        "start_epoch_ms": "1774260001000",
                     },
                 ],
                 quality_rows=[

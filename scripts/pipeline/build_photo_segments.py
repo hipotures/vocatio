@@ -21,7 +21,8 @@ from rich.progress import (
 )
 
 from bootstrap_photo_boundaries import PHOTO_BOUNDARY_SCORE_HEADERS
-from lib.image_pipeline_contracts import PHOTO_MANIFEST_REQUIRED_COLUMNS, validate_required_columns
+from lib.image_pipeline_contracts import validate_required_columns
+from lib.media_manifest import read_media_manifest, select_photo_rows
 from lib.pipeline_io import atomic_write_csv
 
 
@@ -49,9 +50,6 @@ PHOTO_SEGMENT_HEADERS = [
     "segment_confidence",
 ]
 
-PHOTO_SEGMENT_MANIFEST_REQUIRED_COLUMNS = frozenset(set(PHOTO_MANIFEST_REQUIRED_COLUMNS) | {"start_local", "start_epoch_ms"})
-
-
 def positive_int_arg(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -77,7 +75,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--manifest-csv",
-        help="Input manifest CSV filename or absolute path. Default: WORKSPACE/photo_manifest.csv",
+        help="Input manifest CSV filename or absolute path. Default: WORKSPACE/media_manifest.csv",
     )
     parser.add_argument(
         "--boundary-scores-csv",
@@ -109,7 +107,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def resolve_manifest_path(workspace_dir: Path, manifest_value: Optional[str]) -> Path:
     if not manifest_value:
-        return workspace_dir / "photo_manifest.csv"
+        return workspace_dir / "media_manifest.csv"
     candidate = Path(manifest_value)
     if candidate.is_absolute():
         return candidate
@@ -203,10 +201,7 @@ def format_float(value: float) -> str:
 
 
 def read_photo_manifest(path: Path) -> List[Dict[str, str]]:
-    with path.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        validate_required_columns(path.name, PHOTO_SEGMENT_MANIFEST_REQUIRED_COLUMNS, reader.fieldnames)
-        rows = [dict(row) for row in reader]
+    rows = select_photo_rows(read_media_manifest(path))
     if not rows:
         raise ValueError(f"{path.name} contains no rows")
     normalized_rows: List[Dict[str, str]] = []
@@ -352,7 +347,7 @@ def validate_boundary_alignment(
     if len(boundary_rows) != expected_boundary_count:
         raise ValueError(
             "Row count mismatch across stage-1 artifacts: "
-            f"photo_manifest.csv={len(manifest_rows)}, photo_boundary_scores.csv={len(boundary_rows)}"
+            f"media_manifest.csv={len(manifest_rows)}, photo_boundary_scores.csv={len(boundary_rows)}"
         )
     for row_number, boundary_row in enumerate(boundary_rows, start=1):
         expected_left_path = str(manifest_rows[row_number - 1]["relative_path"])
@@ -404,11 +399,11 @@ def build_segment_ranges(photo_count: int, cut_indexes: Sequence[int]) -> List[T
 def segment_duration_seconds(segment_range: Tuple[int, int], manifest_rows: Sequence[Mapping[str, str]]) -> float:
     start_epoch_ms = parse_epoch_ms(
         str(manifest_rows[segment_range[0]]["start_epoch_ms"]),
-        "photo_manifest.csv start_epoch_ms",
+        "media_manifest.csv start_epoch_ms",
     )
     end_epoch_ms = parse_epoch_ms(
         str(manifest_rows[segment_range[1]]["start_epoch_ms"]),
-        "photo_manifest.csv start_epoch_ms",
+        "media_manifest.csv start_epoch_ms",
     )
     return max(0.0, float(end_epoch_ms - start_epoch_ms) / 1000.0)
 
