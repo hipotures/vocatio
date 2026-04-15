@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import re
+import tempfile
 from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence
 
@@ -40,6 +43,15 @@ PHOTO_FALLBACK_TIME_FIELDS: Sequence[tuple[str, str]] = (
     ("SubSecCreateDate", "subsec_create_date"),
     ("SubSecDateTimeOriginal", "subsec_datetime_original"),
     ("CreateDate", "create_date"),
+    ("DateTimeOriginal", "datetime_original"),
+    ("FileCreateDate", "file_create_date"),
+    ("FileModifyDate", "file_modify_date"),
+)
+VIDEO_TIME_FIELDS: Sequence[tuple[str, str]] = (
+    ("TrackCreateDate", "track_create_date"),
+    ("CreateDate", "create_date"),
+    ("MediaCreateDate", "media_create_date"),
+    ("SubSecDateTimeOriginal", "subsec_datetime_original"),
     ("DateTimeOriginal", "datetime_original"),
     ("FileCreateDate", "file_create_date"),
     ("FileModifyDate", "file_modify_date"),
@@ -114,7 +126,10 @@ def empty_media_row() -> Dict[str, str]:
 def metadata_text(metadata: Optional[Mapping[str, object]], key: str) -> str:
     if metadata is None:
         return ""
-    return str(metadata.get(key) or "")
+    value = metadata.get(key)
+    if value is None:
+        return ""
+    return str(value)
 
 
 def capture_time_parts(
@@ -244,6 +259,167 @@ def build_photo_manifest_entry(
     )
     sort_dt = time_parts.sort_dt if time_parts is not None else datetime.max
     return (sort_dt, row["capture_subsec"], relative_path), row
+
+
+def parse_video_start_fields(
+    metadata: Optional[Mapping[str, object]],
+) -> tuple[Optional[datetime], Optional[datetime], str, List[str]]:
+    errors: List[str] = []
+    if not metadata:
+        return None, None, "", errors
+
+    saw_candidate = False
+    for field_name, source_name in VIDEO_TIME_FIELDS:
+        raw_value = metadata.get(field_name)
+        if raw_value in (None, ""):
+            continue
+        saw_candidate = True
+        parsed = parse_exif_datetime(raw_value)
+        if parsed is None:
+            errors.append(f"Invalid {field_name}")
+            continue
+        return parsed.local_dt, parsed.aware_dt, source_name, errors
+
+    if saw_candidate:
+        errors.append("Could not determine video start time from metadata")
+    else:
+        errors.append("Missing video timestamp metadata")
+    return None, None, "", errors
+
+
+def parse_optional_float_text(
+    metadata: Optional[Mapping[str, object]],
+    key: str,
+) -> tuple[str, Optional[float], Optional[str]]:
+    text = metadata_text(metadata, key).strip()
+    if not text:
+        return "", None, None
+    try:
+        value = float(text)
+    except ValueError:
+        return "", None, f"Invalid {key}"
+    if value < 0:
+        return "", None, f"Invalid {key}"
+    return str(value), value, None
+
+
+def parse_optional_positive_int_text(
+    metadata: Optional[Mapping[str, object]],
+    key: str,
+) -> tuple[str, Optional[int], Optional[str]]:
+    text = metadata_text(metadata, key).strip()
+    if not text:
+        return "", None, None
+    try:
+        value = int(text)
+    except ValueError:
+        try:
+            value_float = float(text)
+        except ValueError:
+            return "", None, f"Invalid {key}"
+        if not value_float.is_integer():
+            return "", None, f"Invalid {key}"
+        value = int(value_float)
+    if value <= 0:
+        return "", None, f"Invalid {key}"
+    return str(value), value, None
+
+
+def build_video_manifest_entry(
+    day_dir: Path,
+    stream_id: str,
+    device: str,
+    path: Path,
+    metadata: Optional[Mapping[str, object]],
+) -> Dict[str, str]:
+    relative_path = path.relative_to(day_dir).as_posix()
+    source_dir = path.parent
+    source_rel_dir = source_dir.relative_to(day_dir).as_posix()
+    path_stat = safe_path_stat(path)
+    row = empty_media_row()
+    row.update(
+        {
+            "day": day_dir.name,
+            "stream_id": stream_id,
+            "device": device,
+            "media_type": "video",
+            "source_root": str(day_dir),
+            "source_dir": str(source_dir),
+            "source_rel_dir": "" if source_rel_dir == "." else source_rel_dir,
+            "path": str(path),
+            "relative_path": relative_path,
+            "media_id": relative_path,
+            "photo_id": "",
+            "filename": relative_path,
+            "extension": path.suffix.lower(),
+            "model": metadata_text(metadata, "Model"),
+            "make": metadata_text(metadata, "Make"),
+            "actual_size_bytes": actual_size_bytes_text(path_stat),
+            "create_date_raw": metadata_text(metadata, "CreateDate"),
+            "track_create_date_raw": metadata_text(metadata, "TrackCreateDate"),
+            "media_create_date_raw": metadata_text(metadata, "MediaCreateDate"),
+            "datetime_original_raw": metadata_text(metadata, "DateTimeOriginal"),
+            "subsec_datetime_original_raw": metadata_text(metadata, "SubSecDateTimeOriginal"),
+            "subsec_create_date_raw": metadata_text(metadata, "SubSecCreateDate"),
+            "file_modify_date_raw": metadata_text(metadata, "FileModifyDate"),
+            "file_create_date_raw": metadata_text(metadata, "FileCreateDate"),
+        }
+    )
+
+    start_dt, aware_start_dt, timestamp_source, errors = parse_video_start_fields(metadata)
+    duration_text, duration_value, duration_error = parse_optional_float_text(metadata, "Duration")
+    width_text, _, width_error = parse_optional_positive_int_text(metadata, "ImageWidth")
+    height_text, _, height_error = parse_optional_positive_int_text(metadata, "ImageHeight")
+    fps_text, _, fps_error = parse_optional_float_text(metadata, "VideoFrameRate")
+
+    for error in (duration_error, width_error, height_error, fps_error):
+        if error is not None:
+            errors.append(error)
+
+    if start_dt is not None:
+        row["start_local"] = format_start_local(start_dt)
+        row["start_epoch_ms"] = format_start_epoch_ms(start_dt, aware_start_dt)
+        row["timestamp_source"] = timestamp_source
+
+    if start_dt is not None and duration_value is not None:
+        end_dt = start_dt + timedelta(seconds=duration_value)
+        aware_end_dt = aware_start_dt + timedelta(seconds=duration_value) if aware_start_dt is not None else None
+        row["end_local"] = format_start_local(end_dt)
+        row["end_epoch_ms"] = format_start_epoch_ms(end_dt, aware_end_dt)
+
+    row["duration_seconds"] = duration_text
+    row["width"] = width_text
+    row["height"] = height_text
+    row["fps"] = fps_text
+
+    if not metadata:
+        row["metadata_status"] = "error"
+        row["metadata_error"] = "Missing metadata"
+    elif errors:
+        row["metadata_status"] = "partial"
+        row["metadata_error"] = "; ".join(errors)
+    else:
+        row["metadata_status"] = "ok"
+        row["metadata_error"] = ""
+    return row
+
+
+def write_media_manifest_csv(path: Path, rows: Sequence[Mapping[str, str]]) -> None:
+    row_list = [dict(row) for row in rows]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
+            writer.writeheader()
+            writer.writerows(row_list)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def assign_photo_order_indexes(rows: Sequence[Dict[str, str]]) -> None:

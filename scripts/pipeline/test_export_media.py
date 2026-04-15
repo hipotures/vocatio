@@ -278,6 +278,157 @@ class ExportMediaCliTests(unittest.TestCase):
             self.assertEqual(row["metadata_error"], "Missing metadata")
             self.assertEqual(row["actual_size_bytes"], "")
 
+    def test_build_video_manifest_entry_populates_video_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            stream_dir = day_dir / "v-gh7"
+            nested_dir = stream_dir / "clips"
+            nested_dir.mkdir(parents=True)
+            video_path = nested_dir / "20260323_100000_3840x2160_50fps_123456789.mp4"
+            video_path.write_bytes(b"video-bytes")
+
+            row = export_media.build_video_manifest_entry(
+                day_dir=day_dir,
+                stream_id="v-gh7",
+                device="gh7",
+                path=video_path,
+                metadata={
+                    "TrackCreateDate": "2026:03:23 10:00:00+02:00",
+                    "CreateDate": "2026:03:23 10:00:01+02:00",
+                    "MediaCreateDate": "2026:03:23 10:00:02+02:00",
+                    "Duration": 12.5,
+                    "ImageWidth": 3840,
+                    "ImageHeight": 2160,
+                    "VideoFrameRate": 50.0,
+                    "Model": "GH7",
+                    "Make": "Panasonic",
+                    "FileModifyDate": "2026:03:23 10:00:10+02:00",
+                    "FileCreateDate": "2026:03:23 10:00:11+02:00",
+                },
+            )
+
+            self.assertEqual(list(row.keys()), export_media.MEDIA_MANIFEST_HEADERS)
+            self.assertEqual(row["day"], "20260323")
+            self.assertEqual(row["stream_id"], "v-gh7")
+            self.assertEqual(row["device"], "gh7")
+            self.assertEqual(row["media_type"], "video")
+            self.assertEqual(row["source_root"], str(day_dir))
+            self.assertEqual(row["source_dir"], str(nested_dir))
+            self.assertEqual(row["source_rel_dir"], "v-gh7/clips")
+            self.assertEqual(row["path"], str(video_path))
+            self.assertEqual(row["relative_path"], "v-gh7/clips/20260323_100000_3840x2160_50fps_123456789.mp4")
+            self.assertEqual(row["media_id"], row["relative_path"])
+            self.assertEqual(row["photo_id"], "")
+            self.assertEqual(row["filename"], "v-gh7/clips/20260323_100000_3840x2160_50fps_123456789.mp4")
+            self.assertEqual(row["extension"], ".mp4")
+            self.assertEqual(row["capture_time_local"], "")
+            self.assertEqual(row["capture_subsec"], "")
+            self.assertEqual(row["photo_order_index"], "")
+            self.assertEqual(row["start_local"], "2026-03-23T10:00:00")
+            self.assertEqual(row["end_local"], "2026-03-23T10:00:12.500")
+            self.assertEqual(row["start_epoch_ms"], "1774252800000")
+            self.assertEqual(row["end_epoch_ms"], "1774252812500")
+            self.assertEqual(row["duration_seconds"], "12.5")
+            self.assertEqual(row["timestamp_source"], "track_create_date")
+            self.assertEqual(row["model"], "GH7")
+            self.assertEqual(row["make"], "Panasonic")
+            self.assertEqual(row["width"], "3840")
+            self.assertEqual(row["height"], "2160")
+            self.assertEqual(row["fps"], "50.0")
+            self.assertEqual(row["embedded_size_bytes"], "")
+            self.assertEqual(row["actual_size_bytes"], str(video_path.stat().st_size))
+            self.assertEqual(row["metadata_status"], "ok")
+            self.assertEqual(row["metadata_error"], "")
+            self.assertEqual(row["create_date_raw"], "2026:03:23 10:00:01+02:00")
+            self.assertEqual(row["track_create_date_raw"], "2026:03:23 10:00:00+02:00")
+            self.assertEqual(row["media_create_date_raw"], "2026:03:23 10:00:02+02:00")
+            self.assertEqual(row["file_modify_date_raw"], "2026:03:23 10:00:10+02:00")
+            self.assertEqual(row["file_create_date_raw"], "2026:03:23 10:00:11+02:00")
+
+    def test_build_video_manifest_entry_keeps_row_when_metadata_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            stream_dir = day_dir / "v-gh7"
+            stream_dir.mkdir(parents=True)
+            video_path = stream_dir / "broken.mp4"
+            video_path.write_bytes(b"x")
+
+            row = export_media.build_video_manifest_entry(
+                day_dir=day_dir,
+                stream_id="v-gh7",
+                device="gh7",
+                path=video_path,
+                metadata=None,
+            )
+
+            self.assertEqual(list(row.keys()), export_media.MEDIA_MANIFEST_HEADERS)
+            self.assertEqual(row["media_type"], "video")
+            self.assertEqual(row["relative_path"], "v-gh7/broken.mp4")
+            self.assertEqual(row["media_id"], "v-gh7/broken.mp4")
+            self.assertEqual(row["photo_id"], "")
+            self.assertEqual(row["source_dir"], str(stream_dir))
+            self.assertEqual(row["source_rel_dir"], "v-gh7")
+            self.assertEqual(row["start_local"], "")
+            self.assertEqual(row["end_local"], "")
+            self.assertEqual(row["start_epoch_ms"], "")
+            self.assertEqual(row["end_epoch_ms"], "")
+            self.assertEqual(row["duration_seconds"], "")
+            self.assertEqual(row["width"], "")
+            self.assertEqual(row["height"], "")
+            self.assertEqual(row["fps"], "")
+            self.assertEqual(row["metadata_status"], "error")
+            self.assertEqual(row["metadata_error"], "Missing metadata")
+            self.assertEqual(row["actual_size_bytes"], "1")
+
+    def test_write_media_manifest_csv_writes_the_superset_headers_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "nested" / "media_manifest.csv"
+            rows = [
+                {
+                    "day": "20260323",
+                    "stream_id": "p-a7r5",
+                    "device": "a7r5",
+                    "media_type": "photo",
+                    "source_root": "/data/20260323",
+                    "source_dir": "/data/20260323/p-a7r5",
+                    "source_rel_dir": "p-a7r5",
+                    "path": "/data/20260323/p-a7r5/a.hif",
+                    "relative_path": "p-a7r5/a.hif",
+                    "media_id": "p-a7r5/a.hif",
+                    "photo_id": "p-a7r5/a.hif",
+                    "filename": "p-a7r5/a.hif",
+                    "extension": ".hif",
+                    "capture_time_local": "2026-03-23T10:00:00",
+                    "capture_subsec": "0",
+                    "photo_order_index": "0",
+                    "start_local": "2026-03-23T10:00:00",
+                    "start_epoch_ms": "1774252800000",
+                    "timestamp_source": "datetime_original",
+                }
+            ]
+
+            export_media.write_media_manifest_csv(output_path, rows)
+
+            text = output_path.read_text(encoding="utf-8")
+            lines = text.splitlines()
+            self.assertEqual(lines[0].split(","), export_media.MEDIA_MANIFEST_HEADERS)
+            self.assertIn("media_id", lines[0])
+            self.assertIn("relative_path", lines[0])
+            self.assertEqual(lines[1].split(",")[0:11], [
+                "20260323",
+                "p-a7r5",
+                "a7r5",
+                "photo",
+                "/data/20260323",
+                "/data/20260323/p-a7r5",
+                "p-a7r5",
+                "/data/20260323/p-a7r5/a.hif",
+                "p-a7r5/a.hif",
+                "p-a7r5/a.hif",
+                "p-a7r5/a.hif",
+            ])
+            self.assertFalse((output_path.parent / f"{output_path.name}.tmp").exists())
+
     def test_assign_photo_order_indexes_sets_dense_order(self) -> None:
         rows = [
             {"relative_path": "p-a7r5/c.jpg", "photo_order_index": ""},
