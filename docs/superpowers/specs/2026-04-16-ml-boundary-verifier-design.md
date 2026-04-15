@@ -161,6 +161,10 @@ Each candidate record should include at least:
 
 Records should be stored in a tabular format suitable for AutoGluon, ideally Parquet plus an explicit manifest CSV or JSON for diagnostics.
 
+Candidate ordering must be stable and deterministic. When timestamps tie, ordering must be broken by a stable secondary key such as `order_idx` or `photo_id`, and the same rule must be used everywhere the dataset is rebuilt.
+
+`candidate_id` must also be deterministic across rebuilds for the same inputs. It should be derived from a stable key such as `day_id + center_left_photo_id + center_right_photo_id + candidate_rule_version` or an equivalent canonical tuple.
+
 The canonical training label remains:
 
 - `segment_type` = type of the segment on the right side of the candidate
@@ -437,6 +441,15 @@ These must also be broken out by:
 - `performance`
 - `ceremony`
 - `warmup`
+
+Verifier-level breakdowns by segment type must be computed using the ground-truth canonical `segment_type` label for the candidate, not the predicted segment type.
+
+For `boundary`, the model may emit probabilities, but evaluation and production decisions require an explicit thresholding policy. V1 should default to one of the following and record which policy was used in all reports:
+
+- fixed threshold `0.5`
+- threshold tuned on the validation split against a declared objective such as `boundary_f1` or `estimated_correction_actions`
+
+The threshold policy and final threshold value are required report fields.
 
 ### 2. Reconstructed segment metrics
 
