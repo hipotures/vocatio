@@ -30,7 +30,8 @@ from build_photo_segments import (
     read_boundary_scores,
     validate_boundary_alignment,
 )
-from lib.image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1, PHOTO_MANIFEST_REQUIRED_COLUMNS, validate_required_columns
+from lib.image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1, validate_required_columns
+from lib.media_manifest import read_media_manifest, select_photo_rows
 from lib.pipeline_io import atomic_write_json
 from lib.workspace_dir import resolve_workspace_dir
 
@@ -39,7 +40,7 @@ console = Console()
 
 PHOTO_EMBEDDED_MANIFEST_FILENAME = "photo_embedded_manifest.csv"
 PHOTO_REVIEW_INDEX_FILENAME = "performance_proxy_index.image.json"
-MANIFEST_REQUIRED_COLUMNS = frozenset(set(PHOTO_MANIFEST_REQUIRED_COLUMNS) | {"start_local", "start_epoch_ms"})
+MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "path", "photo_order_index", "start_local", "start_epoch_ms"})
 EMBEDDED_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "preview_path"})
 UNCERTAIN_BOUNDARY_SCORE_THRESHOLD = 0.95
 IMAGE_ONLY_TIMELINE_STATUS = "image_only"
@@ -56,7 +57,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--manifest-csv",
-        help="Input manifest CSV filename or absolute path. Default: WORKSPACE/photo_manifest.csv",
+        help="Input manifest CSV filename or absolute path. Default: WORKSPACE/media_manifest.csv",
     )
     parser.add_argument(
         "--segments-csv",
@@ -85,7 +86,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def resolve_manifest_path(workspace_dir: Path, manifest_value: Optional[str]) -> Path:
     if not manifest_value:
-        return workspace_dir / "photo_manifest.csv"
+        return workspace_dir / "media_manifest.csv"
     candidate = Path(manifest_value)
     if candidate.is_absolute():
         return candidate
@@ -175,15 +176,15 @@ def normalize_workspace_relative_path(relative_path: str, column_name: str) -> P
 
 def resolve_day_source_path(day_dir: Path, relative_path: str, source_value: str, column_name: str) -> Path:
     expected_relative_path = normalize_day_relative_path(relative_path, column_name)
-    expected_path = (day_dir / expected_relative_path).resolve()
+    expected_source_path = day_dir / expected_relative_path
     source_candidate = Path(str(source_value).strip())
     source_path = source_candidate.resolve() if source_candidate.is_absolute() else (day_dir / source_candidate).resolve()
     try:
-        expected_path.relative_to(day_dir.resolve())
-        source_path.relative_to(day_dir.resolve())
+        normalize_day_relative_path(expected_source_path.relative_to(day_dir).as_posix(), column_name)
     except ValueError as exc:
-        raise ValueError(f"{column_name} must stay under {day_dir}: {source_value}") from exc
-    if source_path != expected_path:
+        raise ValueError(f"{column_name} relative_path must stay under {day_dir}: {relative_path}") from exc
+    expected_resolved_path = expected_source_path.resolve()
+    if source_path != expected_resolved_path:
         raise ValueError(f"{column_name} does not match relative_path {relative_path}: {source_value}")
     return source_path
 
@@ -207,12 +208,10 @@ def parse_bool(value: str, column_name: str) -> bool:
 
 
 def read_photo_manifest(day_dir: Path, path: Path) -> List[Dict[str, str]]:
-    with path.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        validate_required_columns(path.name, MANIFEST_REQUIRED_COLUMNS, reader.fieldnames)
-        rows = [dict(row) for row in reader]
+    rows = select_photo_rows(read_media_manifest(path))
     if not rows:
         raise ValueError(f"{path.name} contains no rows")
+    validate_required_columns(path.name, MANIFEST_REQUIRED_COLUMNS, rows[0].keys())
     normalized_rows: List[Dict[str, str]] = []
     previous_start_epoch_ms: Optional[int] = None
     for row_number, row in enumerate(rows, start=1):
@@ -259,7 +258,7 @@ def read_embedded_manifest(workspace_dir: Path, path: Path, manifest_rows: Seque
     if len(rows) != len(manifest_rows):
         raise ValueError(
             "Row count mismatch across stage-1 artifacts: "
-            f"photo_manifest.csv={len(manifest_rows)}, {path.name}={len(rows)}"
+            f"media_manifest.csv={len(manifest_rows)}, {path.name}={len(rows)}"
         )
     preview_by_relative_path: Dict[str, Dict[str, str]] = {}
     for row_number, row in enumerate(rows, start=1):
@@ -315,9 +314,9 @@ def read_segments(path: Path, manifest_rows: Sequence[Mapping[str, str]]) -> Lis
             f"{path.name} end_relative_path",
         )
         if start_relative_path not in manifest_index_by_path:
-            raise ValueError(f"{path.name} start_relative_path not found in photo_manifest.csv: {start_relative_path}")
+            raise ValueError(f"{path.name} start_relative_path not found in media_manifest.csv: {start_relative_path}")
         if end_relative_path not in manifest_index_by_path:
-            raise ValueError(f"{path.name} end_relative_path not found in photo_manifest.csv: {end_relative_path}")
+            raise ValueError(f"{path.name} end_relative_path not found in media_manifest.csv: {end_relative_path}")
         start_index = manifest_index_by_path[start_relative_path]
         end_index = manifest_index_by_path[end_relative_path]
         if start_index > end_index:
@@ -407,12 +406,12 @@ def nearest_boundary_seconds(
     anchor_indexes = [index for index in [left_anchor_index, right_anchor_index] if index is not None]
     if not anchor_indexes:
         return ""
-    photo_epoch_ms = parse_epoch_ms(str(manifest_rows[photo_index]["start_epoch_ms"]), "photo_manifest.csv start_epoch_ms")
+    photo_epoch_ms = parse_epoch_ms(str(manifest_rows[photo_index]["start_epoch_ms"]), "media_manifest.csv start_epoch_ms")
     distances = []
     for anchor_index in anchor_indexes:
         anchor_epoch_ms = parse_epoch_ms(
             str(manifest_rows[anchor_index]["start_epoch_ms"]),
-            "photo_manifest.csv start_epoch_ms",
+            "media_manifest.csv start_epoch_ms",
         )
         distances.append(abs(float(photo_epoch_ms - anchor_epoch_ms) / 1000.0))
     return format_float(min(distances))
@@ -545,11 +544,6 @@ def build_photo_review_index(
     output_path: Path,
 ) -> int:
     declared_day_dir = day_dir if day_dir is not None else workspace_dir.parent
-    resolved_day_dir = declared_day_dir.resolve()
-    if workspace_dir.parent.resolve() != resolved_day_dir or workspace_dir.resolve().parent != resolved_day_dir:
-        raise ValueError(
-            f"workspace_dir must stay under day_dir for image-only review index: {workspace_dir} vs {declared_day_dir}"
-        )
     manifest_rows = read_photo_manifest(declared_day_dir, manifest_csv)
     preview_by_relative_path = read_embedded_manifest(workspace_dir, embedded_manifest_csv, manifest_rows)
     boundary_rows = read_boundary_scores(boundary_scores_csv)
