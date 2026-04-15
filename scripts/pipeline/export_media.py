@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import os
 import re
 import tempfile
@@ -39,6 +40,10 @@ from lib.photo_time_order import (
 console = Console()
 DAY_PATTERN = re.compile(r"^\d{8}$")
 STREAM_PATTERN = re.compile(r"^(?P<prefix>[pv])-(?P<device>[A-Za-z0-9._-]+)$")
+VIDEO_PATTERN = re.compile(
+    r"^(?P<date>\d{8})_(?P<time>\d{6})_(?P<width>\d+)x(?P<height>\d+)_(?P<fps>\d+)fps_(?P<embedded_size>\d+)\.[^.]+$",
+    re.IGNORECASE,
+)
 PHOTO_FALLBACK_TIME_FIELDS: Sequence[tuple[str, str]] = (
     ("SubSecCreateDate", "subsec_create_date"),
     ("SubSecDateTimeOriginal", "subsec_datetime_original"),
@@ -47,6 +52,9 @@ PHOTO_FALLBACK_TIME_FIELDS: Sequence[tuple[str, str]] = (
     ("FileCreateDate", "file_create_date"),
     ("FileModifyDate", "file_modify_date"),
 )
+VIDEO_FALLBACK_DURATION_TEXT = "0"
+VIDEO_FALLBACK_DIMENSION_TEXT = "1"
+VIDEO_FALLBACK_FPS_TEXT = "1"
 VIDEO_TIME_FIELDS: Sequence[tuple[str, str]] = (
     ("TrackCreateDate", "track_create_date"),
     ("CreateDate", "create_date"),
@@ -290,6 +298,8 @@ def parse_video_start_fields(
 def parse_optional_float_text(
     metadata: Optional[Mapping[str, object]],
     key: str,
+    *,
+    allow_zero: bool = True,
 ) -> tuple[str, Optional[float], Optional[str]]:
     text = metadata_text(metadata, key).strip()
     if not text:
@@ -298,7 +308,9 @@ def parse_optional_float_text(
         value = float(text)
     except ValueError:
         return "", None, f"Invalid {key}"
-    if value < 0:
+    if not math.isfinite(value):
+        return "", None, f"Invalid {key}"
+    if value < 0 or (not allow_zero and value == 0):
         return "", None, f"Invalid {key}"
     return str(value), value, None
 
@@ -317,12 +329,47 @@ def parse_optional_positive_int_text(
             value_float = float(text)
         except ValueError:
             return "", None, f"Invalid {key}"
+        if not math.isfinite(value_float):
+            return "", None, f"Invalid {key}"
         if not value_float.is_integer():
             return "", None, f"Invalid {key}"
         value = int(value_float)
     if value <= 0:
         return "", None, f"Invalid {key}"
     return str(value), value, None
+
+
+def parse_video_filename_parts(path: Path) -> tuple[Optional[datetime], Dict[str, str], List[str]]:
+    match = VIDEO_PATTERN.match(path.name)
+    if match is None:
+        return None, {}, []
+
+    errors: List[str] = []
+    start_dt: Optional[datetime] = None
+    try:
+        start_dt = datetime.strptime(
+            f"{match.group('date')}_{match.group('time')}",
+            "%Y%m%d_%H%M%S",
+        )
+    except ValueError:
+        errors.append("Invalid filename timestamp")
+
+    return (
+        start_dt,
+        {
+            "width": match.group("width"),
+            "height": match.group("height"),
+            "fps": match.group("fps"),
+            "embedded_size_bytes": match.group("embedded_size"),
+        },
+        errors,
+    )
+
+
+def placeholder_video_start_datetime(day_dir: Path) -> datetime:
+    if DAY_PATTERN.match(day_dir.name):
+        return datetime.strptime(day_dir.name, "%Y%m%d")
+    return datetime(1970, 1, 1)
 
 
 def build_video_manifest_entry(
@@ -336,6 +383,7 @@ def build_video_manifest_entry(
     source_dir = path.parent
     source_rel_dir = source_dir.relative_to(day_dir).as_posix()
     path_stat = safe_path_stat(path)
+    filename_start_dt, filename_parts, filename_errors = parse_video_filename_parts(path)
     row = empty_media_row()
     row.update(
         {
@@ -354,6 +402,7 @@ def build_video_manifest_entry(
             "extension": path.suffix.lower(),
             "model": metadata_text(metadata, "Model"),
             "make": metadata_text(metadata, "Make"),
+            "embedded_size_bytes": filename_parts.get("embedded_size_bytes", ""),
             "actual_size_bytes": actual_size_bytes_text(path_stat),
             "create_date_raw": metadata_text(metadata, "CreateDate"),
             "track_create_date_raw": metadata_text(metadata, "TrackCreateDate"),
@@ -366,26 +415,79 @@ def build_video_manifest_entry(
         }
     )
 
-    start_dt, aware_start_dt, timestamp_source, errors = parse_video_start_fields(metadata)
+    error_messages: List[str] = []
+    if not metadata:
+        error_messages.append("Missing metadata")
+
+    start_dt, aware_start_dt, timestamp_source, start_errors = parse_video_start_fields(metadata)
+    error_messages.extend(start_errors)
+
+    if start_dt is None:
+        if filename_start_dt is not None:
+            start_dt = filename_start_dt
+            aware_start_dt = None
+            timestamp_source = "filename_pattern"
+            error_messages.append("Used filename-derived start time")
+        else:
+            error_messages.extend(filename_errors)
+            mtime = file_mtime_datetime(path_stat)
+            if mtime is not None:
+                start_dt = mtime
+                aware_start_dt = None
+                timestamp_source = "file_mtime"
+                error_messages.append("Used file_mtime start time")
+            else:
+                start_dt = placeholder_video_start_datetime(day_dir)
+                aware_start_dt = None
+                timestamp_source = "placeholder"
+                error_messages.append("Used placeholder start time")
+
     duration_text, duration_value, duration_error = parse_optional_float_text(metadata, "Duration")
     width_text, _, width_error = parse_optional_positive_int_text(metadata, "ImageWidth")
     height_text, _, height_error = parse_optional_positive_int_text(metadata, "ImageHeight")
-    fps_text, _, fps_error = parse_optional_float_text(metadata, "VideoFrameRate")
+    fps_text, _, fps_error = parse_optional_float_text(metadata, "VideoFrameRate", allow_zero=False)
 
     for error in (duration_error, width_error, height_error, fps_error):
         if error is not None:
-            errors.append(error)
+            error_messages.append(error)
 
-    if start_dt is not None:
-        row["start_local"] = format_start_local(start_dt)
-        row["start_epoch_ms"] = format_start_epoch_ms(start_dt, aware_start_dt)
-        row["timestamp_source"] = timestamp_source
+    if duration_value is None:
+        duration_value = 0.0
+        duration_text = VIDEO_FALLBACK_DURATION_TEXT
+        error_messages.append("Used zero duration fallback")
 
-    if start_dt is not None and duration_value is not None:
-        end_dt = start_dt + timedelta(seconds=duration_value)
-        aware_end_dt = aware_start_dt + timedelta(seconds=duration_value) if aware_start_dt is not None else None
-        row["end_local"] = format_start_local(end_dt)
-        row["end_epoch_ms"] = format_start_epoch_ms(end_dt, aware_end_dt)
+    if not width_text:
+        if filename_parts.get("width"):
+            width_text = filename_parts["width"]
+            error_messages.append("Used filename-derived width")
+        else:
+            width_text = VIDEO_FALLBACK_DIMENSION_TEXT
+            error_messages.append("Used placeholder width")
+
+    if not height_text:
+        if filename_parts.get("height"):
+            height_text = filename_parts["height"]
+            error_messages.append("Used filename-derived height")
+        else:
+            height_text = VIDEO_FALLBACK_DIMENSION_TEXT
+            error_messages.append("Used placeholder height")
+
+    if not fps_text:
+        if filename_parts.get("fps"):
+            fps_text = filename_parts["fps"]
+            error_messages.append("Used filename-derived fps")
+        else:
+            fps_text = VIDEO_FALLBACK_FPS_TEXT
+            error_messages.append("Used placeholder fps")
+
+    row["start_local"] = format_start_local(start_dt)
+    row["start_epoch_ms"] = format_start_epoch_ms(start_dt, aware_start_dt)
+    row["timestamp_source"] = timestamp_source
+
+    end_dt = start_dt + timedelta(seconds=duration_value)
+    aware_end_dt = aware_start_dt + timedelta(seconds=duration_value) if aware_start_dt is not None else None
+    row["end_local"] = format_start_local(end_dt)
+    row["end_epoch_ms"] = format_start_epoch_ms(end_dt, aware_end_dt)
 
     row["duration_seconds"] = duration_text
     row["width"] = width_text
@@ -394,10 +496,10 @@ def build_video_manifest_entry(
 
     if not metadata:
         row["metadata_status"] = "error"
-        row["metadata_error"] = "Missing metadata"
-    elif errors:
+        row["metadata_error"] = "; ".join(error_messages)
+    elif error_messages:
         row["metadata_status"] = "partial"
-        row["metadata_error"] = "; ".join(errors)
+        row["metadata_error"] = "; ".join(error_messages)
     else:
         row["metadata_status"] = "ok"
         row["metadata_error"] = ""

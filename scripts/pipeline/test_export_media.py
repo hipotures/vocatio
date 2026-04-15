@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import importlib.util
 import io
 import os
@@ -15,6 +16,7 @@ from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
 
@@ -28,6 +30,7 @@ def load_module(module_name: str, relative_path: str):
 
 
 export_media = load_module("export_media_test", "scripts/pipeline/export_media.py")
+media_manifest = importlib.import_module("scripts.pipeline.lib.media_manifest")
 
 
 class ExportMediaCliTests(unittest.TestCase):
@@ -335,7 +338,7 @@ class ExportMediaCliTests(unittest.TestCase):
             self.assertEqual(row["width"], "3840")
             self.assertEqual(row["height"], "2160")
             self.assertEqual(row["fps"], "50.0")
-            self.assertEqual(row["embedded_size_bytes"], "")
+            self.assertEqual(row["embedded_size_bytes"], "123456789")
             self.assertEqual(row["actual_size_bytes"], str(video_path.stat().st_size))
             self.assertEqual(row["metadata_status"], "ok")
             self.assertEqual(row["metadata_error"], "")
@@ -345,13 +348,50 @@ class ExportMediaCliTests(unittest.TestCase):
             self.assertEqual(row["file_modify_date_raw"], "2026:03:23 10:00:10+02:00")
             self.assertEqual(row["file_create_date_raw"], "2026:03:23 10:00:11+02:00")
 
-    def test_build_video_manifest_entry_keeps_row_when_metadata_is_missing(self) -> None:
+    def test_build_video_manifest_entry_prefers_filename_fallbacks_before_file_mtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            stream_dir = day_dir / "v-gh7"
+            stream_dir.mkdir(parents=True)
+            video_path = stream_dir / "20260323_100000_3840x2160_50fps_123456789.mp4"
+            video_path.write_bytes(b"x")
+            file_mtime = datetime(2026, 3, 23, 11, 22, 33)
+            file_epoch_ns = int(file_mtime.timestamp() * 1_000_000_000)
+            os.utime(video_path, ns=(file_epoch_ns, file_epoch_ns))
+
+            row = export_media.build_video_manifest_entry(
+                day_dir=day_dir,
+                stream_id="v-gh7",
+                device="gh7",
+                path=video_path,
+                metadata=None,
+            )
+
+            self.assertEqual(row["relative_path"], "v-gh7/20260323_100000_3840x2160_50fps_123456789.mp4")
+            self.assertEqual(row["start_local"], "2026-03-23T10:00:00")
+            self.assertEqual(row["end_local"], "2026-03-23T10:00:00")
+            self.assertEqual(row["start_epoch_ms"], "1774260000000")
+            self.assertEqual(row["end_epoch_ms"], "1774260000000")
+            self.assertEqual(row["timestamp_source"], "filename_pattern")
+            self.assertEqual(row["duration_seconds"], "0")
+            self.assertEqual(row["width"], "3840")
+            self.assertEqual(row["height"], "2160")
+            self.assertEqual(row["fps"], "50")
+            self.assertEqual(row["embedded_size_bytes"], "123456789")
+            self.assertEqual(row["metadata_status"], "error")
+            self.assertIn("Missing metadata", row["metadata_error"])
+            self.assertIn("filename-derived start time", row["metadata_error"])
+
+    def test_build_video_manifest_entry_keeps_manifest_valid_when_metadata_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"
             stream_dir = day_dir / "v-gh7"
             stream_dir.mkdir(parents=True)
             video_path = stream_dir / "broken.mp4"
             video_path.write_bytes(b"x")
+            fallback_dt = datetime(2026, 3, 23, 10, 0, 5, 456000)
+            fallback_epoch_ns = int(fallback_dt.timestamp() * 1_000_000_000)
+            os.utime(video_path, ns=(fallback_epoch_ns, fallback_epoch_ns))
 
             row = export_media.build_video_manifest_entry(
                 day_dir=day_dir,
@@ -368,17 +408,58 @@ class ExportMediaCliTests(unittest.TestCase):
             self.assertEqual(row["photo_id"], "")
             self.assertEqual(row["source_dir"], str(stream_dir))
             self.assertEqual(row["source_rel_dir"], "v-gh7")
-            self.assertEqual(row["start_local"], "")
-            self.assertEqual(row["end_local"], "")
-            self.assertEqual(row["start_epoch_ms"], "")
-            self.assertEqual(row["end_epoch_ms"], "")
-            self.assertEqual(row["duration_seconds"], "")
-            self.assertEqual(row["width"], "")
-            self.assertEqual(row["height"], "")
-            self.assertEqual(row["fps"], "")
+            self.assertEqual(row["start_local"], "2026-03-23T10:00:05.456")
+            self.assertEqual(row["end_local"], "2026-03-23T10:00:05.456")
+            self.assertEqual(row["start_epoch_ms"], "1774260005456")
+            self.assertEqual(row["end_epoch_ms"], "1774260005456")
+            self.assertEqual(row["timestamp_source"], "file_mtime")
+            self.assertEqual(row["duration_seconds"], "0")
+            self.assertEqual(row["width"], "1")
+            self.assertEqual(row["height"], "1")
+            self.assertEqual(row["fps"], "1")
             self.assertEqual(row["metadata_status"], "error")
-            self.assertEqual(row["metadata_error"], "Missing metadata")
+            self.assertIn("Missing metadata", row["metadata_error"])
+            self.assertIn("file_mtime start time", row["metadata_error"])
             self.assertEqual(row["actual_size_bytes"], "1")
+
+            output_path = day_dir / "_workspace" / "media_manifest.csv"
+            export_media.write_media_manifest_csv(output_path, [row])
+            loaded_rows = media_manifest.read_media_manifest(output_path)
+            self.assertEqual(len(loaded_rows), 1)
+            self.assertEqual(loaded_rows[0]["relative_path"], "v-gh7/broken.mp4")
+
+    def test_build_video_manifest_entry_rejects_non_finite_numeric_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            stream_dir = day_dir / "v-gh7"
+            stream_dir.mkdir(parents=True)
+            video_path = stream_dir / "20260323_100000_3840x2160_50fps_123456789.mp4"
+            video_path.write_bytes(b"video")
+
+            row = export_media.build_video_manifest_entry(
+                day_dir=day_dir,
+                stream_id="v-gh7",
+                device="gh7",
+                path=video_path,
+                metadata={
+                    "TrackCreateDate": "2026:03:23 10:00:00",
+                    "Duration": "nan",
+                    "ImageWidth": "3840",
+                    "ImageHeight": "2160",
+                    "VideoFrameRate": "inf",
+                },
+            )
+
+            self.assertEqual(row["start_local"], "2026-03-23T10:00:00")
+            self.assertEqual(row["end_local"], "2026-03-23T10:00:00")
+            self.assertEqual(row["duration_seconds"], "0")
+            self.assertEqual(row["width"], "3840")
+            self.assertEqual(row["height"], "2160")
+            self.assertEqual(row["fps"], "50")
+            self.assertEqual(row["metadata_status"], "partial")
+            self.assertIn("Invalid Duration", row["metadata_error"])
+            self.assertIn("Invalid VideoFrameRate", row["metadata_error"])
+            self.assertIn("filename-derived fps", row["metadata_error"])
 
     def test_write_media_manifest_csv_writes_the_superset_headers_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -427,7 +508,46 @@ class ExportMediaCliTests(unittest.TestCase):
                 "p-a7r5/a.hif",
                 "p-a7r5/a.hif",
             ])
-            self.assertFalse((output_path.parent / f"{output_path.name}.tmp").exists())
+            self.assertEqual(list(output_path.parent.glob(f"{output_path.name}.*.tmp")), [])
+
+    def test_write_media_manifest_csv_cleans_up_randomized_temp_files_when_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "nested" / "media_manifest.csv"
+            rows = [
+                {
+                    "day": "20260323",
+                    "stream_id": "v-gh7",
+                    "device": "gh7",
+                    "media_type": "video",
+                    "source_root": "/data/20260323",
+                    "source_dir": "/data/20260323/v-gh7",
+                    "source_rel_dir": "v-gh7",
+                    "path": "/data/20260323/v-gh7/a.mp4",
+                    "relative_path": "v-gh7/a.mp4",
+                    "media_id": "v-gh7/a.mp4",
+                    "photo_id": "",
+                    "filename": "v-gh7/a.mp4",
+                    "extension": ".mp4",
+                    "start_local": "2026-03-23T10:00:00",
+                    "end_local": "2026-03-23T10:00:00",
+                    "start_epoch_ms": "1774252800000",
+                    "end_epoch_ms": "1774252800000",
+                    "duration_seconds": "0",
+                    "width": "1",
+                    "height": "1",
+                    "fps": "1",
+                    "timestamp_source": "placeholder",
+                    "metadata_status": "error",
+                    "metadata_error": "test",
+                }
+            ]
+
+            with mock.patch.object(export_media.os, "replace", side_effect=OSError("replace failed")):
+                with self.assertRaises(OSError):
+                    export_media.write_media_manifest_csv(output_path, rows)
+
+            self.assertFalse(output_path.exists())
+            self.assertEqual(list(output_path.parent.glob(f"{output_path.name}.*.tmp")), [])
 
     def test_assign_photo_order_indexes_sets_dense_order(self) -> None:
         rows = [
