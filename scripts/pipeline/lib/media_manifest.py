@@ -44,6 +44,10 @@ def read_media_manifest(path: Path) -> List[Dict[str, str]]:
                 if not video_headers_validated:
                     validate_required_columns(path.name, required_columns, reader.fieldnames)
                     video_headers_validated = True
+            else:
+                raise ValueError(
+                    f"{path.name} row {row_number} has invalid media_type: {media_type or '<empty>'}"
+                )
             validate_required_values(f"{path.name} row {row_number}", required_columns, row_dict)
             rows.append(row_dict)
         if not rows:

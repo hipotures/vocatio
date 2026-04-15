@@ -176,6 +176,15 @@ class MediaManifestContractTests(unittest.TestCase):
                 media_manifest.read_media_manifest(path)
             self.assertIn("fps", str(ctx.exception))
 
+    def test_read_media_manifest_rejects_invalid_media_type_values(self) -> None:
+        media_manifest = self.load_media_manifest()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "media_manifest.csv"
+            write_manifest(path, [build_video_row(media_type="vedio")])
+            with self.assertRaises(ValueError) as ctx:
+                media_manifest.read_media_manifest(path)
+            self.assertIn("media_type", str(ctx.exception))
+
     def test_read_media_manifest_rejects_header_only_empty_manifest(self) -> None:
         media_manifest = self.load_media_manifest()
         with tempfile.TemporaryDirectory() as tmp:
