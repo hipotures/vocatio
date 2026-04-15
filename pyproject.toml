@@ -1,0 +1,18 @@
+[project]
+name = "vocatio"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "rich==15.0.0",
+    "torch==2.11.0+cu128",
+    "torchvision==0.26.0+cu128",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
