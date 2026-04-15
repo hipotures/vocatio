@@ -21,11 +21,18 @@ def _normalize_embedding(value: Sequence[float]) -> list[float]:
     if isinstance(value, (str, bytes)):
         raise ValueError("embeddings must be numeric sequences")
     try:
-        normalized = [float(part) for part in value]
+        normalized = []
+        for part in value:
+            if isinstance(part, bool):
+                raise ValueError("embedding components must be finite numbers")
+            normalized.append(float(part))
     except TypeError as exc:
         raise ValueError("embeddings must be numeric sequences") from exc
     if not normalized:
         raise ValueError("embeddings must not be empty")
+    for part in normalized:
+        if not math.isfinite(part):
+            raise ValueError("embedding components must be finite numbers")
     return normalized
 
 
@@ -54,9 +61,12 @@ def _require_timestamp(candidate: Mapping[str, object], field_name: str) -> floa
     if isinstance(value, bool):
         raise ValueError(f"{field_name} must be numeric")
     try:
-        return float(value)
+        normalized = float(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{field_name} must be numeric") from exc
+    if not math.isfinite(normalized):
+        raise ValueError(f"{field_name} must be finite")
+    return normalized
 
 
 def _require_photo_id(candidate: Mapping[str, object], field_name: str) -> str:
@@ -92,6 +102,8 @@ def build_candidate_feature_row(
         _require_timestamp(candidate, "frame_04_timestamp"),
         _require_timestamp(candidate, "frame_05_timestamp"),
     ]
+    if any(right < left for left, right in zip(timestamps, timestamps[1:])):
+        raise ValueError("frame timestamps must be non-decreasing")
 
     gaps = [
         timestamps[1] - timestamps[0],
