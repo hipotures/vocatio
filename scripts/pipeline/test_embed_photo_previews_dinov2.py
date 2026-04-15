@@ -103,6 +103,38 @@ class EmbedPhotoPreviewsDinov2Tests(unittest.TestCase):
         self.assertEqual(args.image_size, 518)
         self.assertEqual(args.batch_size, 4)
 
+    def test_main_uses_workspace_dir_from_vocatio_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            day_dir = root_dir / "20260323"
+            workspace_dir = root_dir / "fast-workspace"
+            features_dir = workspace_dir / "features"
+            day_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+            (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+            manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            manifest_csv.write_text("relative_path,photo_order_index,preview_path\n", encoding="utf-8")
+
+            argv = [
+                "embed_photo_previews_dinov2.py",
+                str(day_dir),
+                "--overwrite",
+            ]
+            with mock.patch.object(sys, "argv", argv):
+                with mock.patch.object(embed, "embed_photo_previews_dinov2", return_value=3) as embed_mock:
+                    exit_code = embed.main()
+
+            self.assertEqual(exit_code, 0)
+            embed_mock.assert_called_once_with(
+                workspace_dir=workspace_dir,
+                manifest_csv=manifest_csv,
+                features_dir=features_dir,
+                model_name="dinov2_vitb14",
+                batch_size=16,
+                device="auto",
+                image_size=224,
+            )
+
     def test_embed_photo_previews_dinov2_writes_float16_embeddings_and_task5_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_dir = Path(tmp) / "_workspace"
