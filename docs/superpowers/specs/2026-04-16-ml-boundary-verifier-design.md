@@ -253,7 +253,16 @@ For the fixed 5-photo window in v1, these quantities are defined as:
 - `right_internal_gap_mean = mean(gap_45)`
 - `local_gap_median = median(gap_12, gap_23, gap_34, gap_45)`
 - `gap_ratio = gap_34 / local_gap_median`, with the denominator protected against zero by the implementation
-- `gap_is_local_outlier = 1` when `gap_34` exceeds a chosen local outlier threshold derived from the non-central window gaps, otherwise `0`
+- `gap_is_local_outlier = 1` when `gap_34 > gap_outlier_k * median(gap_12, gap_23, gap_45)`, otherwise `0`
+
+V1 fixes:
+
+- `gap_outlier_method = median_ratio`
+- `gap_outlier_k = 3.0`
+
+The implementation may make these configurable, but the dataset and model reports must record the exact values used.
+
+Because the fixed 5-photo window places the candidate gap between frame 3 and frame 4, the right side of the window has only one internal gap. The resulting asymmetry in `right_internal_gap_mean` is intentional and must not be normalized away in v1.
 
 ### 2. Descriptor-difference features
 
@@ -276,6 +285,18 @@ Examples:
 - descriptor consistency score within right half of window
 - left/right group-change flags
 
+Aggregation rules for descriptor-derived features in v1:
+
+- frame-level categorical descriptors must first be normalized to a canonical vocabulary
+- left-side aggregate categorical values are computed from frames 1 to 3 by majority vote; ties resolve to the value from frame 03
+- right-side aggregate categorical values are computed from frames 4 to 5 by majority vote; ties resolve to the value from frame 04
+- categorical agreement features are binary equality checks between the left aggregate value and the right aggregate value
+- categorical change features are binary inequality checks between the left aggregate value and the right aggregate value
+- missing values participate explicitly in aggregation and comparison rather than being silently dropped
+- descriptor consistency scores within a side are defined as the fraction of frames in that side whose normalized categorical descriptor matches the side aggregate value
+
+This aggregation policy applies to categorical descriptors such as costume type, garment category, and visible-person-count bucket unless a later spec explicitly overrides it for a specific descriptor family.
+
 If DINO or similar image embeddings are available, the tabular feature view should also include ordered local-distance features such as:
 
 - `embed_dist_12`
@@ -290,6 +311,10 @@ These embedding-derived distances are part of the primary mechanism by which the
 
 Because the existing image-only pipeline already produces DINOv2 embeddings and boundary-oriented image features, v1 should treat DINO-derived ordered distance features as part of the required tabular baseline whenever the benchmark dataset is built from days for which DINO artifacts can be generated. The baseline is therefore not purely metadata-only; it is a structured sequence-aware model that also consumes ordered image-distance features.
 
+The distance function for all `embed_dist_*` features in v1 is cosine distance over L2-normalized embeddings:
+
+- `distance(a, b) = 1 - cosine_similarity(a_normalized, b_normalized)`
+
 For the fixed 5-photo window in v1, the embedding-derived quantities are defined as:
 
 - `embed_dist_12 = distance(embed(frame_01), embed(frame_02))`
@@ -301,6 +326,8 @@ For the fixed 5-photo window in v1, the embedding-derived quantities are defined
 - `cross_boundary_outlier_score = embed_dist_34 / median(embed_dist_12, embed_dist_23, embed_dist_45)`, with the denominator protected against zero by the implementation
 
 If a future corpus cannot provide DINO artifacts consistently, that corpus should be treated as a separately declared benchmark configuration rather than silently weakening the baseline.
+
+Because the fixed 5-photo window places the candidate gap between frame 3 and frame 4, the right side has only one internal embedding distance. The resulting asymmetry in `right_consistency_score` is intentional and must not be normalized away in v1.
 
 ### 3. Candidate provenance features
 
@@ -384,10 +411,12 @@ The system should support explicit split manifests rather than hidden random spl
 
 Hard requirements:
 
-- validation and test splits must each contain examples of `performance`, `ceremony`, and `warmup` whenever those classes exist in the available corpus
+- validation and test splits must each contain examples of `performance`, `ceremony`, and `warmup` whenever those classes exist in the available corpus and this is feasible under day-level isolation
 - at least one held-out split should represent clear domain shift, such as a different year, camera generation, or visibly different image conditions
 
 `split_name` is dataset bookkeeping only. Train, validation, and test assignment must be driven by explicit split manifests, not by hidden random row-level splits.
+
+If the available corpus cannot satisfy class-coverage requirements under day-level isolation without leakage, the split validator must fail with an explicit diagnostic rather than silently building a narrower split.
 
 ## Metrics
 
