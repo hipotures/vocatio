@@ -232,5 +232,135 @@ class VlmTransportContractTests(unittest.TestCase):
         self.assertEqual(error.exception.category, "unsupported_configuration")
 
 
+class VlmTransportPayloadTests(unittest.TestCase):
+    def test_build_ollama_request_payload_maps_neutral_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "example.jpg"
+            image_path.write_bytes(b"jpg")
+            request = vlm_transport.VlmRequest(
+                provider="ollama",
+                base_url="http://127.0.0.1:11434",
+                model="qwen3.5:9b",
+                messages=[{"role": "user", "content": "Describe image."}],
+                image_paths=[image_path],
+                timeout_seconds=60.0,
+                temperature=0.0,
+                context_tokens=16384,
+                max_output_tokens=256,
+                reasoning_level="false",
+                keep_alive="15m",
+                response_format={"type": "json_schema", "json_schema": {"schema": {"type": "object"}}},
+            )
+
+            payload = vlm_transport.build_provider_request_payload(request)
+
+        self.assertEqual(payload["model"], "qwen3.5:9b")
+        self.assertEqual(payload["keep_alive"], "15m")
+        self.assertEqual(payload["options"]["num_ctx"], 16384)
+        self.assertEqual(payload["options"]["num_predict"], 256)
+        self.assertEqual(payload["options"]["temperature"], 0.0)
+        self.assertEqual(payload["messages"][0]["content"], "Describe image.")
+        self.assertEqual(len(payload["messages"][0]["images"]), 1)
+        self.assertIn("format", payload)
+
+    def test_build_llamacpp_request_payload_maps_neutral_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "example.jpg"
+            image_path.write_bytes(b"jpg")
+            request = vlm_transport.VlmRequest(
+                provider="llamacpp",
+                base_url="http://127.0.0.1:8002",
+                model="unsloth/Qwen3.5-4B-GGUF:UD-Q4_K_XL",
+                messages=[{"role": "user", "content": "Describe image."}],
+                image_paths=[image_path],
+                timeout_seconds=60.0,
+                temperature=0.0,
+                max_output_tokens=512,
+                response_format={"type": "json_object"},
+            )
+
+            payload = vlm_transport.build_provider_request_payload(request)
+
+        self.assertEqual(payload["model"], "unsloth/Qwen3.5-4B-GGUF:UD-Q4_K_XL")
+        self.assertEqual(payload["max_tokens"], 512)
+        self.assertEqual(payload["temperature"], 0.0)
+        self.assertEqual(payload["response_format"]["type"], "json_object")
+        self.assertEqual(payload["messages"][0]["content"][0]["text"], "Describe image.")
+        self.assertTrue(payload["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
+
+    def test_build_vllm_request_payload_maps_neutral_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "example.jpg"
+            image_path.write_bytes(b"jpg")
+            request = vlm_transport.VlmRequest(
+                provider="vllm",
+                base_url="http://127.0.0.1:8000",
+                model="Qwen/Qwen2.5-VL-7B-Instruct",
+                messages=[{"role": "user", "content": "Describe image."}],
+                image_paths=[image_path],
+                timeout_seconds=60.0,
+                temperature=0.1,
+                max_output_tokens=300,
+                response_format={"type": "json_object"},
+            )
+
+            payload = vlm_transport.build_provider_request_payload(request)
+
+        self.assertEqual(payload["model"], "Qwen/Qwen2.5-VL-7B-Instruct")
+        self.assertEqual(payload["max_tokens"], 300)
+        self.assertEqual(payload["temperature"], 0.1)
+        self.assertEqual(payload["response_format"]["type"], "json_object")
+        self.assertEqual(payload["messages"][0]["content"][0]["text"], "Describe image.")
+        self.assertTrue(payload["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
+
+    def test_normalize_ollama_response_extracts_text_json_and_metrics(self) -> None:
+        payload = {
+            "message": {"content": "{\"answer\":\"ok\"}"},
+            "done_reason": "stop",
+            "prompt_eval_count": 123,
+            "eval_count": 45,
+            "total_duration": 1_500_000_000,
+            "eval_duration": 300_000_000,
+        }
+
+        response = vlm_transport.normalize_provider_response("ollama", "demo", payload)
+
+        self.assertEqual(response.text, "{\"answer\":\"ok\"}")
+        self.assertEqual(response.json_payload, {"answer": "ok"})
+        self.assertEqual(response.finish_reason, "stop")
+        self.assertEqual(response.metrics["prompt_tokens"], 123)
+        self.assertEqual(response.metrics["completion_tokens"], 45)
+        self.assertEqual(response.metrics["total_duration_seconds"], 1.5)
+        self.assertEqual(response.metrics["eval_duration_seconds"], 0.3)
+
+    def test_normalize_llamacpp_response_extracts_text_json_and_metrics(self) -> None:
+        payload = {
+            "choices": [{"message": {"content": "{\"answer\":\"ok\"}"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7},
+            "timings": {"prompt_ms": 12.5, "predicted_ms": 22.0},
+        }
+
+        response = vlm_transport.normalize_provider_response("llamacpp", "demo", payload)
+
+        self.assertEqual(response.text, "{\"answer\":\"ok\"}")
+        self.assertEqual(response.json_payload, {"answer": "ok"})
+        self.assertEqual(response.finish_reason, "stop")
+        self.assertEqual(response.metrics, {"prompt_tokens": 11, "completion_tokens": 7})
+
+    def test_normalize_vllm_response_extracts_text_json_and_metrics(self) -> None:
+        payload = {
+            "choices": [{"message": {"content": "{\"answer\":\"fine\"}"}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 19, "completion_tokens": 5},
+            "timings": {"queue_ms": 4.0},
+        }
+
+        response = vlm_transport.normalize_provider_response("vllm", "demo", payload)
+
+        self.assertEqual(response.text, "{\"answer\":\"fine\"}")
+        self.assertEqual(response.json_payload, {"answer": "fine"})
+        self.assertEqual(response.finish_reason, "length")
+        self.assertEqual(response.metrics, {"prompt_tokens": 19, "completion_tokens": 5})
+
+
 if __name__ == "__main__":
     unittest.main()

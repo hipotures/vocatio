@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,3 +136,174 @@ def validate_vlm_request(request: VlmRequest) -> None:
                 "unsupported_configuration",
                 f"Provider does not support reasoning_level: {request.provider}",
             )
+
+
+def _encode_image_base64(image_path: Path) -> str:
+    return base64.b64encode(image_path.read_bytes()).decode("ascii")
+
+
+def _encode_image_data_url(image_path: Path) -> str:
+    return f"data:image/jpeg;base64,{_encode_image_base64(image_path)}"
+
+
+def _build_ollama_messages(request: VlmRequest) -> list[dict[str, Any]]:
+    messages = [dict(message) for message in request.messages]
+    if not request.image_paths:
+        return messages
+    last_message = dict(messages[-1])
+    last_message["images"] = [_encode_image_base64(image_path) for image_path in request.image_paths]
+    messages[-1] = last_message
+    return messages
+
+
+def _build_openai_messages(request: VlmRequest) -> list[dict[str, Any]]:
+    messages = [dict(message) for message in request.messages]
+    if not request.image_paths:
+        return messages
+    last_message = dict(messages[-1])
+    content_items: list[dict[str, Any]] = [
+        {"type": "text", "text": str(last_message.get("content", "") or "")}
+    ]
+    content_items.extend(
+        {"type": "image_url", "image_url": {"url": _encode_image_data_url(image_path)}}
+        for image_path in request.image_paths
+    )
+    last_message["content"] = content_items
+    messages[-1] = last_message
+    return messages
+
+
+def _normalize_reasoning_level(reasoning_level: str) -> tuple[str, bool]:
+    if reasoning_level == "false":
+        return "none", False
+    return reasoning_level, True
+
+
+def build_provider_request_payload(request: VlmRequest) -> dict[str, Any]:
+    if request.provider == "ollama":
+        options: dict[str, Any] = {}
+        if request.context_tokens is not None:
+            options["num_ctx"] = request.context_tokens
+        if request.max_output_tokens is not None:
+            options["num_predict"] = request.max_output_tokens
+        if request.temperature is not None:
+            options["temperature"] = request.temperature
+        payload: dict[str, Any] = {
+            "model": request.model,
+            "messages": _build_ollama_messages(request),
+            "stream": False,
+        }
+        if options:
+            payload["options"] = options
+        if request.keep_alive is not None:
+            payload["keep_alive"] = request.keep_alive
+        if request.reasoning_level is not None:
+            reasoning_effort, think_enabled = _normalize_reasoning_level(request.reasoning_level)
+            payload["reasoning_effort"] = reasoning_effort
+            payload["reasoning"] = {"effort": reasoning_effort}
+            payload["think"] = think_enabled
+        if request.response_format is not None:
+            payload["format"] = request.response_format
+        return payload
+    if request.provider in {"llamacpp", "vllm"}:
+        payload = {
+            "model": request.model,
+            "messages": _build_openai_messages(request),
+        }
+        if request.max_output_tokens is not None:
+            payload["max_tokens"] = request.max_output_tokens
+        if request.temperature is not None:
+            payload["temperature"] = request.temperature
+        if request.response_format is not None:
+            payload["response_format"] = request.response_format
+        return payload
+    raise VlmTransportError("unsupported_configuration", f"Unsupported VLM provider: {request.provider}")
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
+def _extract_response_text(payload: dict[str, Any]) -> str:
+    message = payload.get("message", {})
+    if isinstance(message, dict):
+        return str(message.get("content", "") or "")
+    return ""
+
+
+def _extract_openai_choice(payload: dict[str, Any]) -> tuple[str, str | None]:
+    choices = payload.get("choices", [])
+    first_choice = choices[0] if isinstance(choices, list) and choices else {}
+    message = first_choice.get("message", {}) if isinstance(first_choice, dict) else {}
+    text = str(message.get("content", "") or "") if isinstance(message, dict) else ""
+    finish_reason = None
+    if isinstance(first_choice, dict):
+        finish_reason = str(first_choice.get("finish_reason", "") or "") or None
+    return text, finish_reason
+
+
+def _extract_normalized_openai_metrics(payload: dict[str, Any]) -> dict[str, Any]:
+    usage = payload.get("usage", {})
+    metrics: dict[str, Any] = {}
+    if isinstance(usage, dict):
+        if "prompt_tokens" in usage:
+            metrics["prompt_tokens"] = usage["prompt_tokens"]
+        if "completion_tokens" in usage:
+            metrics["completion_tokens"] = usage["completion_tokens"]
+        if "total_tokens" in usage:
+            metrics["total_tokens"] = usage["total_tokens"]
+    return metrics
+
+
+def normalize_provider_response(provider: str, model: str, payload: dict[str, Any]) -> VlmResponse:
+    if provider == "ollama":
+        text = _extract_response_text(payload)
+        metrics: dict[str, Any] = {}
+        if "prompt_eval_count" in payload:
+            metrics["prompt_tokens"] = payload["prompt_eval_count"]
+        if "eval_count" in payload:
+            metrics["completion_tokens"] = payload["eval_count"]
+        if "total_duration" in payload:
+            metrics["total_duration_seconds"] = payload["total_duration"] / 1_000_000_000
+        if "eval_duration" in payload:
+            metrics["eval_duration_seconds"] = payload["eval_duration"] / 1_000_000_000
+        return VlmResponse(
+            provider=provider,
+            model=model,
+            text=text,
+            json_payload=_parse_json_object(text),
+            finish_reason=str(payload.get("done_reason", "") or "") or None,
+            metrics=metrics,
+            raw_response=payload,
+        )
+    if provider == "llamacpp":
+        text, finish_reason = _extract_openai_choice(payload)
+        return VlmResponse(
+            provider=provider,
+            model=model,
+            text=text,
+            json_payload=_parse_json_object(text),
+            finish_reason=finish_reason,
+            metrics=_extract_normalized_openai_metrics(payload),
+            raw_response=payload,
+        )
+    if provider == "vllm":
+        text, finish_reason = _extract_openai_choice(payload)
+        return VlmResponse(
+            provider=provider,
+            model=model,
+            text=text,
+            json_payload=_parse_json_object(text),
+            finish_reason=finish_reason,
+            metrics=_extract_normalized_openai_metrics(payload),
+            raw_response=payload,
+        )
+    raise VlmTransportError("unsupported_configuration", f"Unsupported VLM provider: {provider}")
