@@ -165,43 +165,39 @@ Directories:
 
 Replace `DAY` with your day directory path.
 
-#### 1. Export per-stream media metadata
+#### 1. Export the canonical unified media manifest
 
 ```bash
-python3 scripts/pipeline/export_event_media_csv.py DAY
+python3 scripts/pipeline/export_media.py DAY
 ```
 
-#### 2. Merge video CSV rows
+This writes `DAY/_workspace/media_manifest.csv` and replaces the old stream-specific media export step.
 
-```bash
-python3 scripts/pipeline/merge_event_media_csv.py DAY --media-type video
-```
-
-#### 3. Estimate sync map between video streams
+#### 2. Estimate sync map between video streams
 
 ```bash
 python3 scripts/pipeline/estimate_video_sync_map.py DAY
 ```
 
-#### 4. Apply sync corrections
+#### 3. Apply sync corrections
 
 ```bash
 python3 scripts/pipeline/apply_video_sync_map.py DAY
 ```
 
-#### 5. Transcribe synced videos
+#### 4. Transcribe synced videos
 
 ```bash
 python3 scripts/pipeline/transcribe_video_batch.py DAY --all-streams
 ```
 
-#### 6A. Extract announcement candidates (rule-based)
+#### 5A. Extract announcement candidates (rule-based)
 
 ```bash
 python3 scripts/pipeline/extract_announcement_candidates.py DAY --all-streams
 ```
 
-#### 6B. Extract announcement candidates (semantic, optional)
+#### 5B. Extract announcement candidates (semantic, optional)
 
 ```bash
 python3 scripts/pipeline/extract_announcement_candidates_semantic.py DAY --all-streams
@@ -213,31 +209,31 @@ If you use semantic output, pass it explicitly in the next step:
 python3 scripts/pipeline/build_performance_timeline.py DAY --candidates-csv DAY/_workspace/announcement_candidates_semantic.csv
 ```
 
-#### 7. Build performance timeline
+#### 6. Build performance timeline
 
 ```bash
 python3 scripts/pipeline/build_performance_timeline.py DAY
 ```
 
-#### 8. Assign photos to timeline intervals
+#### 7. Assign photos to timeline intervals
 
 ```bash
 python3 scripts/pipeline/assign_photos_to_timeline.py DAY
 ```
 
-#### 9. Generate proxy JPG files
+#### 8. Generate proxy JPG files
 
 ```bash
 python3 scripts/pipeline/generate_photo_proxy_jpg.py DAY --all-streams
 ```
 
-#### 10. Build per-performance proxy index
+#### 9. Build per-performance proxy index
 
 ```bash
 python3 scripts/pipeline/build_performance_proxy_index.py DAY
 ```
 
-#### 11. Review assignments in GUI
+#### 10. Review assignments in GUI
 
 ```bash
 python3 scripts/pipeline/review_performance_proxy_gui.py DAY
@@ -258,7 +254,7 @@ Example GUI views:
 
 ![First/Last comparison mode](assets/gui-review-first-last-compare.png)
 
-#### 12. Export one reviewed set
+#### 11. Export one reviewed set
 
 ```bash
 python3 scripts/pipeline/copy_reviewed_set_assets.py DAY out 158 --config conf/copy_reviewed_set_assets.default.yaml
@@ -316,15 +312,7 @@ python3 scripts/pipeline/export_media.py DAY
 
 This writes `DAY/_workspace/media_manifest.csv` and is the canonical exporter for image-only work as well.
 
-#### 2. Write the compatibility photo manifest used by current image-only tools
-
-```bash
-python3 scripts/pipeline/export_recursive_photo_csv.py DAY
-```
-
-Use this compatibility step while the remaining image-only scripts still read `photo_manifest.csv` directly.
-
-#### 3. Extract embedded JPG variants
+#### 2. Extract embedded JPG variants
 
 ```bash
 python3 scripts/pipeline/extract_embedded_photo_jpg.py DAY
@@ -332,13 +320,13 @@ python3 scripts/pipeline/extract_embedded_photo_jpg.py DAY
 
 This creates `photo_embedded_manifest.csv` with `thumb_path` and `preview_path`.
 
-#### 4. Build photo quality annotations
+#### 3. Build photo quality annotations
 
 ```bash
 python3 scripts/pipeline/build_photo_quality_annotations.py DAY
 ```
 
-#### 5. Embed preview JPGs with DINOv2
+#### 4. Embed preview JPGs with DINOv2
 
 ```bash
 python3 scripts/pipeline/embed_photo_previews_dinov2.py DAY
@@ -349,31 +337,31 @@ This creates:
 - `features/dinov2_embeddings.npy`
 - `features/dinov2_index.csv`
 
-#### 6. Build pairwise photo boundary features
+#### 5. Build pairwise photo boundary features
 
 ```bash
 python3 scripts/pipeline/build_photo_boundary_features.py DAY
 ```
 
-#### 7. Bootstrap image-only boundary scores
+#### 6. Bootstrap image-only boundary scores
 
 ```bash
 python3 scripts/pipeline/bootstrap_photo_boundaries.py DAY
 ```
 
-#### 8. Build heuristic photo segments
+#### 7. Build heuristic photo segments
 
 ```bash
 python3 scripts/pipeline/build_photo_segments.py DAY
 ```
 
-#### 9. Build GUI review index
+#### 8. Build GUI review index
 
 ```bash
 python3 scripts/pipeline/build_photo_review_index.py DAY
 ```
 
-#### 10. Review heuristic image-only sets
+#### 9. Review heuristic image-only sets
 
 ```bash
 python3 scripts/pipeline/review_performance_proxy_gui.py DAY --index performance_proxy_index.image.json --state review_state.image.json
@@ -493,7 +481,7 @@ Use these for model experiments and benchmark runs, not for the minimal producti
 Inspect per-script options:
 
 ```bash
-python3 scripts/pipeline/export_event_media_csv.py --help
+python3 scripts/pipeline/export_media.py --help
 python3 scripts/pipeline/build_photo_pre_model_annotations.py --help
 python3 scripts/pipeline/probe_vlm_photo_boundaries.py --help
 python3 scripts/pipeline/review_performance_proxy_gui.py --help
