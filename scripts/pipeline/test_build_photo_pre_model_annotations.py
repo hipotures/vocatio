@@ -28,12 +28,65 @@ pre_model = load_module(
 
 
 class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
+    def make_annotation_payload(self) -> dict[str, object]:
+        return {
+            "people_count": "1",
+            "performer_view": "solo",
+            "upper_garment": "top",
+            "lower_garment": "pants",
+            "sleeves": "short",
+            "leg_coverage": "long",
+            "dominant_colors": ["blue"],
+            "headwear": "none",
+            "footwear": "dance_shoes",
+            "props": ["none"],
+            "dance_style_hint": "jazz",
+        }
+
     def test_parse_args_defaults_to_resume_mode_and_limit(self):
         args = pre_model.parse_args(["/tmp/day"])
         self.assertEqual(args.limit, 20)
         self.assertEqual(args.workers, 1)
         self.assertFalse(args.overwrite)
         self.assertEqual(args.output_dir, pre_model.DEFAULT_OUTPUT_DIRNAME)
+
+    def test_build_vlm_request_maps_provider_neutral_fields(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "frame.jpg"
+            image_path.write_bytes(b"fake-image")
+            args = pre_model.parse_args(
+                [
+                    "/tmp/day",
+                    "--provider",
+                    "llamacpp",
+                    "--base-url",
+                    "http://127.0.0.1:8002",
+                    "--model-name",
+                    "demo-model",
+                    "--max-tokens",
+                    "256",
+                    "--temperature",
+                    "0.25",
+                    "--timeout-seconds",
+                    "45",
+                ]
+            )
+
+            request = pre_model.build_vlm_request(
+                args=args,
+                prompt_text="Describe costume.",
+                image_path=image_path,
+            )
+
+            self.assertEqual(request.provider, "llamacpp")
+            self.assertEqual(request.base_url, "http://127.0.0.1:8002")
+            self.assertEqual(request.model, "demo-model")
+            self.assertEqual(request.messages, [{"role": "user", "content": "Describe costume."}])
+            self.assertEqual(request.image_paths, [image_path])
+            self.assertEqual(request.timeout_seconds, 45.0)
+            self.assertEqual(request.temperature, 0.25)
+            self.assertEqual(request.max_output_tokens, 256)
+            self.assertEqual(request.response_format, {"type": "json_object"})
 
     def test_apply_vocatio_defaults_reads_premodel_values(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -122,6 +175,44 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
                 annotations,
                 {"cam/a.hif": {"people_count": "1", "performer_view": "solo"}},
             )
+
+    def test_request_annotation_uses_transport_for_provider_neutral_execution(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "frame.jpg"
+            image_path.write_bytes(b"fake-image")
+            expected_payload = self.make_annotation_payload()
+            response = mock.Mock(
+                text=json.dumps(expected_payload),
+                json_payload=dict(expected_payload),
+                raw_response={"provider": "mock"},
+                metrics={"prompt_tokens": 7, "completion_tokens": 3},
+            )
+
+            with mock.patch.object(pre_model, "run_vlm_request", return_value=response) as run_vlm_request:
+                payload, timings = pre_model.request_annotation(
+                    provider="ollama",
+                    base_url="http://127.0.0.1:11434",
+                    model_name="demo-model",
+                    prompt="Describe costume.",
+                    max_tokens=256,
+                    temperature=0.0,
+                    timeout_seconds=30.0,
+                    image_path=image_path,
+                )
+
+            self.assertEqual(payload, expected_payload)
+            self.assertEqual(
+                timings,
+                {"prompt_n": 7, "prompt_ms": 0.0, "predicted_n": 3, "predicted_ms": 0.0},
+            )
+            run_vlm_request.assert_called_once()
+            request = run_vlm_request.call_args.args[0]
+            self.assertEqual(request.provider, "ollama")
+            self.assertEqual(request.base_url, "http://127.0.0.1:11434")
+            self.assertEqual(request.model, "demo-model")
+            self.assertEqual(request.messages, [{"role": "user", "content": "Describe costume."}])
+            self.assertEqual(request.image_paths, [image_path])
+            self.assertEqual(request.max_output_tokens, 256)
 
     def test_main_writes_missing_files_and_resumes_without_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

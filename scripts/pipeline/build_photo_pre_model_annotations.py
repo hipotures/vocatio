@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import json
 import time
-import urllib.request
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -41,8 +38,7 @@ from lib.photo_pre_model_annotations import (
     validate_annotation_data,
 )
 from lib.pipeline_io import atomic_write_json
-
-
+from lib.vlm_transport import VlmRequest, VlmResponse, get_vlm_capabilities, run_vlm_request
 from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
 console = Console()
 
@@ -152,12 +148,59 @@ def load_candidate_entries(
     )
 
 
-def encode_image_as_data_url(image_path: Path) -> str:
-    return "data:image/jpeg;base64," + base64.b64encode(image_path.read_bytes()).decode("ascii")
+def build_vlm_response_format(provider: str) -> Optional[Dict[str, Any]]:
+    capabilities = get_vlm_capabilities(provider)
+    if capabilities.supports_json_object:
+        return {"type": "json_object"}
+    return None
+
+
+def build_vlm_request(
+    *,
+    args: argparse.Namespace,
+    prompt_text: str,
+    image_path: Path,
+) -> VlmRequest:
+    return VlmRequest(
+        provider=args.provider,
+        base_url=args.base_url,
+        model=args.model_name,
+        messages=[{"role": "user", "content": prompt_text}],
+        image_paths=[image_path],
+        timeout_seconds=args.timeout_seconds,
+        response_format=build_vlm_response_format(args.provider),
+        temperature=args.temperature,
+        max_output_tokens=args.max_tokens,
+    )
+
+
+def build_request_timings(response: VlmResponse) -> Dict[str, Any]:
+    raw_timings = response.raw_response.get("timings")
+
+    def resolve_int(raw_key: str, metric_key: str) -> int:
+        if isinstance(raw_timings, Mapping) and raw_key in raw_timings:
+            return int(raw_timings.get(raw_key, 0) or 0)
+        return int(response.metrics.get(metric_key, 0) or 0)
+
+    total_duration_seconds = float(response.metrics.get("total_duration_seconds", 0.0) or 0.0)
+    eval_duration_seconds = float(response.metrics.get("eval_duration_seconds", 0.0) or 0.0)
+
+    def resolve_float(raw_key: str, fallback_value: float) -> float:
+        if isinstance(raw_timings, Mapping) and raw_key in raw_timings:
+            return float(raw_timings.get(raw_key, 0.0) or 0.0)
+        return fallback_value
+
+    return {
+        "prompt_n": resolve_int("prompt_n", "prompt_tokens"),
+        "prompt_ms": resolve_float("prompt_ms", max(total_duration_seconds - eval_duration_seconds, 0.0) * 1000.0),
+        "predicted_n": resolve_int("predicted_n", "completion_tokens"),
+        "predicted_ms": resolve_float("predicted_ms", eval_duration_seconds * 1000.0),
+    }
 
 
 def request_annotation(
     *,
+    provider: str,
     base_url: str,
     model_name: str,
     prompt: str,
@@ -166,38 +209,28 @@ def request_annotation(
     timeout_seconds: float,
     image_path: Path,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    payload = {
-        "model": model_name,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": encode_image_as_data_url(image_path)}},
-                ],
-            }
-        ],
-    }
-    request = urllib.request.Request(
-        base_url.rstrip("/") + "/v1/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    request = build_vlm_request(
+        args=argparse.Namespace(
+            provider=provider,
+            base_url=base_url,
+            model_name=model_name,
+            timeout_seconds=timeout_seconds,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ),
+        prompt_text=prompt,
+        image_path=image_path,
     )
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-        response_payload = json.loads(response.read().decode("utf-8"))
-    message = response_payload["choices"][0]["message"]
-    content = str(message.get("content", "") or "").strip()
-    parsed = parse_annotation_content(content)
+    response = run_vlm_request(request)
+    parsed = dict(response.json_payload) if isinstance(response.json_payload, Mapping) else parse_annotation_content(response.text)
     validate_annotation_data(parsed)
-    return parsed, dict(response_payload.get("timings", {}))
+    return parsed, build_request_timings(response)
 
 
 def process_entry(
     entry: ImageEntry,
     *,
+    provider: str,
     base_url: str,
     model_name: str,
     prompt: str,
@@ -206,6 +239,7 @@ def process_entry(
     timeout_seconds: float,
 ) -> Tuple[ImageEntry, Dict[str, Any], Dict[str, Any]]:
     payload, timings = request_annotation(
+        provider=provider,
         base_url=base_url,
         model_name=model_name,
         prompt=prompt,
@@ -310,10 +344,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     day_dir = Path(args.day_dir).resolve()
     args = apply_vocatio_defaults(args, day_dir)
-    if args.provider != "llamacpp":
-        raise SystemExit(
-            f"Unsupported pre-model provider for build_photo_pre_model_annotations.py: {args.provider}"
-        )
     workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     index_path = resolve_path(workspace_dir, args.photo_index)
     output_dir = resolve_path(workspace_dir, args.output_dir)
@@ -348,6 +378,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 future = executor.submit(
                     process_entry,
                     entry,
+                    provider=args.provider,
                     base_url=args.base_url,
                     model_name=args.model_name,
                     prompt=args.prompt,
