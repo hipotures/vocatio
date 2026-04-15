@@ -27,6 +27,11 @@ from rich.progress import (
 
 from lib.image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1
 from lib.pipeline_io import atomic_write_json
+from lib.photo_pre_model_annotations import (
+    DEFAULT_OUTPUT_DIRNAME as DEFAULT_PHOTO_PRE_MODEL_DIRNAME,
+    build_annotation_output_path,
+    load_photo_pre_model_annotations_by_relative_path,
+)
 
 
 console = Console()
@@ -48,6 +53,8 @@ DEFAULT_TIMEOUT_SECONDS = 300.0
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_OLLAMA_THINK = "inherit"
 DEFAULT_RESPONSE_SCHEMA_MODE = "off"
+DEFAULT_JSON_VALIDATION_MODE = "strict"
+DEFAULT_PHOTO_PRE_MODEL_DIR = DEFAULT_PHOTO_PRE_MODEL_DIRNAME
 SEGMENT_TYPES = ("dance", "ceremony", "audience", "rehearsal", "other")
 EMBEDDED_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "thumb_path", "preview_path"})
 PHOTO_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "start_epoch_ms", "start_local", "photo_order_index"})
@@ -104,6 +111,8 @@ RESUME_CONFIG_KEYS = (
     "temperature",
     "ollama_think",
     "response_schema_mode",
+    "json_validation_mode",
+    "photo_pre_model_dir",
     "effective_extra_instructions",
 )
 
@@ -255,6 +264,20 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         choices=("off", "on"),
         default=DEFAULT_RESPONSE_SCHEMA_MODE,
         help=f"Enable or disable Ollama JSON Schema format enforcement. Default: {DEFAULT_RESPONSE_SCHEMA_MODE}",
+    )
+    parser.add_argument(
+        "--json-validation-mode",
+        choices=("strict", "relaxed"),
+        default=DEFAULT_JSON_VALIDATION_MODE,
+        help=f"Parser validation strictness for JSON responses. Default: {DEFAULT_JSON_VALIDATION_MODE}",
+    )
+    parser.add_argument(
+        "--photo-pre-model-dir",
+        default=DEFAULT_PHOTO_PRE_MODEL_DIR,
+        help=(
+            "Optional pre-model annotation directory relative to workspace or absolute. "
+            f"Default: {DEFAULT_PHOTO_PRE_MODEL_DIR}"
+        ),
     )
     parser.add_argument(
         "--extra-instructions",
@@ -582,6 +605,7 @@ def build_user_prompt(
     gap_hint_lines: Sequence[str],
     extra_instructions: str = "",
     response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
+    pre_model_lines: Sequence[str] = (),
 ) -> str:
     frames_block = "\n".join([f"frame_{index:02d} = attached image {index}" for index in range(1, window_size + 1)])
     hints_block = "\n".join(gap_hint_lines) if gap_hint_lines else "No heuristic gap hints are available."
@@ -691,6 +715,14 @@ def build_user_prompt(
         "1. images\n"
         "2. heuristic hints\n\n"
         "If images clearly contradict heuristic hints, trust the images first.\n\n"
+        + (
+            "Optional pre-model per-image annotations:\n"
+            + "\n".join(pre_model_lines)
+            + "\n\n"
+            if pre_model_lines
+            else ""
+        )
+        +
         "Hint interpretation:\n"
         "- low = weak signal\n"
         "- medium = ambiguous signal\n"
@@ -834,7 +866,12 @@ def extract_json_object_text(raw_response: str) -> str:
     return text[start : end + 1]
 
 
-def parse_model_response(raw_response: str, *, window_size: int) -> Dict[str, str]:
+def parse_model_response(
+    raw_response: str,
+    *,
+    window_size: int,
+    json_validation_mode: str = DEFAULT_JSON_VALIDATION_MODE,
+) -> Dict[str, str]:
     valid_decisions = build_valid_decisions(window_size)
     try:
         payload = json.loads(extract_json_object_text(raw_response))
@@ -865,7 +902,9 @@ def parse_model_response(raw_response: str, *, window_size: int) -> Dict[str, st
     left_segment_type = str(payload.get("left_segment_type", "") or "").strip()
     right_segment_type = str(payload.get("right_segment_type", "") or "").strip()
     if boundary_after_frame != "__missing__":
-        if left_segment_type not in SEGMENT_TYPES or right_segment_type not in SEGMENT_TYPES:
+        if json_validation_mode == "strict" and (
+            left_segment_type not in SEGMENT_TYPES or right_segment_type not in SEGMENT_TYPES
+        ):
             return {
                 "decision": "invalid_response",
                 "reason": "Missing or invalid segment type value",
@@ -911,7 +950,7 @@ def parse_model_response(raw_response: str, *, window_size: int) -> Dict[str, st
             "response_status": "invalid_response",
         }
     segment_type_reason = ""
-    if boundary_after_frame != "__missing__":
+    if boundary_after_frame != "__missing__" and left_segment_type in SEGMENT_TYPES and right_segment_type in SEGMENT_TYPES:
         segment_type_reason = (
             f"Left segment type: {left_segment_type} | Right segment type: {right_segment_type} | "
         )
@@ -1037,6 +1076,48 @@ def build_user_prompt_template(
         extra_instructions=extra_instructions,
         response_schema_mode=response_schema_mode,
     )
+
+
+def build_photo_pre_model_lines(
+    rows: Sequence[Mapping[str, str]],
+    photo_pre_model_dir: Optional[Path],
+) -> List[str]:
+    if photo_pre_model_dir is None or not photo_pre_model_dir.exists():
+        return []
+    relative_paths = [str(row["relative_path"]) for row in rows]
+    annotations_by_relative_path = load_photo_pre_model_annotations_by_relative_path(photo_pre_model_dir, relative_paths)
+    lines: List[str] = []
+    for index, row in enumerate(rows, start=1):
+        annotation = annotations_by_relative_path.get(str(row["relative_path"]))
+        if not annotation:
+            continue
+        dominant_colors = annotation.get("dominant_colors")
+        props = annotation.get("props")
+        dominant_colors_text = (
+            "|".join(str(value).strip() for value in dominant_colors if str(value).strip())
+            if isinstance(dominant_colors, list)
+            else ""
+        )
+        props_text = (
+            "|".join(str(value).strip() for value in props if str(value).strip())
+            if isinstance(props, list)
+            else ""
+        )
+        parts = [
+            f"people_count={annotation.get('people_count', '')}",
+            f"performer_view={annotation.get('performer_view', '')}",
+            f"upper_garment={annotation.get('upper_garment', '')}",
+            f"lower_garment={annotation.get('lower_garment', '')}",
+            f"sleeves={annotation.get('sleeves', '')}",
+            f"leg_coverage={annotation.get('leg_coverage', '')}",
+            f"dominant_colors={dominant_colors_text}",
+            f"headwear={annotation.get('headwear', '')}",
+            f"footwear={annotation.get('footwear', '')}",
+            f"props={props_text}",
+            f"dance_style_hint={annotation.get('dance_style_hint', '')}",
+        ]
+        lines.append(f"frame_{index:02d}: " + ", ".join(parts))
+    return lines
 
 
 def write_run_metadata(
@@ -1417,6 +1498,8 @@ def probe_vlm_photo_boundaries(
     ollama_think: str,
     extra_instructions: str,
     dump_debug_dir: Optional[Path],
+    photo_pre_model_dir: Optional[Path] = None,
+    json_validation_mode: str = DEFAULT_JSON_VALIDATION_MODE,
     args_payload: Mapping[str, Any],
     new_run: bool,
 ) -> int:
@@ -1537,11 +1620,13 @@ def probe_vlm_photo_boundaries(
                 )
             )
             gap_hint_lines = build_gap_hint_lines(window_rows, boundary_rows_by_pair)
+            pre_model_lines = build_photo_pre_model_lines(window_rows, photo_pre_model_dir)
             prompt = build_user_prompt(
                 window_size=window_size,
                 gap_hint_lines=gap_hint_lines,
                 extra_instructions=extra_instructions,
                 response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
+                pre_model_lines=pre_model_lines,
             )
             payload = build_ollama_payload(
                 model=model,
@@ -1578,7 +1663,11 @@ def probe_vlm_photo_boundaries(
                     error_text=None,
                 )
             raw_response = extract_response_text(response_payload)
-            parsed_response = parse_model_response(raw_response, window_size=window_size)
+            parsed_response = parse_model_response(
+                raw_response,
+                window_size=window_size,
+                json_validation_mode=json_validation_mode,
+            )
             result_row = build_result_row(
                 generated_at=generated_at,
                 run_id=run_id,
@@ -1660,6 +1749,8 @@ def main() -> int:
         "temperature": args.temperature,
         "ollama_think": args.ollama_think,
         "response_schema_mode": args.response_schema_mode,
+        "json_validation_mode": args.json_validation_mode,
+        "photo_pre_model_dir": str(resolve_path(workspace_dir, args.photo_pre_model_dir)),
         "extra_instructions": args.extra_instructions,
         "extra_instructions_file": args.extra_instructions_file,
         "effective_extra_instructions": load_extra_instructions(args.extra_instructions, args.extra_instructions_file),
@@ -1685,6 +1776,12 @@ def main() -> int:
         ollama_think=args.ollama_think,
         extra_instructions=str(args_payload["effective_extra_instructions"]),
         dump_debug_dir=Path(args.dump_debug_dir).expanduser().resolve() if args.dump_debug_dir else None,
+        photo_pre_model_dir=(
+            resolve_path(workspace_dir, args.photo_pre_model_dir).resolve()
+            if str(args.photo_pre_model_dir or "").strip()
+            else None
+        ),
+        json_validation_mode=args.json_validation_mode,
         args_payload=args_payload,
         new_run=bool(args.new_run),
     )

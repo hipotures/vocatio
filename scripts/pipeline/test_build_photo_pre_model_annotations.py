@@ -1,0 +1,139 @@
+import importlib.util
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
+
+
+def load_module(module_name: str, relative_path: str):
+    path = REPO_ROOT / relative_path
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+pre_model = load_module(
+    "build_photo_pre_model_annotations_test",
+    "scripts/pipeline/build_photo_pre_model_annotations.py",
+)
+
+
+class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
+    def test_parse_args_defaults_to_resume_mode_and_limit(self):
+        args = pre_model.parse_args(["/tmp/day"])
+        self.assertEqual(args.limit, 20)
+        self.assertEqual(args.workers, 1)
+        self.assertFalse(args.overwrite)
+        self.assertEqual(args.output_dir, pre_model.DEFAULT_OUTPUT_DIRNAME)
+
+    def test_build_annotation_output_path_uses_relative_path_subdirectories(self):
+        output_path = pre_model.build_annotation_output_path(
+            Path("/tmp/out"),
+            "p-a7r5/20260323_083313_003_15224832.hif",
+        )
+        self.assertEqual(
+            output_path,
+            Path("/tmp/out/p-a7r5/20260323_083313_003_15224832.hif.json"),
+        )
+
+    def test_select_entries_to_process_skips_existing_files_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            existing_path = pre_model.build_annotation_output_path(output_dir, "cam/a.hif")
+            existing_path.parent.mkdir(parents=True, exist_ok=True)
+            existing_path.write_text("{}", encoding="utf-8")
+            entries = [
+                pre_model.ImageEntry(image_path=Path("/tmp/a.jpg"), output_name="a.jpg.txt", source_id="cam/a.hif"),
+                pre_model.ImageEntry(image_path=Path("/tmp/b.jpg"), output_name="b.jpg.txt", source_id="cam/b.hif"),
+            ]
+            selected, skipped = pre_model.select_entries_to_process(
+                entries,
+                output_dir=output_dir,
+                overwrite=False,
+                limit=10,
+            )
+            self.assertEqual([entry.source_id for entry in selected], ["cam/b.hif"])
+            self.assertEqual(skipped, 1)
+
+    def test_load_photo_pre_model_annotations_by_relative_path_reads_existing_payload(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            output_path = pre_model.build_annotation_output_path(output_dir, "cam/a.hif")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "photo_pre_model_v1",
+                        "relative_path": "cam/a.hif",
+                        "generated_at": "2026-04-15T12:00:00Z",
+                        "model": "test-model",
+                        "data": {"people_count": "1", "performer_view": "solo"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            annotations = pre_model.load_photo_pre_model_annotations_by_relative_path(
+                output_dir,
+                ["cam/a.hif", "cam/missing.hif"],
+            )
+            self.assertEqual(
+                annotations,
+                {"cam/a.hif": {"people_count": "1", "performer_view": "solo"}},
+            )
+
+    def test_main_writes_missing_files_and_resumes_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            day_dir = Path(tmp_dir) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            output_dir = workspace_dir / pre_model.DEFAULT_OUTPUT_DIRNAME
+            entries = [
+                pre_model.ImageEntry(image_path=Path("/tmp/a.jpg"), output_name="a.jpg.txt", source_id="cam/a.hif"),
+                pre_model.ImageEntry(image_path=Path("/tmp/b.jpg"), output_name="b.jpg.txt", source_id="cam/b.hif"),
+                pre_model.ImageEntry(image_path=Path("/tmp/c.jpg"), output_name="c.jpg.txt", source_id="cam/c.hif"),
+            ]
+
+            def fake_process_entry(entry, **_kwargs):
+                return (
+                    entry,
+                    {"people_count": "1", "performer_view": "solo"},
+                    {"prompt_n": 1, "prompt_ms": 1.0, "predicted_n": 1, "predicted_ms": 1.0},
+                )
+
+            with mock.patch.object(pre_model, "load_image_entries", return_value=entries), mock.patch.object(
+                pre_model, "process_entry", side_effect=fake_process_entry
+            ) as process_entry:
+                exit_code = pre_model.main([str(day_dir), "--limit", "2"])
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(process_entry.call_count, 2)
+                self.assertTrue(pre_model.build_annotation_output_path(output_dir, "cam/a.hif").exists())
+                self.assertTrue(pre_model.build_annotation_output_path(output_dir, "cam/b.hif").exists())
+
+            with mock.patch.object(pre_model, "load_image_entries", return_value=entries), mock.patch.object(
+                pre_model, "process_entry", side_effect=fake_process_entry
+            ) as process_entry:
+                exit_code = pre_model.main([str(day_dir), "--limit", "2"])
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(process_entry.call_count, 1)
+                self.assertTrue(pre_model.build_annotation_output_path(output_dir, "cam/c.hif").exists())
+
+            with mock.patch.object(pre_model, "load_image_entries", return_value=entries), mock.patch.object(
+                pre_model, "process_entry", side_effect=fake_process_entry
+            ) as process_entry:
+                exit_code = pre_model.main([str(day_dir), "--limit", "2", "--overwrite"])
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(process_entry.call_count, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

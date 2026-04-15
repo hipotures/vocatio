@@ -44,6 +44,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "0.25",
                 "--response-schema-mode",
                 "on",
+                "--json-validation-mode",
+                "relaxed",
                 "--ollama-think",
                 "false",
                 "--dump-debug-dir",
@@ -57,6 +59,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(args.boundary_gap_seconds, 12)
         self.assertEqual(args.temperature, 0.25)
         self.assertEqual(args.response_schema_mode, "on")
+        self.assertEqual(args.json_validation_mode, "relaxed")
         self.assertEqual(args.ollama_think, "false")
         self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
         self.assertFalse(hasattr(args, "write_gui_index"))
@@ -65,6 +68,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
     def test_parse_args_defaults_boundary_gap_seconds_to_10(self):
         args = probe.parse_args(["/tmp/day"])
         self.assertEqual(args.boundary_gap_seconds, 10)
+        self.assertEqual(args.json_validation_mode, "strict")
 
     def test_build_response_schema_uses_boundary_after_frame_and_dynamic_notes(self):
         schema = probe.build_response_schema(window_size=3)
@@ -279,6 +283,60 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertNotIn('"decision"', prompt)
         self.assertIn("<one of: null, frame_01, frame_02>", prompt)
 
+    def test_build_user_prompt_includes_pre_model_lines_when_available(self):
+        prompt = probe.build_user_prompt(
+            window_size=2,
+            gap_hint_lines=["gap_01_02: visual_distance=0.100 (medium), heuristic_boundary_score=0.200 (low)"],
+            extra_instructions="",
+            pre_model_lines=[
+                "frame_01: people_count=1, performer_view=solo",
+                "frame_02: people_count=2, performer_view=duo",
+            ],
+        )
+        self.assertIn("Optional pre-model per-image annotations", prompt)
+        self.assertIn("frame_01: people_count=1, performer_view=solo", prompt)
+        self.assertIn("frame_02: people_count=2, performer_view=duo", prompt)
+
+    def test_build_photo_pre_model_lines_reads_existing_annotation_files(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            annotation_path = output_dir / "cam" / "a.hif.json"
+            annotation_path.parent.mkdir(parents=True, exist_ok=True)
+            annotation_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "photo_pre_model_v1",
+                        "relative_path": "cam/a.hif",
+                        "generated_at": "2026-04-15T12:00:00+02:00",
+                        "model": "test-model",
+                        "data": {
+                            "people_count": "1",
+                            "performer_view": "solo",
+                            "upper_garment": "leotard",
+                            "lower_garment": "tutu",
+                            "sleeves": "long",
+                            "leg_coverage": "long",
+                            "dominant_colors": ["blue", "white"],
+                            "headwear": "none",
+                            "footwear": "ballet_shoes",
+                            "props": ["none"],
+                            "dance_style_hint": "ballet",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            lines = probe.build_photo_pre_model_lines(
+                [{"relative_path": "cam/a.hif"}, {"relative_path": "cam/missing.hif"}],
+                output_dir,
+            )
+            self.assertEqual(
+                lines,
+                [
+                    "frame_01: people_count=1, performer_view=solo, upper_garment=leotard, lower_garment=tutu, sleeves=long, leg_coverage=long, dominant_colors=blue|white, headwear=none, footwear=ballet_shoes, props=none, dance_style_hint=ballet"
+                ],
+            )
+
     def test_build_system_prompt_mentions_boundary_after_frame_in_schema_mode(self):
         self.assertIn("boundary_after_frame", probe.build_system_prompt("on"))
         self.assertIn("left_segment_type", probe.build_system_prompt("on"))
@@ -329,6 +387,16 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         )
         self.assertEqual(parsed["decision"], "invalid_response")
         self.assertIn("segment type", parsed["reason"])
+
+    def test_parse_model_response_relaxed_mode_ignores_invalid_segment_type_value(self):
+        parsed = probe.parse_model_response(
+            '{"boundary_after_frame":"frame_01","left_segment_type":"dance","right_segment_type":"contemporary","frame_notes":{"frame_01":"white tutu solo","frame_02":"blue dress solo"},"primary_evidence":["costume change"],"summary":"Boundary after frame 1."}',
+            window_size=2,
+            json_validation_mode="relaxed",
+        )
+        self.assertEqual(parsed["decision"], "cut_after_1")
+        self.assertNotIn("Right segment type:", parsed["reason"])
+        self.assertEqual(parsed["response_status"], "ok")
 
     def test_parse_model_response_marks_invalid_json(self):
         parsed = probe.parse_model_response("not json", window_size=2)
