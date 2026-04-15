@@ -265,6 +265,24 @@ class VlmTransportPayloadTests(unittest.TestCase):
         self.assertEqual(len(payload["messages"][0]["images"]), 1)
         self.assertIn("format", payload)
 
+    def test_build_ollama_request_payload_maps_json_object_to_json_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "example.jpg"
+            image_path.write_bytes(b"jpg")
+            request = vlm_transport.VlmRequest(
+                provider="ollama",
+                base_url="http://127.0.0.1:11434",
+                model="gemma4:e4b",
+                messages=[{"role": "user", "content": "Describe image."}],
+                image_paths=[image_path],
+                timeout_seconds=60.0,
+                response_format={"type": "json_object"},
+            )
+
+            payload = vlm_transport.build_provider_request_payload(request)
+
+        self.assertEqual(payload["format"], "json")
+
     def test_build_llamacpp_request_payload_maps_neutral_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             image_path = Path(tmp_dir) / "example.jpg"

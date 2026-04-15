@@ -41,8 +41,10 @@ Image-only extras:
 
 Optional image-only VLM extras:
 
-- Ollama with a vision-capable model for `probe_vlm_photo_boundaries.py`
-- a local OpenAI-compatible `llama.cpp` server if you want per-photo pre-model annotations
+- a local VLM backend reachable through the shared transport layer in
+  `build_photo_pre_model_annotations.py` and `probe_vlm_photo_boundaries.py`
+- supported providers for both scripts: `ollama`, `llamacpp`, and `vllm`
+- backend capability support still applies, for example `keep_alive` and reasoning controls remain Ollama-specific
 
 Install Python dependencies in your preferred environment, then run scripts directly with `python3`.
 
@@ -288,7 +290,7 @@ This path builds photo ordering, quality signals, DINOv2 embeddings, and photo b
 ### Core Image-Only Outputs
 
 - `media_manifest.csv`
-- `photo_manifest.csv`
+- `media_manifest.csv`
 - `photo_embedded_manifest.csv`
 - `photo_quality.csv`
 - `photo_boundary_features.csv`
@@ -373,6 +375,8 @@ Use a dedicated `--state` file for image-only review so you do not mix it with t
 
 The VLM flow starts from the same image-only artifacts as the deterministic flow. It optionally adds a lightweight per-photo pre-model pass, then probes only candidate time gaps with a local VLM.
 
+`build_photo_pre_model_annotations.py` and `probe_vlm_photo_boundaries.py` both run through the shared VLM transport layer. You can select `ollama`, `llamacpp`, or `vllm` through CLI flags or `.vocatio`, subject to backend capability support.
+
 #### Optional: build per-photo pre-model annotations
 
 ```bash
@@ -381,6 +385,7 @@ python3 scripts/pipeline/build_photo_pre_model_annotations.py DAY --limit 1000 -
 
 Default behavior:
 
+- provider selection comes from `--provider` or `.vocatio` (`PREMODEL_PROVIDER`, `PREMODEL_BASE_URL`, `PREMODEL_MODEL`)
 - input index: `photo_embedded_manifest.csv`
 - image column: `preview_path`
 - output directory: `DAY/_workspace/photo_pre_model_annotations`
@@ -391,7 +396,7 @@ Default behavior:
 
 ```bash
 python3 scripts/pipeline/probe_vlm_photo_boundaries.py DAY \
-  --photo-manifest-csv DAY/_workspace/photo_manifest.csv \
+  --photo-manifest-csv DAY/_workspace/media_manifest.csv \
   --image-variant thumb \
   --window-size 7 \
   --overlap 2 \
@@ -405,6 +410,7 @@ python3 scripts/pipeline/probe_vlm_photo_boundaries.py DAY \
 
 Important behavior:
 
+- provider selection comes from `--provider` or `.vocatio` (`VLM_PROVIDER`, `VLM_BASE_URL`, `VLM_MODEL`)
 - only gaps larger than `--boundary-gap-seconds` are probed
 - default `--max-batches` is `10`, so use a larger explicit value for real runs and rerun the same command or continue with `--run-id`
 - `--new-run` starts a fresh VLM run
@@ -420,7 +426,7 @@ Optional debugging:
 
 ```bash
 python3 scripts/pipeline/probe_vlm_photo_boundaries.py DAY \
-  --photo-manifest-csv DAY/_workspace/photo_manifest.csv \
+  --photo-manifest-csv DAY/_workspace/media_manifest.csv \
   --image-variant thumb \
   --window-size 7 \
   --overlap 2 \

@@ -74,6 +74,10 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(args.json_validation_mode, "strict")
         self.assertEqual(args.photo_manifest_csv, "media_manifest.csv")
 
+    def test_parse_args_accepts_provider_other_than_ollama(self):
+        args = probe.parse_args(["/tmp/day", "--provider", "vllm"])
+        self.assertEqual(args.provider, "vllm")
+
     def test_parse_args_accepts_all_batches_sentinels(self):
         zero_args = probe.parse_args(["/tmp/day", "--max-batches", "0"])
         minus_one_args = probe.parse_args(["/tmp/day", "--max-batches", "-1"])
@@ -563,6 +567,35 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(request.messages[0], {"role": "system", "content": probe.build_system_prompt("on")})
         self.assertEqual(request.messages[1], {"role": "user", "content": "prompt"})
         self.assertEqual(request.image_paths, [image_path])
+
+    def test_build_vlm_request_keeps_transport_controls_for_custom_ollama_base_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "a.jpg"
+            image_path.write_bytes(b"jpg")
+            request = probe.build_vlm_request(
+                provider="ollama",
+                base_url="http://ollama.internal:8080",
+                response_schema_mode="off",
+                prompt="prompt",
+                image_paths=[image_path],
+                model="qwen3.5:9b",
+                timeout_seconds=180.0,
+                keep_alive="15m",
+                temperature=0.1,
+                context_tokens=8192,
+                max_output_tokens=256,
+                reasoning_level="false",
+                response_schema=None,
+            )
+            payload = build_provider_request_payload(request)
+        self.assertEqual(request.provider, "ollama")
+        self.assertEqual(request.base_url, "http://ollama.internal:8080")
+        self.assertEqual(request.keep_alive, "15m")
+        self.assertEqual(request.reasoning_level, "false")
+        self.assertEqual(request.context_tokens, 8192)
+        self.assertEqual(request.max_output_tokens, 256)
+        self.assertEqual(payload["options"]["num_ctx"], 8192)
+        self.assertEqual(payload["options"]["num_predict"], 256)
 
     def test_build_vlm_request_omits_ollama_only_fields_for_vllm(self):
         with tempfile.TemporaryDirectory() as tmp:

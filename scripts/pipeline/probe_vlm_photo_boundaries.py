@@ -236,12 +236,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default=DEFAULT_MODEL_NAME,
-        help=f"Ollama model name. Default: {DEFAULT_MODEL_NAME}",
+        help=f"VLM model name. Default: {DEFAULT_MODEL_NAME}",
     )
     parser.add_argument(
         "--ollama-base-url",
         default=DEFAULT_OLLAMA_BASE_URL,
-        help=f"Ollama API base URL. Default: {DEFAULT_OLLAMA_BASE_URL}",
+        help=f"Provider API base URL. Default: {DEFAULT_OLLAMA_BASE_URL}",
     )
     parser.add_argument(
         "--ollama-num-ctx",
@@ -262,7 +262,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--timeout-seconds",
         type=non_negative_float_arg,
         default=DEFAULT_TIMEOUT_SECONDS,
-        help=f"HTTP timeout for each Ollama request. Default: {DEFAULT_TIMEOUT_SECONDS}",
+        help=f"HTTP timeout for each VLM request. Default: {DEFAULT_TIMEOUT_SECONDS}",
     )
     parser.add_argument(
         "--temperature",
@@ -274,13 +274,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--ollama-think",
         choices=("inherit", "false", "low", "medium", "high"),
         default=DEFAULT_OLLAMA_THINK,
-        help=f"Ollama reasoning effort override. Default: {DEFAULT_OLLAMA_THINK}",
+        help=f"Provider reasoning override. Default: {DEFAULT_OLLAMA_THINK}",
     )
     parser.add_argument(
         "--response-schema-mode",
         choices=("off", "on"),
         default=DEFAULT_RESPONSE_SCHEMA_MODE,
-        help=f"Enable or disable Ollama JSON Schema format enforcement. Default: {DEFAULT_RESPONSE_SCHEMA_MODE}",
+        help=f"Enable or disable provider structured-output enforcement. Default: {DEFAULT_RESPONSE_SCHEMA_MODE}",
     )
     parser.add_argument(
         "--json-validation-mode",
@@ -823,23 +823,6 @@ def build_user_prompt(
     return prompt
 
 
-def is_ollama_api_base_url(api_base_url: str) -> bool:
-    text = api_base_url.strip()
-    if not text.startswith(("http://", "https://")):
-        return False
-    without_scheme = text.split("://", 1)[1]
-    host_port = without_scheme.split("/", 1)[0]
-    host = host_port
-    port_text = ""
-    if ":" in host_port:
-        host, port_text = host_port.rsplit(":", 1)
-    if host not in {"127.0.0.1", "localhost"}:
-        return False
-    if port_text != "11434":
-        return False
-    return True
-
-
 def build_vlm_response_format(
     *,
     provider: str,
@@ -876,17 +859,11 @@ def build_vlm_request(
     reasoning_level: str,
     response_schema: Optional[Mapping[str, Any]],
 ) -> VlmRequest:
-    request_context_tokens = context_tokens
-    request_max_output_tokens = max_output_tokens
     request_keep_alive: Optional[str] = None
     request_reasoning_level: Optional[str] = None
     if provider == "ollama":
         request_keep_alive = keep_alive
-        if is_ollama_api_base_url(base_url):
-            request_reasoning_level = None if reasoning_level == "inherit" else reasoning_level
-        else:
-            request_context_tokens = None
-            request_max_output_tokens = None
+        request_reasoning_level = None if reasoning_level == "inherit" else reasoning_level
     return VlmRequest(
         provider=provider,
         base_url=base_url,
@@ -903,8 +880,8 @@ def build_vlm_request(
             response_schema=response_schema,
         ),
         temperature=temperature,
-        context_tokens=request_context_tokens,
-        max_output_tokens=request_max_output_tokens,
+        context_tokens=context_tokens,
+        max_output_tokens=max_output_tokens,
         reasoning_level=request_reasoning_level,
         keep_alive=request_keep_alive,
     )

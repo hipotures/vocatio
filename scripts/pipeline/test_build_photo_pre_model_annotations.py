@@ -50,6 +50,10 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
         self.assertFalse(args.overwrite)
         self.assertEqual(args.output_dir, pre_model.DEFAULT_OUTPUT_DIRNAME)
 
+    def test_parse_args_accepts_provider_other_than_llamacpp(self):
+        args = pre_model.parse_args(["/tmp/day", "--provider", "ollama"])
+        self.assertEqual(args.provider, "ollama")
+
     def test_build_vlm_request_maps_provider_neutral_fields(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             image_path = Path(tmp_dir) / "frame.jpg"

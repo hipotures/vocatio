@@ -87,7 +87,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=DEFAULT_OUTPUT_DIRNAME,
         help=f"Output directory relative to workspace or absolute. Default: {DEFAULT_OUTPUT_DIRNAME}",
     )
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help=f"llama.cpp server base URL. Default: {DEFAULT_BASE_URL}")
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help=f"VLM API base URL. Default: {DEFAULT_BASE_URL}")
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME, help=f"Model name. Default: {DEFAULT_MODEL_NAME}")
     parser.add_argument("--prompt", default=build_prompt_only_json_prompt(), help="Prompt-only JSON extraction prompt text.")
     parser.add_argument("--max-tokens", type=positive_int_arg, default=DEFAULT_MAX_TOKENS, help=f"Max completion tokens. Default: {DEFAULT_MAX_TOKENS}")

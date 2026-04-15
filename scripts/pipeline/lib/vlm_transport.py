@@ -181,8 +181,11 @@ def _normalize_reasoning_level(reasoning_level: str) -> tuple[str, bool]:
     return reasoning_level, True
 
 
-def _build_ollama_format(response_format: dict[str, Any]) -> dict[str, Any]:
-    if response_format.get("type") != "json_schema":
+def _build_ollama_format(response_format: dict[str, Any]) -> Any:
+    response_type = str(response_format.get("type", "") or "").strip()
+    if response_type == "json_object":
+        return "json"
+    if response_type != "json_schema":
         return response_format
     json_schema = response_format.get("json_schema")
     if not isinstance(json_schema, dict):
