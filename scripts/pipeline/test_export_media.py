@@ -87,6 +87,200 @@ class ExportMediaCliTests(unittest.TestCase):
         self.assertEqual(sorted(export_media.filter_streams_by_media_types(streams, "photo")), ["p-a7r5"])
         self.assertEqual(sorted(export_media.filter_streams_by_media_types(streams, "video")), ["v-gh7"])
 
+    def test_collect_files_reports_discovery_progress_in_batched_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stream_dir = Path(tmp) / "p-a7r5"
+            stream_dir.mkdir(parents=True)
+            for index in range(7):
+                (stream_dir / f"{index:02d}.hif").write_bytes(b"x")
+
+            discovered_batches = []
+            with mock.patch.object(export_media, "DISCOVERY_PROGRESS_BATCH_SIZE", 3):
+                files = export_media.collect_files(
+                    stream_dir,
+                    "photo",
+                    on_files_discovered=discovered_batches.append,
+                )
+
+            self.assertEqual(len(files), 7)
+            self.assertEqual(discovered_batches, [3, 3, 1])
+
+    def test_main_resumes_from_partial_manifest_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            photo_dir = day_dir / "p-a7r5"
+            workspace_dir.mkdir(parents=True)
+            photo_dir.mkdir(parents=True)
+
+            done_path = photo_dir / "done.hif"
+            todo_path = photo_dir / "todo.hif"
+            done_path.write_bytes(b"done")
+            todo_path.write_bytes(b"todo")
+
+            _sort_key, done_row = export_media.build_photo_manifest_entry(
+                day_dir=day_dir,
+                stream_id="p-a7r5",
+                device="a7r5",
+                path=done_path,
+                metadata={
+                    "DateTimeOriginal": "2026:03:23 10:00:00",
+                    "SubSecDateTimeOriginal": "2026:03:23 10:00:00.100",
+                    "Model": "ILCE-7RM5",
+                    "Make": "Sony",
+                },
+            )
+            export_media.assign_photo_order_indexes([done_row])
+            export_media.write_media_manifest_csv(
+                export_media.partial_output_path(workspace_dir / "media_manifest.csv"),
+                [done_row],
+            )
+
+            seen_path_sets = []
+
+            def fake_run_exiftool(paths, on_batch_processed=None):
+                seen_path_sets.append([path.relative_to(day_dir).as_posix() for path in paths])
+                if on_batch_processed is not None:
+                    on_batch_processed(len(paths))
+                self.assertEqual(paths, [todo_path])
+                return [
+                    {
+                        "SourceFile": str(todo_path),
+                        "DateTimeOriginal": "2026:03:23 10:00:01",
+                        "SubSecDateTimeOriginal": "2026:03:23 10:00:01.200",
+                        "Model": "ILCE-7RM5",
+                        "Make": "Sony",
+                    }
+                ]
+
+            with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
+                with mock.patch.object(export_media, "run_exiftool", side_effect=fake_run_exiftool):
+                    with mock.patch.object(export_media.console, "print"):
+                        exit_code = export_media.main([str(day_dir)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(seen_path_sets, [["p-a7r5/todo.hif"]])
+            rows = media_manifest.read_media_manifest(workspace_dir / "media_manifest.csv")
+            self.assertEqual(
+                [row["relative_path"] for row in media_manifest.select_photo_rows(rows)],
+                ["p-a7r5/done.hif", "p-a7r5/todo.hif"],
+            )
+
+    def test_main_restart_ignores_partial_manifest_and_reprocesses_everything(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            photo_dir = day_dir / "p-a7r5"
+            workspace_dir.mkdir(parents=True)
+            photo_dir.mkdir(parents=True)
+
+            done_path = photo_dir / "done.hif"
+            todo_path = photo_dir / "todo.hif"
+            done_path.write_bytes(b"done")
+            todo_path.write_bytes(b"todo")
+
+            _sort_key, done_row = export_media.build_photo_manifest_entry(
+                day_dir=day_dir,
+                stream_id="p-a7r5",
+                device="a7r5",
+                path=done_path,
+                metadata={
+                    "DateTimeOriginal": "2026:03:23 10:00:00",
+                    "SubSecDateTimeOriginal": "2026:03:23 10:00:00.100",
+                },
+            )
+            export_media.assign_photo_order_indexes([done_row])
+            export_media.write_media_manifest_csv(
+                export_media.partial_output_path(workspace_dir / "media_manifest.csv"),
+                [done_row],
+            )
+
+            seen_path_sets = []
+
+            def fake_run_exiftool(paths, on_batch_processed=None):
+                seen_path_sets.append(sorted(path.relative_to(day_dir).as_posix() for path in paths))
+                if on_batch_processed is not None:
+                    on_batch_processed(len(paths))
+                return [
+                    {
+                        "SourceFile": str(done_path),
+                        "DateTimeOriginal": "2026:03:23 10:00:00",
+                        "SubSecDateTimeOriginal": "2026:03:23 10:00:00.100",
+                    },
+                    {
+                        "SourceFile": str(todo_path),
+                        "DateTimeOriginal": "2026:03:23 10:00:01",
+                        "SubSecDateTimeOriginal": "2026:03:23 10:00:01.200",
+                    },
+                ]
+
+            with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
+                with mock.patch.object(export_media, "run_exiftool", side_effect=fake_run_exiftool):
+                    with mock.patch.object(export_media.console, "print"):
+                        exit_code = export_media.main([str(day_dir), "--restart"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(seen_path_sets, [["p-a7r5/done.hif", "p-a7r5/todo.hif"]])
+            rows = media_manifest.read_media_manifest(workspace_dir / "media_manifest.csv")
+            self.assertEqual(
+                [row["relative_path"] for row in media_manifest.select_photo_rows(rows)],
+                ["p-a7r5/done.hif", "p-a7r5/todo.hif"],
+            )
+
+    def test_main_stops_after_active_batches_and_saves_partial_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            photo_dir = day_dir / "p-a7r5"
+            workspace_dir.mkdir(parents=True)
+            photo_dir.mkdir(parents=True)
+
+            file_paths = []
+            for name in ("01.hif", "02.hif", "03.hif"):
+                path = photo_dir / name
+                path.write_bytes(name.encode("utf-8"))
+                file_paths.append(path)
+
+            class FakeInterruptState:
+                def __init__(self) -> None:
+                    self.stop_requested = False
+
+            fake_state = FakeInterruptState()
+
+            def fake_build_rows_for_batch(day_dir_arg, info, batch, on_batch_processed=None):
+                rows = []
+                for path in batch:
+                    if on_batch_processed is not None:
+                        on_batch_processed(1)
+                    _sort_key, row = export_media.build_photo_manifest_entry(
+                        day_dir=day_dir_arg,
+                        stream_id=str(info["stream_id"]),
+                        device=str(info["device"]),
+                        path=path,
+                        metadata=None,
+                    )
+                    rows.append(row)
+                if batch[0].name == "01.hif":
+                    fake_state.stop_requested = True
+                return rows
+
+            with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
+                with mock.patch.object(export_media, "EXIFTOOL_BATCH_SIZE", 1):
+                    with mock.patch.object(export_media, "build_rows_for_batch", side_effect=fake_build_rows_for_batch):
+                        with mock.patch.object(export_media, "install_interrupt_handler", return_value=(fake_state, object())):
+                            with mock.patch.object(export_media, "restore_interrupt_handler"):
+                                with mock.patch.object(export_media.console, "print"):
+                                    exit_code = export_media.main([str(day_dir), "--jobs", "2"])
+
+            self.assertEqual(exit_code, 130)
+            partial_rows = media_manifest.read_media_manifest(
+                export_media.partial_output_path(workspace_dir / "media_manifest.csv")
+            )
+            self.assertEqual(
+                sorted(row["relative_path"] for row in media_manifest.select_photo_rows(partial_rows)),
+                ["p-a7r5/01.hif", "p-a7r5/02.hif"],
+            )
+
     def test_build_photo_manifest_entry_populates_image_only_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"

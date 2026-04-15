@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import signal
 import subprocess
 import tempfile
 from datetime import datetime
@@ -29,6 +30,7 @@ from rich.progress import (
 )
 
 from lib.image_pipeline_contracts import MEDIA_MANIFEST_HEADERS
+from lib.media_manifest import read_media_manifest
 from lib.photo_time_order import (
     CaptureTimeParts,
     format_capture_subsec,
@@ -72,6 +74,49 @@ VIDEO_TIME_FIELDS: Sequence[tuple[str, str]] = (
 PHOTO_EXTENSIONS = {".arw", ".cr3", ".hif", ".heif", ".jpg", ".jpeg", ".nef"}
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mts"}
 EXIFTOOL_BATCH_SIZE = 1000
+PROCESS_PROGRESS_BATCH_SIZE = 100
+DISCOVERY_PROGRESS_BATCH_SIZE = 1000
+
+
+class GracefulInterruptState:
+    def __init__(self) -> None:
+        self.stop_requested = False
+        self.signal_count = 0
+
+    def handle(self, _signum, _frame) -> None:
+        self.signal_count += 1
+        if self.signal_count == 1:
+            self.stop_requested = True
+            console.print(
+                "[yellow]Interrupt received. Finishing active batch(es) before exit. "
+                "Press Ctrl+C again to abort immediately.[/yellow]"
+            )
+            return
+        raise KeyboardInterrupt
+
+
+def install_interrupt_handler() -> tuple[GracefulInterruptState, object]:
+    state = GracefulInterruptState()
+    previous_handler = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, state.handle)
+    return state, previous_handler
+
+
+def restore_interrupt_handler(previous_handler: object) -> None:
+    signal.signal(signal.SIGINT, previous_handler)
+
+
+class ExiftoolBatchError(RuntimeError):
+    def __init__(
+        self,
+        error: subprocess.CalledProcessError,
+        processed_items: Sequence[Dict[str, object]],
+        remaining_paths: Sequence[Path],
+    ) -> None:
+        super().__init__(str(error))
+        self.error = error
+        self.processed_items = [dict(item) for item in processed_items]
+        self.remaining_paths = list(remaining_paths)
 
 
 def positive_int_arg(value: str) -> int:
@@ -119,6 +164,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=positive_int_arg,
         default=4,
         help="Number of worker jobs. Default: 4",
+    )
+    parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="Ignore existing partial/final manifest state and rebuild from scratch.",
     )
     return parser.parse_args(argv)
 
@@ -548,9 +598,149 @@ def write_media_manifest_csv(path: Path, rows: Sequence[Mapping[str, str]]) -> N
         raise
 
 
+def partial_output_path(output_path: Path) -> Path:
+    return Path(f"{output_path}.partial")
+
+
 def assign_photo_order_indexes(rows: Sequence[Dict[str, str]]) -> None:
     for index, row in enumerate(rows):
         row["photo_order_index"] = str(index)
+
+
+def parse_int_or_fallback(value: str, fallback: int) -> int:
+    try:
+        return int(str(value or "").strip())
+    except ValueError:
+        return fallback
+
+
+def photo_snapshot_sort_key(row: Mapping[str, str]) -> tuple[int, int, str]:
+    return (
+        parse_int_or_fallback(str(row.get("start_epoch_ms") or ""), 2**63 - 1),
+        parse_int_or_fallback(str(row.get("capture_subsec") or ""), 0),
+        str(row.get("relative_path") or ""),
+    )
+
+
+def build_manifest_snapshot(rows: Iterable[Mapping[str, str]]) -> List[Dict[str, str]]:
+    photo_rows = sorted(
+        (dict(row) for row in rows if str(row.get("media_type") or "").strip() == "photo"),
+        key=photo_snapshot_sort_key,
+    )
+    assign_photo_order_indexes(photo_rows)
+    video_rows = [
+        dict(row)
+        for row in rows
+        if str(row.get("media_type") or "").strip() == "video"
+    ]
+    snapshot_rows = photo_rows + video_rows
+    snapshot_rows.sort(key=final_manifest_sort_key)
+    return snapshot_rows
+
+
+def persist_manifest_snapshot(
+    output_path: Path,
+    rows_by_relative_path: Mapping[str, Mapping[str, str]],
+) -> List[Dict[str, str]]:
+    snapshot_rows = build_manifest_snapshot(rows_by_relative_path.values())
+    partial_path = partial_output_path(output_path)
+    write_media_manifest_csv(partial_path, snapshot_rows)
+    write_media_manifest_csv(output_path, snapshot_rows)
+    return snapshot_rows
+
+
+def load_existing_manifest(path: Path, label: str) -> List[Dict[str, str]] | None:
+    if not path.exists():
+        return []
+    if path.is_dir():
+        console.print(f"[red]Error: {label} path is a directory: {path}[/red]")
+        return None
+    if path.stat().st_size == 0:
+        console.print(
+            f"[red]Error: {label} is empty: {path}. Use --restart to rebuild from scratch.[/red]"
+        )
+        return None
+    try:
+        return read_media_manifest(path)
+    except Exception as error:
+        console.print(
+            f"[red]Error: failed to read {label} {path}: {error}. "
+            "Use --restart to rebuild from scratch.[/red]"
+        )
+        return None
+
+
+def initialize_resume_rows(output_path: Path, restart: bool) -> List[Dict[str, str]] | None:
+    partial_path = partial_output_path(output_path)
+    if restart:
+        partial_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
+        return []
+
+    partial_rows = load_existing_manifest(partial_path, "partial manifest")
+    if partial_rows is None:
+        return None
+    if partial_rows:
+        return partial_rows
+
+    final_rows = load_existing_manifest(output_path, "existing manifest")
+    if final_rows is None:
+        return None
+    if final_rows:
+        write_media_manifest_csv(partial_path, final_rows)
+        return final_rows
+    return []
+
+
+def build_batch_specs(
+    stream_files: Sequence[tuple[Dict[str, str], Sequence[Path]]],
+    processed_relative_paths: set[str],
+    day_dir: Path,
+) -> List[tuple[Dict[str, str], List[Path]]]:
+    batch_specs: List[tuple[Dict[str, str], List[Path]]] = []
+    for info, files in stream_files:
+        pending_files = [
+            path
+            for path in files
+            if path.relative_to(day_dir).as_posix() not in processed_relative_paths
+        ]
+        for index in range(0, len(pending_files), EXIFTOOL_BATCH_SIZE):
+            batch_specs.append((info, pending_files[index:index + EXIFTOOL_BATCH_SIZE]))
+    return batch_specs
+
+
+def build_rows_for_batch(
+    day_dir: Path,
+    info: Mapping[str, str],
+    batch: Sequence[Path],
+    on_batch_processed: Optional[Callable[[int], None]] = None,
+) -> List[Dict[str, str]]:
+    metadata_by_path = extract_metadata_batch_fail_open(
+        str(info["stream_id"]),
+        batch,
+        on_batch_processed=on_batch_processed,
+    )
+    rows: List[Dict[str, str]] = []
+    for path in batch:
+        metadata = metadata_by_path.get(str(path))
+        if info["media_type"] == "photo":
+            _sort_key, row = build_photo_manifest_entry(
+                day_dir,
+                str(info["stream_id"]),
+                str(info["device"]),
+                path,
+                metadata,
+            )
+        else:
+            row = build_video_manifest_entry(
+                day_dir,
+                str(info["stream_id"]),
+                str(info["device"]),
+                path,
+                metadata,
+            )
+        rows.append(row)
+    return rows
 
 
 def detect_streams(day_dir: Path) -> Dict[str, Dict[str, str]]:
@@ -571,9 +761,14 @@ def detect_streams(day_dir: Path) -> Dict[str, Dict[str, str]]:
     return streams
 
 
-def collect_files(stream_dir: Path, media_type: str) -> List[Path]:
+def collect_files(
+    stream_dir: Path,
+    media_type: str,
+    on_files_discovered: Optional[Callable[[int], None]] = None,
+) -> List[Path]:
     allowed_extensions = PHOTO_EXTENSIONS if media_type == "photo" else VIDEO_EXTENSIONS
     files: List[Path] = []
+    pending_progress_count = 0
     for root, dirnames, filenames in os.walk(stream_dir, topdown=True, followlinks=False):
         root_path = Path(root)
         relative_root = root_path.relative_to(stream_dir)
@@ -591,6 +786,13 @@ def collect_files(stream_dir: Path, media_type: str) -> List[Path]:
             if path.suffix.lower() not in allowed_extensions:
                 continue
             files.append(path)
+            if on_files_discovered is not None:
+                pending_progress_count += 1
+                if pending_progress_count >= DISCOVERY_PROGRESS_BATCH_SIZE:
+                    on_files_discovered(pending_progress_count)
+                    pending_progress_count = 0
+    if on_files_discovered is not None and pending_progress_count:
+        on_files_discovered(pending_progress_count)
     return sorted(files, key=lambda path: path.relative_to(stream_dir).as_posix())
 
 
@@ -646,17 +848,21 @@ def run_exiftool(
     if not paths:
         return []
     items: List[Dict[str, object]] = []
-    for index in range(0, len(paths), EXIFTOOL_BATCH_SIZE):
-        batch = paths[index:index + EXIFTOOL_BATCH_SIZE]
+    for index in range(0, len(paths), PROCESS_PROGRESS_BATCH_SIZE):
+        batch = paths[index:index + PROCESS_PROGRESS_BATCH_SIZE]
         cmd = exiftool_base_command()
         cmd.extend(str(path) for path in batch)
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, start_new_session=True)
         if result.returncode != 0:
-            raise subprocess.CalledProcessError(
-                result.returncode,
-                cmd,
-                output=result.stdout,
-                stderr=result.stderr,
+            raise ExiftoolBatchError(
+                subprocess.CalledProcessError(
+                    result.returncode,
+                    cmd,
+                    output=result.stdout,
+                    stderr=result.stderr,
+                ),
+                processed_items=items,
+                remaining_paths=paths[index:],
             )
         payload = result.stdout.strip()
         if payload:
@@ -685,20 +891,61 @@ def warn_metadata_file_failure(stream_id: str, path: Path, error: Exception) -> 
 def extract_metadata_batch_fail_open(
     stream_id: str,
     batch: Sequence[Path],
+    on_batch_processed: Optional[Callable[[int], None]] = None,
 ) -> Dict[str, Mapping[str, object]]:
     try:
-        return metadata_by_source_path(run_exiftool(batch))
+        return metadata_by_source_path(
+            run_exiftool(batch, on_batch_processed=on_batch_processed)
+        )
+    except ExiftoolBatchError as error:
+        warn_metadata_batch_failure(stream_id, batch, error.error)
+        metadata_by_path = metadata_by_source_path(error.processed_items)
+        remaining_paths = error.remaining_paths
+        if len(remaining_paths) <= 1:
+            for path in remaining_paths:
+                try:
+                    metadata_by_path.update(
+                        metadata_by_source_path(
+                            run_exiftool([path], on_batch_processed=on_batch_processed)
+                        )
+                    )
+                except Exception as path_error:
+                    warn_metadata_file_failure(stream_id, path, path_error)
+                    if on_batch_processed is not None:
+                        on_batch_processed(1)
+            return metadata_by_path
+
+        for path in remaining_paths:
+            try:
+                metadata_by_path.update(
+                    metadata_by_source_path(
+                        run_exiftool([path], on_batch_processed=on_batch_processed)
+                    )
+                )
+            except Exception as path_error:
+                warn_metadata_file_failure(stream_id, path, path_error)
+                if on_batch_processed is not None:
+                    on_batch_processed(1)
+        return metadata_by_path
     except Exception as error:
         warn_metadata_batch_failure(stream_id, batch, error)
         if len(batch) <= 1:
+            if on_batch_processed is not None:
+                on_batch_processed(len(batch))
             return {}
 
     metadata_by_path: Dict[str, Mapping[str, object]] = {}
     for path in batch:
         try:
-            metadata_by_path.update(metadata_by_source_path(run_exiftool([path])))
+            metadata_by_path.update(
+                metadata_by_source_path(
+                    run_exiftool([path], on_batch_processed=on_batch_processed)
+                )
+            )
         except Exception as error:
             warn_metadata_file_failure(stream_id, path, error)
+            if on_batch_processed is not None:
+                on_batch_processed(1)
     return metadata_by_path
 
 
@@ -838,66 +1085,134 @@ def main(argv: list[str] | None = None) -> int:
             console.print(f"{info['stream_id']}  {info['media_type']}  {info['source_dir']}")
         return 0
 
-    stream_files = [
-        (info, collect_files(Path(info["source_dir"]), info["media_type"]))
-        for info in streams_to_process
-    ]
-    total_files = sum(len(files) for _info, files in stream_files)
-    if total_files == 0:
-        console.print(
-            "[red]Error: no supported media files found in selected streams under "
-            f"{day_dir}.[/red]"
-        )
+    resume_rows = initialize_resume_rows(output_path, args.restart)
+    if resume_rows is None:
         return 1
 
-    photo_rows_with_sort: List[tuple[tuple[datetime, str, str], Dict[str, str]]] = []
-    video_rows: List[Dict[str, str]] = []
     with Progress(*build_progress_columns(), expand=False, console=console) as progress:
-        discover_task = progress.add_task("Discover files".ljust(25), total=total_files)
-        progress.update(discover_task, completed=total_files)
-        metadata_task = progress.add_task("Read metadata".ljust(25), total=total_files)
-        row_task = progress.add_task("Build manifest rows".ljust(25), total=total_files)
-        metadata_for_streams = extract_metadata_by_stream(
+        discover_task = progress.add_task("Discover files".ljust(25), total=None)
+        stream_files = [
+            (
+                info,
+                collect_files(
+                    Path(info["source_dir"]),
+                    info["media_type"],
+                    on_files_discovered=lambda batch_size, task_id=discover_task: progress.advance(task_id, batch_size),
+                ),
+            )
+            for info in streams_to_process
+        ]
+        total_files = sum(len(files) for _info, files in stream_files)
+        progress.update(discover_task, total=total_files, completed=total_files)
+        if total_files == 0:
+            console.print(
+                "[red]Error: no supported media files found in selected streams under "
+                f"{day_dir}.[/red]"
+            )
+            return 1
+        discovered_relative_paths = {
+            path.relative_to(day_dir).as_posix()
+            for _info, files in stream_files
+            for path in files
+        }
+        rows_by_relative_path: Dict[str, Dict[str, str]] = {
+            str(row["relative_path"]): dict(row)
+            for row in resume_rows
+            if str(row.get("relative_path") or "") in discovered_relative_paths
+        }
+        batch_specs = build_batch_specs(
             stream_files,
-            args.jobs,
-            progress,
-            metadata_task,
+            set(rows_by_relative_path),
+            day_dir,
         )
+        remaining_files = sum(len(batch) for _info, batch in batch_specs)
+        process_task = progress.add_task("Process media".ljust(25), total=remaining_files)
 
-        for info, files in stream_files:
-            stream_metadata = metadata_for_streams.get(info["stream_id"], {})
-            for path in files:
-                metadata = stream_metadata.get(str(path))
-                if info["media_type"] == "photo":
-                    sort_key, row = build_photo_manifest_entry(
+        if not batch_specs:
+            if rows_by_relative_path:
+                snapshot_rows = persist_manifest_snapshot(output_path, rows_by_relative_path)
+                console.print(f"[green]Wrote {len(snapshot_rows)} rows to {output_path}[/green]")
+                return 0
+            console.print(
+                "[red]Error: no remaining media files matched the current selection under "
+                f"{day_dir}.[/red]"
+            )
+            return 1
+
+        interrupt_state, previous_handler = install_interrupt_handler()
+        try:
+            if args.jobs <= 1 or len(batch_specs) <= 1:
+                for info, batch in batch_specs:
+                    batch_rows = build_rows_for_batch(
                         day_dir,
-                        info["stream_id"],
-                        info["device"],
-                        path,
-                        metadata,
+                        info,
+                        batch,
+                        on_batch_processed=lambda count, task_id=process_task: progress.advance(task_id, count),
                     )
-                    photo_rows_with_sort.append((sort_key, row))
-                else:
-                    video_rows.append(
-                        build_video_manifest_entry(
+                    for row in batch_rows:
+                        rows_by_relative_path[str(row["relative_path"])] = row
+                    persist_manifest_snapshot(output_path, rows_by_relative_path)
+                    if interrupt_state.stop_requested:
+                        break
+            else:
+                max_workers = min(args.jobs, len(batch_specs))
+                batch_iter = iter(batch_specs)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_batch: Dict[concurrent.futures.Future[List[Dict[str, str]]], tuple[Dict[str, str], List[Path]]] = {}
+                    while len(future_to_batch) < max_workers:
+                        try:
+                            info, batch = next(batch_iter)
+                        except StopIteration:
+                            break
+                        future = executor.submit(
+                            build_rows_for_batch,
                             day_dir,
-                            info["stream_id"],
-                            info["device"],
-                            path,
-                            metadata,
+                            info,
+                            batch,
+                            lambda count, task_id=process_task: progress.advance(task_id, count),
                         )
-                    )
-                progress.advance(row_task)
+                        future_to_batch[future] = (info, batch)
 
-    ordered_photo_rows = [
-        row
-        for _sort_key, row in sorted(photo_rows_with_sort, key=lambda item: item[0])
-    ]
-    assign_photo_order_indexes(ordered_photo_rows)
-    rows = ordered_photo_rows + video_rows
-    rows.sort(key=final_manifest_sort_key)
-    write_media_manifest_csv(output_path, rows)
-    console.print(f"[green]Wrote {len(rows)} rows to {output_path}[/green]")
+                    while future_to_batch:
+                        done, _pending = concurrent.futures.wait(
+                            future_to_batch,
+                            return_when=concurrent.futures.FIRST_COMPLETED,
+                        )
+                        for future in done:
+                            _info, batch = future_to_batch.pop(future)
+                            batch_rows = future.result()
+                            for row in batch_rows:
+                                rows_by_relative_path[str(row["relative_path"])] = row
+                            persist_manifest_snapshot(output_path, rows_by_relative_path)
+
+                        if interrupt_state.stop_requested:
+                            continue
+
+                        while len(future_to_batch) < max_workers:
+                            try:
+                                info, batch = next(batch_iter)
+                            except StopIteration:
+                                break
+                            future = executor.submit(
+                                build_rows_for_batch,
+                                day_dir,
+                                info,
+                                batch,
+                                lambda count, task_id=process_task: progress.advance(task_id, count),
+                            )
+                            future_to_batch[future] = (info, batch)
+        finally:
+            restore_interrupt_handler(previous_handler)
+
+    snapshot_rows = build_manifest_snapshot(rows_by_relative_path.values())
+    if interrupt_state.stop_requested:
+        console.print(
+            "[yellow]Stopped after completing active batch(es). "
+            f"Saved {len(snapshot_rows)} rows to {partial_output_path(output_path)} and {output_path}.[/yellow]"
+        )
+        return 130
+
+    console.print(f"[green]Wrote {len(snapshot_rows)} rows to {output_path}[/green]")
     return 0
 
 

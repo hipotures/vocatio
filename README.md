@@ -88,7 +88,32 @@ By default this writes:
 DAY/_workspace/media_manifest.csv
 ```
 
-Use `--list-targets` to inspect detected `p-*` and `v-*` streams without writing output. `--media-types photo` and `--media-types video` remain available for staged debugging and migration checks.
+The exporter now keeps a resumable checkpoint alongside the final manifest:
+
+```bash
+DAY/_workspace/media_manifest.csv.partial
+```
+
+Behavior:
+
+- resume is the default
+- if `.partial` exists, the exporter resumes from it
+- if `.partial` does not exist but `media_manifest.csv` exists, the exporter reconstructs `.partial` from the final manifest and resumes
+- `--restart` ignores both files and rebuilds from scratch
+- after each completed metadata batch, the exporter updates both `.partial` and `media_manifest.csv` using atomic replace
+
+Operational notes:
+
+- `Ctrl+C` is safe
+- the first interrupt stops scheduling new work, lets active batch(es) finish, writes the latest snapshot, and exits
+- press `Ctrl+C` again only if you want to abort immediately
+- `--jobs` remains safe with resume enabled because state is only promoted from the main thread after completed batches
+
+Useful options:
+
+- `--list-targets` to inspect detected `p-*` and `v-*` streams without writing output
+- `--media-types photo` and `--media-types video` for staged debugging and migration checks
+- `--restart` to discard existing export state and rebuild from zero
 
 ## Expected Day Directory Structure
 
