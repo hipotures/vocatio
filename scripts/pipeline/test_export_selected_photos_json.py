@@ -38,6 +38,10 @@ class ReviewSelectionExportTests(unittest.TestCase):
         output_path = review_gui.resolve_selection_output_path(Path("/tmp/day_workspace"), "/tmp/export_a.json")
         self.assertEqual(output_path, Path("/tmp/export_a.json"))
 
+    def test_build_default_selection_filename_uses_compact_timestamp_without_t_separator(self):
+        filename = review_gui.build_default_selection_filename("20260323", "2026-04-14T03:04:21+02:00")
+        self.assertEqual(filename, "selected_photos_20260323_20260414030421.json")
+
     def test_build_photo_selection_payload_keeps_selected_photo_rows_only(self):
         payload = review_gui.build_photo_selection_payload(
             day="20260323",
@@ -59,6 +63,54 @@ class ReviewSelectionExportTests(unittest.TestCase):
         self.assertEqual(payload["source_index_json"], "/tmp/index.json")
         self.assertEqual(len(payload["photos"]), 1)
         self.assertEqual(payload["photos"][0]["filename"], "a.hif")
+
+    def test_build_photo_selection_payload_includes_structured_diagnostics_when_present(self):
+        payload = review_gui.build_photo_selection_payload(
+            day="20260323",
+            source_index_json=Path("/tmp/index.json"),
+            generated_at="2026-04-10T12:00:00+02:00",
+            photos=[
+                {
+                    "filename": "a.hif",
+                    "stream_id": "p-a7r5",
+                    "source_path": "/data/a.hif",
+                    "adjusted_start_local": "2026-03-23T10:10:11.000",
+                    "display_set_id": "imgset-000001",
+                    "display_name": "SEG0001",
+                },
+                {
+                    "filename": "b.hif",
+                    "stream_id": "p-a7r5",
+                    "source_path": "/data/b.hif",
+                    "adjusted_start_local": "2026-03-23T10:10:21.000",
+                    "display_set_id": "imgset-000001",
+                    "display_name": "SEG0001",
+                },
+            ],
+            selection_diagnostics={
+                "mode": "multi_photo",
+                "summary": {
+                    "selected_photo_count": 2,
+                    "current_display_name": "SEG0001",
+                },
+                "multi_photo_diagnostics": {
+                    "selected_boundaries": [
+                        {
+                            "left_relative_path": "cam/a.hif",
+                            "right_relative_path": "cam/b.hif",
+                            "boundary_score": "0.910000",
+                        }
+                    ]
+                },
+            },
+        )
+        self.assertIn("selection_diagnostics", payload)
+        self.assertEqual(payload["selection_diagnostics"]["mode"], "multi_photo")
+        self.assertEqual(payload["selection_diagnostics"]["summary"]["selected_photo_count"], 2)
+        self.assertEqual(
+            payload["selection_diagnostics"]["multi_photo_diagnostics"]["selected_boundaries"][0]["boundary_score"],
+            "0.910000",
+        )
 
 
 class CopyReviewedSelectionTests(unittest.TestCase):

@@ -65,3 +65,28 @@ Photo selection export behavior:
 - relative JSON names are written to `DAY/_workspace`
 - `copy_reviewed_set_assets.py` accepts that JSON path as the third positional argument
 - in JSON selection mode it exports only the listed photos and skips video selection
+
+Image-only stage 1 pipeline:
+
+- `export_recursive_photo_csv.py` -> `_workspace/photo_manifest.csv`
+- `extract_embedded_photo_jpg.py` -> `_workspace/photo_embedded_manifest.csv`
+- `build_photo_quality_annotations.py` -> `_workspace/photo_quality.csv` from preview JPGs in `photo_embedded_manifest.csv`
+- `embed_photo_previews_dinov2.py` -> `_workspace/features/dinov2_embeddings.npy`, `_workspace/features/dinov2_index.csv`
+- `build_photo_boundary_features.py` -> `_workspace/photo_boundary_features.csv`
+- `bootstrap_photo_boundaries.py` -> `_workspace/photo_boundary_scores.csv`
+- `build_photo_segments.py` -> `_workspace/photo_segments.csv`
+- `build_photo_review_index.py` -> `_workspace/performance_proxy_index.image.json`
+
+Manual smoke checklist:
+
+```bash
+python3 scripts/pipeline/export_recursive_photo_csv.py /data/20260323
+python3 scripts/pipeline/extract_embedded_photo_jpg.py /data/20260323
+python3 scripts/pipeline/build_photo_quality_annotations.py /data/20260323
+python3 scripts/pipeline/embed_photo_previews_dinov2.py /data/20260323
+python3 scripts/pipeline/build_photo_boundary_features.py /data/20260323
+python3 scripts/pipeline/bootstrap_photo_boundaries.py /data/20260323
+python3 scripts/pipeline/build_photo_segments.py /data/20260323
+python3 scripts/pipeline/build_photo_review_index.py /data/20260323
+python3 scripts/pipeline/review_performance_proxy_gui.py /data/20260323 --index performance_proxy_index.image.json
+```

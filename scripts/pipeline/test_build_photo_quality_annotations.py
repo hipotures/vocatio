@@ -1,0 +1,220 @@
+import importlib.util
+import concurrent.futures
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
+
+
+def load_module(name: str, relative_path: str):
+    path = REPO_ROOT / relative_path
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+quality = load_module("build_photo_quality_annotations_test", "scripts/pipeline/build_photo_quality_annotations.py")
+
+
+class BuildPhotoQualityAnnotationsTests(unittest.TestCase):
+    def test_parse_args_accepts_jobs(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["build_photo_quality_annotations.py", "/tmp/day", "--jobs", "6"],
+        ):
+            args = quality.parse_args()
+        self.assertEqual(args.jobs, 6)
+
+    def test_progress_columns_include_eta_and_elapsed(self):
+        columns = quality.build_progress_columns()
+        self.assertTrue(any(column.__class__.__name__ == "TimeRemainingColumn" for column in columns))
+        self.assertTrue(any(column.__class__.__name__ == "TimeElapsedColumn" for column in columns))
+
+    def test_photo_quality_headers_match_stage1_contract(self):
+        self.assertEqual(
+            quality.PHOTO_QUALITY_HEADERS,
+            [
+                "relative_path",
+                "focus_score",
+                "blur_score",
+                "motion_blur_score",
+                "brightness_mean",
+                "brightness_p05",
+                "brightness_p95",
+                "contrast_score",
+                "highlight_clip_ratio",
+                "shadow_clip_ratio",
+                "flag_blurry",
+                "flag_dark",
+                "flag_overexposed",
+                "flag_low_contrast",
+            ],
+        )
+
+    def test_compute_quality_flags_marks_dark_frame_without_dropping_it(self):
+        image = np.zeros((8, 8), dtype=np.uint8)
+        row = quality.compute_quality_row("hour10/a.jpg", image)
+        self.assertEqual(row["relative_path"], "hour10/a.jpg")
+        self.assertEqual(row["flag_dark"], "1")
+        self.assertEqual(row["flag_blurry"], "1")
+        self.assertEqual(row["flag_overexposed"], "0")
+        self.assertEqual(set(row.keys()), set(quality.PHOTO_QUALITY_HEADERS))
+
+    def test_compute_quality_row_uses_stable_string_columns(self):
+        image = np.full((4, 6), 255, dtype=np.uint8)
+        row = quality.compute_quality_row("hour10/b.jpg", image)
+        self.assertEqual(row["brightness_mean"], "1.000000")
+        self.assertEqual(row["brightness_p05"], "1.000000")
+        self.assertEqual(row["brightness_p95"], "1.000000")
+        self.assertEqual(row["flag_dark"], "0")
+        self.assertEqual(row["flag_overexposed"], "1")
+        self.assertEqual(row["flag_low_contrast"], "1")
+
+    def test_main_refuses_to_overwrite_existing_output_without_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            output_csv = workspace_dir / "photo_quality.csv"
+            manifest_csv.write_text("relative_path,preview_path\n", encoding="utf-8")
+            output_csv.write_text("existing\n", encoding="utf-8")
+            argv = [
+                "build_photo_quality_annotations.py",
+                str(day_dir),
+            ]
+            with mock.patch.object(sys, "argv", argv):
+                with self.assertRaises(SystemExit) as ctx:
+                    quality.main()
+            self.assertIn("--overwrite", str(ctx.exception))
+
+    def test_main_allows_overwrite_when_flag_is_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            output_csv = workspace_dir / "photo_quality.csv"
+            manifest_csv.write_text("relative_path,preview_path\n", encoding="utf-8")
+            output_csv.write_text("existing\n", encoding="utf-8")
+            argv = [
+                "build_photo_quality_annotations.py",
+                str(day_dir),
+                "--overwrite",
+            ]
+            with mock.patch.object(sys, "argv", argv):
+                with mock.patch.object(quality, "build_photo_quality_annotations", return_value=3) as build_mock:
+                    exit_code = quality.main()
+            self.assertEqual(exit_code, 0)
+            build_mock.assert_called_once_with(workspace_dir, manifest_csv, output_csv, jobs=4)
+
+    def test_build_photo_quality_annotations_reads_preview_jpegs_from_embedded_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "hour10"
+            workspace_dir.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            preview_path = preview_dir / "a.jpg.jpg"
+            preview_path.write_bytes(b"jpg")
+
+            rows = quality.build_quality_rows(
+                workspace_dir,
+                [{"relative_path": "hour10/a.jpg", "preview_path": "embedded_jpg/preview/hour10/a.jpg.jpg"}],
+                image_loader=lambda path: np.zeros((4, 4), dtype=np.uint8) if path == preview_path else (_ for _ in ()).throw(AssertionError(path)),
+            )
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["relative_path"], "hour10/a.jpg")
+
+    def test_build_quality_rows_uses_thread_pool_when_jobs_gt_1(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "hour10"
+            preview_dir.mkdir(parents=True)
+            manifest_rows = []
+            for name in ("a", "b", "c"):
+                preview_path = preview_dir / f"{name}.jpg"
+                preview_path.write_bytes(b"jpg")
+                manifest_rows.append(
+                    {
+                        "relative_path": f"hour10/{name}.jpg",
+                        "preview_path": f"embedded_jpg/preview/hour10/{name}.jpg",
+                    }
+                )
+
+            class FakeExecutor:
+                created_workers: list[int] = []
+
+                def __init__(self, max_workers: int):
+                    self.max_workers = max_workers
+                    FakeExecutor.created_workers.append(max_workers)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def submit(self, fn, *args, **kwargs):
+                    future: concurrent.futures.Future = concurrent.futures.Future()
+                    future.set_result(fn(*args, **kwargs))
+                    return future
+
+            with mock.patch.object(
+                quality.concurrent.futures,
+                "ThreadPoolExecutor",
+                FakeExecutor,
+            ):
+                rows = quality.build_quality_rows(
+                    workspace_dir,
+                    manifest_rows,
+                    image_loader=lambda _path: np.zeros((4, 4), dtype=np.uint8),
+                    jobs=4,
+                )
+
+            self.assertEqual(len(rows), 3)
+            self.assertEqual(FakeExecutor.created_workers, [3])
+
+    def test_build_photo_quality_annotations_rejects_preview_path_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            day_dir = root_dir / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            stale_dir = root_dir / "stale"
+            workspace_dir.mkdir(parents=True)
+            (workspace_dir / "embedded_jpg" / "preview").mkdir(parents=True)
+            stale_dir.mkdir(parents=True)
+            stale_path = stale_dir / "other.jpg"
+            stale_path.write_bytes(b"x")
+            manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            output_csv = workspace_dir / "photo_quality.csv"
+            manifest_csv.write_text(
+                "relative_path,preview_path\n"
+                f"hour10/a.jpg,{stale_path}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                quality.build_photo_quality_annotations(
+                    workspace_dir,
+                    manifest_csv,
+                    output_csv,
+                )
+
+            self.assertIn("preview_path", str(ctx.exception))
+            self.assertIn("hour10/a.jpg", str(ctx.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()
