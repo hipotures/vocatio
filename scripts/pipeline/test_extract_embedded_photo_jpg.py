@@ -12,6 +12,8 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
+from lib.image_pipeline_contracts import MEDIA_MANIFEST_HEADERS
+
 
 def load_module(name: str, relative_path: str):
     path = REPO_ROOT / relative_path
@@ -29,6 +31,44 @@ MINIMAL_JPEG_BYTES = (
     b"\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00"
     b"\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00?\x00\x00\xff\xd9"
 )
+
+
+def build_media_manifest_photo_row(day_dir: Path, relative_path: str, photo_order_index: str) -> dict[str, str]:
+    source_path = day_dir / relative_path
+    row = {header: "" for header in MEDIA_MANIFEST_HEADERS}
+    row.update(
+        {
+            "day": day_dir.name,
+            "stream_id": relative_path.split("/", 1)[0] if "/" in relative_path else "p-test",
+            "device": "test-device",
+            "media_type": "photo",
+            "source_root": str(day_dir),
+            "source_dir": str(source_path.parent),
+            "source_rel_dir": str(Path(relative_path).parent).replace("\\", "/"),
+            "path": str(source_path),
+            "relative_path": relative_path,
+            "media_id": relative_path,
+            "photo_id": relative_path,
+            "filename": source_path.name,
+            "extension": source_path.suffix.lower(),
+            "capture_time_local": "2026-03-23T08:00:00",
+            "capture_subsec": "000",
+            "photo_order_index": photo_order_index,
+            "start_local": "2026-03-23T08:00:00",
+            "start_epoch_ms": "1",
+            "timestamp_source": "test",
+            "metadata_status": "ok",
+        }
+    )
+    return row
+
+
+def write_media_manifest(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
@@ -160,12 +200,14 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             source_jpg.write_bytes(b"jpg")
             source_arw.write_bytes(b"raw")
 
-            manifest_path = workspace_dir / "photo_manifest.csv"
-            with manifest_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["relative_path", "path", "photo_order_index"])
-                writer.writeheader()
-                writer.writerow({"relative_path": "hour10/same.jpg", "path": str(source_jpg), "photo_order_index": "0"})
-                writer.writerow({"relative_path": "hour10/same.arw", "path": str(source_arw), "photo_order_index": "1"})
+            manifest_path = workspace_dir / "media_manifest.csv"
+            write_media_manifest(
+                manifest_path,
+                [
+                    build_media_manifest_photo_row(day_dir, "hour10/same.jpg", "0"),
+                    build_media_manifest_photo_row(day_dir, "hour10/same.arw", "1"),
+                ],
+            )
 
             with self.assertRaisesRegex(ValueError, r"Conflicting derived preview path .*hour10/same\.jpg.*hour10/same\.arw"):
                 extract_jpg.build_manifest_rows(day_dir, workspace_dir, overwrite=False)
@@ -406,31 +448,21 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
 
             self.assertFalse(thumb_path.exists())
 
-    def test_load_photo_manifest_rows_preserves_manifest_order(self):
+    def test_load_photo_rows_preserves_manifest_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"
             workspace_dir = day_dir / "_workspace"
             workspace_dir.mkdir(parents=True)
-            manifest_path = workspace_dir / "photo_manifest.csv"
-            with manifest_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["relative_path", "path", "photo_order_index"])
-                writer.writeheader()
-                writer.writerow(
-                    {
-                        "relative_path": "hour10/b.jpg",
-                        "path": str(day_dir / "hour10" / "b.jpg"),
-                        "photo_order_index": "0",
-                    }
-                )
-                writer.writerow(
-                    {
-                        "relative_path": "hour10/a.jpg",
-                        "path": str(day_dir / "hour10" / "a.jpg"),
-                        "photo_order_index": "1",
-                    }
-                )
+            manifest_path = workspace_dir / "media_manifest.csv"
+            write_media_manifest(
+                manifest_path,
+                [
+                    build_media_manifest_photo_row(day_dir, "hour10/b.jpg", "0"),
+                    build_media_manifest_photo_row(day_dir, "hour10/a.jpg", "1"),
+                ],
+            )
 
-            rows = extract_jpg.load_photo_manifest_rows(workspace_dir)
+            rows = extract_jpg.load_photo_rows(workspace_dir)
 
             self.assertEqual([row["relative_path"] for row in rows], ["hour10/b.jpg", "hour10/a.jpg"])
 
@@ -446,12 +478,14 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             source_a.write_bytes(b"a")
             source_b.write_bytes(b"b")
 
-            manifest_path = workspace_dir / "photo_manifest.csv"
-            with manifest_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["relative_path", "path", "photo_order_index"])
-                writer.writeheader()
-                writer.writerow({"relative_path": "hour10/b.jpg", "path": str(source_b), "photo_order_index": "0"})
-                writer.writerow({"relative_path": "hour10/a.jpg", "path": str(source_a), "photo_order_index": "1"})
+            manifest_path = workspace_dir / "media_manifest.csv"
+            write_media_manifest(
+                manifest_path,
+                [
+                    build_media_manifest_photo_row(day_dir, "hour10/b.jpg", "0"),
+                    build_media_manifest_photo_row(day_dir, "hour10/a.jpg", "1"),
+                ],
+            )
 
             original_preview = extract_jpg.ensure_preview_jpg
             original_thumb = extract_jpg.ensure_thumb_jpg
@@ -488,7 +522,7 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             self.assertEqual(rows[0]["preview_source"], "embedded_preview")
             self.assertEqual(rows[1]["preview_source"], "generated_from_source")
 
-    def test_build_manifest_rows_rejects_source_paths_outside_day_dir(self):
+    def test_build_manifest_rows_rejects_mismatched_source_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root_dir = Path(tmp)
             day_dir = root_dir / "20260323"
@@ -497,20 +531,65 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             workspace_dir.mkdir(parents=True)
             outside_path.write_bytes(b"x")
 
-            manifest_path = workspace_dir / "photo_manifest.csv"
-            with manifest_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["relative_path", "path", "photo_order_index"])
-                writer.writeheader()
-                writer.writerow(
-                    {
-                        "relative_path": "hour10/a.jpg",
-                        "path": str(outside_path),
-                        "photo_order_index": "0",
-                    }
-                )
+            manifest_path = workspace_dir / "media_manifest.csv"
+            outside_row = build_media_manifest_photo_row(day_dir, "hour10/a.jpg", "0")
+            outside_row["path"] = str(outside_path)
+            write_media_manifest(manifest_path, [outside_row])
 
-            with self.assertRaisesRegex(ValueError, "Source photo path must stay under"):
+            with self.assertRaisesRegex(ValueError, "does not match relative_path"):
                 extract_jpg.build_manifest_rows(day_dir, workspace_dir, overwrite=False)
+
+    def test_build_manifest_rows_accepts_symlinked_source_path_outside_day_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            day_dir = root_dir / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            target_root = root_dir / "external-day"
+            target_root.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+
+            stream_link = day_dir / "p-a7r5"
+            stream_link.parent.mkdir(parents=True, exist_ok=True)
+            stream_link.symlink_to(target_root, target_is_directory=True)
+
+            source_path = target_root / "20260323_083000_001.jpg"
+            source_path.write_bytes(b"jpg")
+
+            manifest_path = workspace_dir / "media_manifest.csv"
+            write_media_manifest(
+                manifest_path,
+                [build_media_manifest_photo_row(day_dir, "p-a7r5/20260323_083000_001.jpg", "0")],
+            )
+
+            original_preview = extract_jpg.ensure_preview_jpg
+            original_thumb = extract_jpg.ensure_thumb_jpg
+            try:
+                def fake_preview(source_path_value, preview_path, overwrite, long_edge=extract_jpg.DEFAULT_PREVIEW_LONG_EDGE):
+                    preview_path.parent.mkdir(parents=True, exist_ok=True)
+                    preview_path.write_bytes(MINIMAL_JPEG_BYTES)
+                    return ("embedded_preview", (1, 1))
+
+                def fake_thumb(
+                    source_path_value,
+                    thumb_path,
+                    preview_path,
+                    overwrite,
+                    long_edge=extract_jpg.DEFAULT_THUMB_LONG_EDGE,
+                ):
+                    thumb_path.parent.mkdir(parents=True, exist_ok=True)
+                    thumb_path.write_bytes(MINIMAL_JPEG_BYTES)
+                    return (1, 1)
+
+                extract_jpg.ensure_preview_jpg = fake_preview
+                extract_jpg.ensure_thumb_jpg = fake_thumb
+
+                rows = extract_jpg.build_manifest_rows(day_dir, workspace_dir, overwrite=False)
+            finally:
+                extract_jpg.ensure_preview_jpg = original_preview
+                extract_jpg.ensure_thumb_jpg = original_thumb
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["relative_path"], "p-a7r5/20260323_083000_001.jpg")
 
     def test_build_manifest_rows_rejects_source_paths_that_disagree_with_relative_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -523,17 +602,10 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             mismatched_path = source_dir / "b.jpg"
             mismatched_path.write_bytes(b"b")
 
-            manifest_path = workspace_dir / "photo_manifest.csv"
-            with manifest_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["relative_path", "path", "photo_order_index"])
-                writer.writeheader()
-                writer.writerow(
-                    {
-                        "relative_path": "hour10/a.jpg",
-                        "path": str(mismatched_path),
-                        "photo_order_index": "0",
-                    }
-                )
+            manifest_path = workspace_dir / "media_manifest.csv"
+            mismatched_row = build_media_manifest_photo_row(day_dir, "hour10/a.jpg", "0")
+            mismatched_row["path"] = str(mismatched_path)
+            write_media_manifest(manifest_path, [mismatched_row])
 
             with self.assertRaisesRegex(ValueError, "does not match relative_path"):
                 extract_jpg.build_manifest_rows(day_dir, workspace_dir, overwrite=False)
@@ -550,12 +622,14 @@ class ExtractEmbeddedPhotoJpgTests(unittest.TestCase):
             source_a.write_bytes(b"a")
             source_b.write_bytes(b"b")
 
-            manifest_path = workspace_dir / "photo_manifest.csv"
-            with manifest_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["relative_path", "path", "photo_order_index"])
-                writer.writeheader()
-                writer.writerow({"relative_path": "hour10/a.arw", "path": str(source_a), "photo_order_index": "0"})
-                writer.writerow({"relative_path": "hour10/b.arw", "path": str(source_b), "photo_order_index": "1"})
+            manifest_path = workspace_dir / "media_manifest.csv"
+            write_media_manifest(
+                manifest_path,
+                [
+                    build_media_manifest_photo_row(day_dir, "hour10/a.arw", "0"),
+                    build_media_manifest_photo_row(day_dir, "hour10/b.arw", "1"),
+                ],
+            )
 
             output_path = workspace_dir / "photo_embedded_manifest.csv"
             output_path.write_text("old manifest\n", encoding="utf-8")

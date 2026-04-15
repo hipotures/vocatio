@@ -68,8 +68,9 @@ Photo selection export behavior:
 
 Image-only stage 1 pipeline:
 
-- `export_recursive_photo_csv.py` -> `_workspace/photo_manifest.csv`
+- `export_media.py` -> `_workspace/media_manifest.csv`
 - `extract_embedded_photo_jpg.py` -> `_workspace/photo_embedded_manifest.csv`
+- `extract_embedded_photo_jpg.py` reads photo rows from `_workspace/media_manifest.csv`
 - `build_photo_quality_annotations.py` -> `_workspace/photo_quality.csv` from preview JPGs in `photo_embedded_manifest.csv`
 - `embed_photo_previews_dinov2.py` -> `_workspace/features/dinov2_embeddings.npy`, `_workspace/features/dinov2_index.csv`
 - `build_photo_boundary_features.py` -> `_workspace/photo_boundary_features.csv`
@@ -80,7 +81,7 @@ Image-only stage 1 pipeline:
 Manual smoke checklist:
 
 ```bash
-python3 scripts/pipeline/export_recursive_photo_csv.py /data/20260323
+python3 scripts/pipeline/export_media.py /data/20260323
 python3 scripts/pipeline/extract_embedded_photo_jpg.py /data/20260323
 python3 scripts/pipeline/build_photo_quality_annotations.py /data/20260323
 python3 scripts/pipeline/embed_photo_previews_dinov2.py /data/20260323

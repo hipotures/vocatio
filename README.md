@@ -318,7 +318,7 @@ This writes `DAY/_workspace/media_manifest.csv` and is the canonical exporter fo
 python3 scripts/pipeline/extract_embedded_photo_jpg.py DAY
 ```
 
-This creates `photo_embedded_manifest.csv` with `thumb_path` and `preview_path`.
+This reads photo rows from `DAY/_workspace/media_manifest.csv` and creates `photo_embedded_manifest.csv` with `thumb_path` and `preview_path`.
 
 #### 3. Build photo quality annotations
 

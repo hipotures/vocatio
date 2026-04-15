@@ -24,7 +24,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from lib.image_pipeline_contracts import PHOTO_MANIFEST_REQUIRED_COLUMNS, validate_required_columns
+from lib.media_manifest import read_media_manifest, select_photo_rows
 from lib.workspace_dir import resolve_workspace_dir
 console = Console()
 
@@ -51,7 +51,7 @@ PREVIEW_TAGS = ("PreviewImage", "JpgFromRaw")
 THUMB_TAGS = ("ThumbnailImage",)
 DEFAULT_PREVIEW_LONG_EDGE = 1600
 DEFAULT_THUMB_LONG_EDGE = 160
-PHOTO_MANIFEST_NAME = "photo_manifest.csv"
+MEDIA_MANIFEST_NAME = "media_manifest.csv"
 PREVIEW_SOURCE_EMBEDDED = "embedded_preview"
 PREVIEW_SOURCE_EMBEDDED_RAW = "embedded_jpg_from_raw"
 PREVIEW_SOURCE_GENERATED = "generated_from_source"
@@ -188,21 +188,21 @@ def resolve_output_path(workspace_dir: Path, output_value: str) -> Path:
 def normalize_manifest_relative_path(relative_path: str) -> Path:
     candidate = PurePosixPath(relative_path.strip())
     if not candidate.parts:
-        raise ValueError("photo_manifest.csv relative_path is empty")
+        raise ValueError(f"{MEDIA_MANIFEST_NAME} relative_path is empty")
     if candidate.is_absolute():
-        raise ValueError(f"photo_manifest.csv relative_path must stay under workspace: {relative_path}")
+        raise ValueError(f"{MEDIA_MANIFEST_NAME} relative_path must stay under workspace: {relative_path}")
     normalized_parts: List[str] = []
     for part in candidate.parts:
         if part in {"", "."}:
             continue
         if part == "..":
             if not normalized_parts:
-                raise ValueError(f"photo_manifest.csv relative_path must stay under workspace: {relative_path}")
+                raise ValueError(f"{MEDIA_MANIFEST_NAME} relative_path must stay under workspace: {relative_path}")
             normalized_parts.pop()
             continue
         normalized_parts.append(part)
     if not normalized_parts:
-        raise ValueError(f"photo_manifest.csv relative_path must stay under workspace: {relative_path}")
+        raise ValueError(f"{MEDIA_MANIFEST_NAME} relative_path must stay under workspace: {relative_path}")
     return Path(*normalized_parts)
 
 
@@ -231,7 +231,7 @@ def validate_unique_output_paths(workspace_dir: Path, photo_rows: Sequence[Dict[
     for photo_row in photo_rows:
         relative_path = str(photo_row.get("relative_path") or "").strip()
         if not relative_path:
-            raise ValueError("photo_manifest.csv row missing relative_path")
+            raise ValueError(f"{MEDIA_MANIFEST_NAME} photo row missing relative_path")
         preview_path = build_output_paths(workspace_dir, relative_path)["preview_path"]
         existing_owner = preview_owner_by_path.get(preview_path)
         if existing_owner is None:
@@ -246,14 +246,11 @@ def serialize_workspace_path(workspace_dir: Path, path: Path) -> str:
     return path.resolve().relative_to(workspace_dir.resolve()).as_posix()
 
 
-def load_photo_manifest_rows(workspace_dir: Path) -> List[Dict[str, str]]:
-    manifest_path = workspace_dir / PHOTO_MANIFEST_NAME
+def load_photo_rows(workspace_dir: Path) -> List[Dict[str, str]]:
+    manifest_path = workspace_dir / MEDIA_MANIFEST_NAME
     if not manifest_path.exists():
         raise ValueError(f"Required manifest not found: {manifest_path}")
-    with manifest_path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        validate_required_columns(PHOTO_MANIFEST_NAME, PHOTO_MANIFEST_REQUIRED_COLUMNS, reader.fieldnames)
-        rows = list(reader)
+    rows = select_photo_rows(read_media_manifest(manifest_path))
     if not rows:
         raise ValueError(f"No photo rows found in {manifest_path}")
     return rows
@@ -515,18 +512,11 @@ def read_jpeg_dimensions(path: Path) -> Tuple[int, int]:
 def resolve_manifest_source_path(day_dir: Path, relative_path: str, source_value: str) -> Path:
     day_dir = day_dir.resolve()
     expected_relative_path = normalize_manifest_relative_path(relative_path)
-    expected_source_path = (day_dir / expected_relative_path).resolve()
-    try:
-        expected_source_path.relative_to(day_dir)
-    except ValueError as exc:
-        raise ValueError(f"photo_manifest.csv relative_path must stay under day_dir: {relative_path}") from exc
+    manifest_source_path = day_dir / expected_relative_path
+    expected_source_path = manifest_source_path.resolve()
 
     source_candidate = Path(source_value.strip())
     source_path = source_candidate.resolve() if source_candidate.is_absolute() else (day_dir / source_candidate).resolve()
-    try:
-        source_path.relative_to(day_dir)
-    except ValueError as exc:
-        raise ValueError(f"Source photo path must stay under {day_dir}: {source_value}") from exc
     if source_path != expected_source_path:
         raise ValueError(
             f"Source photo path does not match relative_path {relative_path}: {source_value}"
@@ -580,12 +570,12 @@ def process_manifest_row(
     photo_order_index = str(photo_row.get("photo_order_index") or "").strip()
     source_value = str(photo_row.get("path") or "").strip()
     if not photo_order_index:
-        raise ValueError(f"photo_manifest.csv row missing photo_order_index for {relative_path}")
+        raise ValueError(f"{MEDIA_MANIFEST_NAME} photo row missing photo_order_index for {relative_path}")
     if not source_value:
-        raise ValueError(f"photo_manifest.csv row missing path for {relative_path}")
+        raise ValueError(f"{MEDIA_MANIFEST_NAME} photo row missing path for {relative_path}")
     source_path = resolve_manifest_source_path(day_dir, relative_path, source_value)
     if not source_path.exists() or not source_path.is_file():
-        raise ValueError(f"Source photo listed in photo_manifest.csv does not exist: {source_path}")
+        raise ValueError(f"Source photo listed in {MEDIA_MANIFEST_NAME} does not exist: {source_path}")
     if source_path.suffix.lower() not in PHOTO_EXTENSIONS:
         raise ValueError(f"Unsupported photo extension for {source_path}")
     output_paths = build_output_paths(workspace_dir, relative_path)
@@ -622,7 +612,7 @@ def build_manifest_rows(
     thumb_long_edge: int = DEFAULT_THUMB_LONG_EDGE,
     preview_long_edge: int = DEFAULT_PREVIEW_LONG_EDGE,
 ) -> List[Dict[str, str]]:
-    photo_rows = load_photo_manifest_rows(workspace_dir)
+    photo_rows = load_photo_rows(workspace_dir)
     validate_unique_output_paths(workspace_dir, photo_rows)
     rows: List[Dict[str, str]] = []
     with Progress(
@@ -655,7 +645,7 @@ def extract_embedded_photo_jpg(
     preview_long_edge: int = DEFAULT_PREVIEW_LONG_EDGE,
     jobs: int = 4,
 ) -> int:
-    photo_rows = load_photo_manifest_rows(workspace_dir)
+    photo_rows = load_photo_rows(workspace_dir)
     validate_unique_output_paths(workspace_dir, photo_rows)
     if jobs < 1:
         raise ValueError("jobs must be at least 1")
