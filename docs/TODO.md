@@ -168,3 +168,16 @@ result = whisperx.align(
 - Design and implement a single canonical media indexing file that can serve both the legacy audio-first pipeline and the new image-only pipeline.
 - Keep media identity stable across both flows, with one shared contract for source paths, relative paths, timestamps, and logical ordering.
 - Ensure the shared index can be rebuilt without breaking legacy artifacts already stored under `_workspace`.
+
+## Review GUI and JSON Contract
+
+- Replace the current free-form naming model in the review GUI with an explicit choice:
+  - set number
+  - custom name
+- Add a dedicated type identifier field to every saved JSON artifact.
+- Use one canonical type list everywhere:
+  - `performance`
+  - `ceremony`
+  - `warmup`
+- Do not infer type from filename or display name.
+- Keep semantic type in a canonical field, because filenames and display names may be arbitrary and can otherwise mix up what a given JSON represents.
