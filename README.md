@@ -48,6 +48,36 @@ Optional image-only VLM extras:
 
 Install Python dependencies in your preferred environment, then run scripts directly with `python3`.
 
+## Dependency Groups With uv
+
+The project uses one `pyproject.toml` with two mutually exclusive dependency groups:
+
+- `gpu` (default): `torch==2.11.0+cu128`, `torchvision==0.26.0+cu128`, `xformers`
+- `autogluon`: `torch==2.9.0+cu128`, `torchvision==0.24.0+cu128`, `autogluon==1.5.0`
+
+Sync commands:
+
+```bash
+uv lock
+uv sync
+uv sync --no-default-groups --group autogluon
+uv sync --no-default-groups --group gpu
+```
+
+Run Python with explicit group selection:
+
+```bash
+uv run python
+uv run scripts/pipeline/export_media.py DAY
+uv run --no-default-groups --group autogluon python
+uv run --no-default-groups --group autogluon scripts/pipeline/export_media.py DAY
+```
+
+Important:
+
+- avoid `uv sync --only-group ...` for normal project work
+- `--only-group` performs an exact sync for that group only and can remove most installed packages, including project dependencies outside that group
+
 ## Data Model (Per Day)
 
 The pipeline runs per `day_dir`, for example:
