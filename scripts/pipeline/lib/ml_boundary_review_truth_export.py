@@ -61,10 +61,62 @@ def _stable_segment_id(display_set_id: str) -> str:
     return str(display_set_id).strip()
 
 
+def migrate_split_state_keys(
+    review_index_payload: dict[str, Any],
+    review_state: dict[str, Any],
+) -> dict[str, Any]:
+    splits = review_state.get("splits", {})
+    if not isinstance(splits, dict):
+        migrated_state = dict(review_state)
+        migrated_state["splits"] = {}
+        return migrated_state
+
+    performances = [
+        performance
+        for performance in review_index_payload.get("performances", [])
+        if isinstance(performance, dict)
+    ]
+    valid_base_ids = {
+        str(performance.get("set_id", "") or "").strip()
+        for performance in performances
+        if str(performance.get("set_id", "") or "").strip()
+    }
+
+    def base_set_candidates_for_number(performance_number: str) -> list[dict[str, Any]]:
+        candidates = [
+            performance
+            for performance in performances
+            if str(performance.get("performance_number", "") or "").strip() == performance_number
+        ]
+        return sorted(
+            candidates,
+            key=lambda item: (
+                str(item.get("performance_start_local", "") or ""),
+                str(item.get("set_id", "") or ""),
+            ),
+        )
+
+    migrated_splits: dict[str, list[dict[str, Any]]] = {}
+    for key, value in splits.items():
+        mapped_key = str(key).strip()
+        if mapped_key not in valid_base_ids:
+            candidates = base_set_candidates_for_number(mapped_key)
+            if candidates:
+                mapped_key = str(candidates[0].get("set_id", "") or mapped_key).strip()
+        target = migrated_splits.setdefault(mapped_key, [])
+        if isinstance(value, list):
+            target.extend(spec for spec in value if isinstance(spec, dict))
+
+    migrated_state = dict(review_state)
+    migrated_state["splits"] = migrated_splits
+    return migrated_state
+
+
 def rebuild_final_display_sets(
     review_index_payload: dict[str, Any],
     review_state: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    review_state = migrate_split_state_keys(review_index_payload, review_state)
     display_sets: list[dict[str, Any]] = []
     for original in review_index_payload.get("performances", []):
         if not isinstance(original, dict):

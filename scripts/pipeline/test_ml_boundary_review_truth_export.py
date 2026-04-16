@@ -95,6 +95,36 @@ def test_flatten_final_display_sets_uses_start_filename_split_ids_and_v1_segment
     ]
 
 
+def test_flatten_final_display_sets_migrates_legacy_split_keys_from_performance_number() -> None:
+    review_index_payload = {
+        "performances": [
+            _performance(
+                performance_number="101",
+                set_id="set-101",
+                photos=[
+                    _photo("p1", "a.jpg", "2026-03-23T11:00:00"),
+                    _photo("p2", "b.jpg", "2026-03-23T11:00:05"),
+                ],
+            )
+        ]
+    }
+    review_state = {
+        "splits": {
+            "101": [
+                {"start_filename": "b.jpg", "new_name": "Ceremony"},
+            ]
+        },
+        "merges": [],
+    }
+
+    rows = flatten_final_display_sets(rebuild_final_display_sets(review_index_payload, review_state))
+
+    assert rows == [
+        {"photo_id": "p1", "segment_id": "set-101", "segment_type": "performance"},
+        {"photo_id": "p2", "segment_id": "set-101::b.jpg", "segment_type": "ceremony"},
+    ]
+
+
 def test_flatten_final_display_sets_uses_final_merge_target_segment_for_all_merged_rows() -> None:
     review_index_payload = {
         "performances": [
