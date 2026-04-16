@@ -102,6 +102,10 @@ def _parse_gap_threshold_seconds(value: str) -> float:
         raise argparse.ArgumentTypeError(
             f"gap threshold seconds must be a finite number: {value}"
         )
+    if threshold <= 0.0:
+        raise argparse.ArgumentTypeError(
+            f"gap threshold seconds must be greater than zero: {value}"
+        )
     return threshold
 
 
@@ -217,7 +221,10 @@ def _read_reviewed_truth_csv(path: Path) -> list[dict[str, str]]:
         missing = sorted(required - fieldnames)
         if missing:
             raise ValueError(f"{path.name} missing required columns: {', '.join(missing)}")
-        return [dict(row) for row in reader]
+        rows = [dict(row) for row in reader]
+        if not rows:
+            raise ValueError(f"{path.name} is empty")
+        return rows
 
 
 def _manifest_photo_to_candidate_row(row: Mapping[str, str]) -> dict[str, object]:
