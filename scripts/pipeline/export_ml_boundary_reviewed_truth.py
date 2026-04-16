@@ -79,7 +79,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         review_index_payload = load_review_index_payload_json(index_path, day_dir=day_dir)
-        review_state = load_review_state_json(state_path)
+        review_state = load_review_state_json(state_path, day=str(review_index_payload.get("day", "") or ""))
         display_sets = rebuild_final_display_sets(review_index_payload, review_state)
         rows = flatten_final_display_sets(display_sets)
         atomic_write_csv(output_path, OUTPUT_HEADERS, rows)

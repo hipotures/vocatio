@@ -10,11 +10,30 @@ from . import review_index_loader
 VALID_SEGMENT_TYPES = {"performance", "ceremony", "warmup"}
 
 
-def load_review_state_json(path: Path | str) -> dict[str, Any]:
+def default_review_state(day: str = "") -> dict[str, Any]:
+    return {
+        "version": 2,
+        "day": day,
+        "updated_at": "",
+        "performances": {},
+        "splits": {},
+        "merges": [],
+    }
+
+
+def load_review_state_json(path: Path | str, *, day: str = "") -> dict[str, Any]:
     review_state_path = Path(path)
-    payload = json.loads(review_state_path.read_text(encoding="utf-8"))
+    if not review_state_path.exists():
+        return default_review_state(day)
+    try:
+        payload = json.loads(review_state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return default_review_state(day)
     if not isinstance(payload, dict):
-        raise ValueError(f"Review state must be a JSON object: {review_state_path}")
+        return default_review_state(day)
+    payload.setdefault("version", 2)
+    payload.setdefault("day", day)
+    payload.setdefault("updated_at", "")
     payload.setdefault("performances", {})
     payload.setdefault("splits", {})
     payload.setdefault("merges", [])
@@ -48,13 +67,19 @@ def merge_specs(review_state: dict[str, Any]) -> list[dict[str, Any]]:
     return [spec for spec in merges if isinstance(spec, dict)]
 
 
-def _display_name_to_segment_type(display_name: str) -> str:
+def _display_name_to_segment_type(display_name: str, *, original_performance_number: str, set_id: str) -> str:
     normalized = display_name.strip().lower()
+    original_normalized = original_performance_number.strip().lower()
     if normalized == "ceremony":
         return "ceremony"
     if normalized == "warmup":
         return "warmup"
-    return "performance"
+    if normalized == original_normalized:
+        return "performance"
+    raise ValueError(
+        f"Unknown explicit split name for display set {set_id}: {display_name}. "
+        "Use the canonical labels ceremony or warmup, or keep the original performance name."
+    )
 
 
 def _stable_segment_id(display_set_id: str) -> str:
@@ -157,6 +182,7 @@ def rebuild_final_display_sets(
                 {
                     "set_id": segment_ids[index],
                     "display_name": segment_names[index],
+                    "original_performance_number": original_number,
                     "photos": segment_photos,
                 }
             )
@@ -199,7 +225,12 @@ def flatten_final_display_sets(display_sets: Iterable[dict[str, Any]]) -> list[d
     for display_set in display_sets:
         display_set_id = _stable_segment_id(str(display_set.get("set_id", "") or ""))
         display_name = str(display_set.get("display_name", "") or "")
-        segment_type = _display_name_to_segment_type(display_name)
+        original_performance_number = str(display_set.get("original_performance_number", "") or "")
+        segment_type = _display_name_to_segment_type(
+            display_name,
+            original_performance_number=original_performance_number,
+            set_id=display_set_id,
+        )
         if segment_type not in VALID_SEGMENT_TYPES:
             raise ValueError(f"Unsupported segment type for display set {display_set_id}: {segment_type}")
         for photo in display_set.get("photos", []):

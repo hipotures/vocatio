@@ -1,11 +1,17 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
-from lib.ml_boundary_review_truth_export import flatten_final_display_sets, rebuild_final_display_sets
+from lib.ml_boundary_review_truth_export import (
+    flatten_final_display_sets,
+    load_review_state_json,
+    rebuild_final_display_sets,
+)
 
 
 def _photo(
@@ -123,6 +129,48 @@ def test_flatten_final_display_sets_migrates_legacy_split_keys_from_performance_
         {"photo_id": "p1", "segment_id": "set-101", "segment_type": "performance"},
         {"photo_id": "p2", "segment_id": "set-101::b.jpg", "segment_type": "ceremony"},
     ]
+
+
+def test_load_review_state_json_defaults_when_file_is_not_readable_json(tmp_path: Path) -> None:
+    state_path = tmp_path / "review_state.json"
+    state_path.write_text("{not valid json", encoding="utf-8")
+
+    state = load_review_state_json(state_path, day="20260323")
+
+    assert state == {
+        "version": 2,
+        "day": "20260323",
+        "updated_at": "",
+        "performances": {},
+        "splits": {},
+        "merges": [],
+    }
+
+
+def test_flatten_final_display_sets_rejects_unknown_explicit_split_names() -> None:
+    review_index_payload = {
+        "performances": [
+            _performance(
+                performance_number="105",
+                set_id="set-105",
+                photos=[
+                    _photo("p1", "IMG_0001.JPG", "2026-03-23T13:00:00"),
+                    _photo("p2", "IMG_0002.JPG", "2026-03-23T13:00:05"),
+                ],
+            )
+        ]
+    }
+    review_state = {
+        "splits": {
+            "set-105": [
+                {"start_filename": "IMG_0002.JPG", "new_name": "Awards"},
+            ]
+        },
+        "merges": [],
+    }
+
+    with pytest.raises(ValueError, match="Unknown explicit split name"):
+        flatten_final_display_sets(rebuild_final_display_sets(review_index_payload, review_state))
 
 
 def test_flatten_final_display_sets_uses_final_merge_target_segment_for_all_merged_rows() -> None:
