@@ -350,6 +350,13 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path) -
     }
     assert FakeTabularPredictor.instances[0].fit_calls[0]["train_rows"] == 1
     assert FakeTabularPredictor.instances[0].fit_calls[0]["validation_rows"] == 1
+    train_columns = FakeTabularPredictor.instances[0].fit_calls[0]["train_columns"]
+    assert "gap_34" in train_columns
+    assert "candidate_id" not in train_columns
+    assert "candidate_rule_name" not in train_columns
+    assert "frame_01_relpath" not in train_columns
+    assert "frame_01_timestamp" not in train_columns
+    assert "frame_01_preview_path" not in train_columns
 
 
 def test_train_cli_uses_multimodal_predictor_for_thumbnail_mode(
@@ -399,6 +406,10 @@ def test_train_cli_uses_multimodal_predictor_for_thumbnail_mode(
     assert exit_code == 0
     assert len(FakeTabularPredictor.instances) == 0
     assert len(FakeMultiModalPredictor.instances) == 2
+    train_columns = FakeMultiModalPredictor.instances[0].fit_calls[0]["train_columns"]
+    assert "gap_34" in train_columns
+    assert "candidate_id" not in train_columns
+    assert "frame_01_preview_path" not in train_columns
     assert FakeMultiModalPredictor.instances[0].fit_calls[0]["column_types"] == {
         "frame_01_thumb_path": "image_path",
         "frame_02_thumb_path": "image_path",
@@ -488,3 +499,55 @@ def test_train_cli_overwrite_replaces_existing_artifacts(monkeypatch, tmp_path: 
     training_metadata = json.loads((output_dir / TRAINING_METADATA_FILENAME).read_text(encoding="utf-8"))
     assert training_plan["mode"] == "tabular_only"
     assert training_metadata["mode"] == "tabular_only"
+
+
+def test_train_cli_overwrite_does_not_destroy_existing_artifacts_on_input_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    FakeTabularPredictor.instances.clear()
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    output_dir = tmp_path / "models" / "run-003"
+    _write_candidate_csv(
+        dataset_path,
+        [
+            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+        ],
+    )
+    _write_split_manifest(
+        split_manifest_path,
+        [{"day_id": "20250324", "split_name": "train"}],
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stale_payload = "{\"stale\": true}\n"
+    (output_dir / TRAINING_PLAN_FILENAME).write_text(stale_payload, encoding="utf-8")
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_tabular_predictor_class",
+        lambda: FakeTabularPredictor,
+    )
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_multimodal_predictor_class",
+        lambda: FakeMultiModalPredictor,
+    )
+
+    try:
+        main(
+            [
+                str(dataset_path),
+                "--split-manifest-csv",
+                str(split_manifest_path),
+                "--mode",
+                "tabular_only",
+                "--output-dir",
+                str(output_dir),
+                "--overwrite",
+            ]
+        )
+    except ValueError as exc:
+        assert "split manifest is missing day_id entries" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+    assert (output_dir / TRAINING_PLAN_FILENAME).read_text(encoding="utf-8") == stale_payload

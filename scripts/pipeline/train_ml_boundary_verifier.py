@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 from pathlib import Path
 from typing import Sequence
@@ -15,7 +16,7 @@ from lib.ml_boundary_training_data import (
     TrainingDataBundle,
     TrainingTable,
     image_feature_columns_for_mode as training_image_feature_columns_for_mode,
-    load_candidate_training_frame,
+    load_candidate_training_headers,
     load_training_data_bundle,
     validate_candidate_training_columns,
     validate_dataset_path,
@@ -85,9 +86,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def validate_dataset_contract(dataset_path: Path, mode: str) -> None:
     validate_mode(mode)
     validate_dataset_path(dataset_path)
-    dataset_frame = load_candidate_training_frame(dataset_path)
+    dataset_columns = load_candidate_training_headers(dataset_path)
     validate_candidate_training_columns(
-        dataset_frame.columns,
+        dataset_columns,
         mode=mode,
         resource_name=dataset_path.name,
     )
@@ -127,7 +128,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise FileNotFoundError(f"Split manifest does not exist: {split_manifest_path}")
 
     output_dir = Path(args.output_dir).expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
     _guard_existing_artifacts(output_dir, overwrite=args.overwrite)
 
     training_bundle = load_training_data_bundle(
@@ -135,35 +135,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         split_manifest_path=split_manifest_path,
         mode=args.mode,
     )
-    artifact_paths = _artifact_paths(output_dir)
+    staged_output_dir = _prepare_staging_output_dir(output_dir)
+    final_artifact_paths = _artifact_paths(output_dir)
 
-    training_summary = _train_predictors(
-        output_dir=output_dir,
-        training_bundle=training_bundle,
-        mode=args.mode,
-    )
+    try:
+        training_summary = _train_predictors(
+            output_dir=staged_output_dir,
+            summary_output_dir=output_dir,
+            training_bundle=training_bundle,
+            mode=args.mode,
+        )
 
-    atomic_write_json(
-        output_dir / TRAINING_PLAN_FILENAME,
-        _build_training_plan_payload(dataset_path, split_manifest_path, args.mode),
-    )
-    atomic_write_json(
-        output_dir / TRAINING_METADATA_FILENAME,
-        _build_training_metadata_payload(output_dir, args.mode, training_bundle, artifact_paths),
-    )
-    atomic_write_json(
-        output_dir / FEATURE_COLUMNS_FILENAME,
-        {
-            "shared_feature_columns": training_bundle.shared_feature_columns,
-            "segment_type_feature_columns": training_bundle.segment_type.feature_columns,
-            "boundary_feature_columns": training_bundle.boundary.feature_columns,
-            "image_feature_columns": training_bundle.image_feature_columns,
-        },
-    )
-    atomic_write_json(
-        output_dir / TRAINING_SUMMARY_FILENAME,
-        training_summary,
-    )
+        atomic_write_json(
+            staged_output_dir / TRAINING_PLAN_FILENAME,
+            _build_training_plan_payload(dataset_path, split_manifest_path, args.mode),
+        )
+        atomic_write_json(
+            staged_output_dir / TRAINING_METADATA_FILENAME,
+            _build_training_metadata_payload(output_dir, args.mode, training_bundle, final_artifact_paths),
+        )
+        atomic_write_json(
+            staged_output_dir / FEATURE_COLUMNS_FILENAME,
+            {
+                "shared_feature_columns": training_bundle.shared_feature_columns,
+                "segment_type_feature_columns": training_bundle.segment_type.feature_columns,
+                "boundary_feature_columns": training_bundle.boundary.feature_columns,
+                "image_feature_columns": training_bundle.image_feature_columns,
+            },
+        )
+        atomic_write_json(
+            staged_output_dir / TRAINING_SUMMARY_FILENAME,
+            training_summary,
+        )
+        _publish_staged_output(staged_output_dir, output_dir, overwrite=args.overwrite)
+    finally:
+        if staged_output_dir.exists():
+            shutil.rmtree(staged_output_dir)
 
     console.print(f"Wrote training artifacts to {output_dir}")
     return 0
@@ -181,20 +188,39 @@ def _artifact_paths(output_dir: Path) -> dict[str, Path]:
 
 
 def _guard_existing_artifacts(output_dir: Path, *, overwrite: bool) -> None:
+    if not output_dir.exists():
+        return
     artifact_paths = _artifact_paths(output_dir)
-    existing_paths = [path for path in artifact_paths.values() if path.exists()]
+    existing_paths = [path for path in artifact_paths.values() if path.exists()] if output_dir.is_dir() else [output_dir]
     if existing_paths and not overwrite:
         names = ", ".join(path.name for path in existing_paths)
         raise FileExistsError(
             f"Output artifacts already exist in {output_dir}: {names}. "
             "Use --overwrite to replace them."
         )
-    if overwrite:
-        for path in existing_paths:
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
+
+
+def _prepare_staging_output_dir(output_dir: Path) -> Path:
+    parent_dir = output_dir.parent if output_dir.parent != Path("") else Path(".")
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    staging_dir = parent_dir / f".{output_dir.name}.staging-{os.getpid()}"
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True, exist_ok=False)
+    return staging_dir
+
+
+def _publish_staged_output(staging_dir: Path, output_dir: Path, *, overwrite: bool) -> None:
+    if output_dir.exists():
+        if not overwrite:
+            raise FileExistsError(
+                f"Output artifacts already exist in {output_dir}. Use --overwrite to replace them."
+            )
+        if output_dir.is_dir():
+            shutil.rmtree(output_dir)
+        else:
+            output_dir.unlink()
+    staging_dir.rename(output_dir)
 
 
 def _build_training_plan_payload(
@@ -235,6 +261,7 @@ def _build_training_metadata_payload(
 def _train_predictors(
     *,
     output_dir: Path,
+    summary_output_dir: Path,
     training_bundle: TrainingDataBundle,
     mode: str,
 ) -> dict[str, dict[str, object]]:
@@ -258,7 +285,7 @@ def _train_predictors(
         )
         summary[predictor_name] = {
             "model_type": predictor.__class__.__name__,
-            "path": str(predictor_output_dir),
+            "path": str(summary_output_dir / f"{predictor_name}_model"),
             "eval_metric": "accuracy",
             "validation_score": _extract_validation_score(evaluation_payload, eval_metric="accuracy"),
             "fit_summary_excerpt": _fit_summary_excerpt(predictor.fit_summary()),

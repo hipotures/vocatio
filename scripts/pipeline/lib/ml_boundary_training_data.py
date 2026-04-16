@@ -120,6 +120,13 @@ def load_candidate_training_frame(dataset_path: Path) -> TrainingTable:
         return TrainingTable(rows, column_names=list(reader.fieldnames or []))
 
 
+def load_candidate_training_headers(dataset_path: Path) -> list[str]:
+    validate_dataset_path(dataset_path)
+    with dataset_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        return list(reader.fieldnames or [])
+
+
 def load_split_manifest_frame(split_manifest_path: Path) -> TrainingTable:
     with split_manifest_path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
