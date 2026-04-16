@@ -67,6 +67,8 @@ def build_candidate_rows(
         "candidate_count_excluded_missing_window": 0,
         "candidate_count_excluded_missing_artifacts": 0,
         "candidate_count_retained": 0,
+        "true_boundary_coverage_before_exclusions": 0,
+        "true_boundary_coverage_after_exclusions": 0,
     }
     candidate_rule_params_json = _build_rule_params_json(
         gap_threshold_seconds=gap_threshold_seconds
@@ -83,6 +85,19 @@ def build_candidate_rows(
 
         report["candidate_count_generated"] += 1
 
+        try:
+            left_photo_id = _require_non_blank_string(left_photo, "photo_id")
+            right_photo_id = _require_non_blank_string(right_photo, "photo_id")
+            left_truth = truth[left_photo_id]
+            right_truth = truth[right_photo_id]
+            is_true_boundary = left_truth.segment_id != right_truth.segment_id
+        except (KeyError, ValueError):
+            report["candidate_count_excluded_missing_artifacts"] += 1
+            continue
+
+        if is_true_boundary:
+            report["true_boundary_coverage_before_exclusions"] += 1
+
         window_start = index - WINDOW_RADIUS
         window_end = index + WINDOW_RADIUS + 1
         if window_start < 0 or window_end > len(ordered_photos):
@@ -90,10 +105,6 @@ def build_candidate_rows(
             continue
 
         try:
-            left_photo_id = _require_non_blank_string(left_photo, "photo_id")
-            right_photo_id = _require_non_blank_string(right_photo, "photo_id")
-            left_truth = truth[left_photo_id]
-            right_truth = truth[right_photo_id]
             window = ordered_photos[window_start:window_end]
 
             row: dict[str, object] = {
@@ -116,15 +127,11 @@ def build_candidate_rows(
                 "candidate_rule_name": candidate_rule_name,
                 "candidate_rule_version": candidate_rule_version,
                 "candidate_rule_params_json": candidate_rule_params_json,
+                "descriptor_schema_version": "",
+                "split_name": "",
                 "window_photo_ids": [],
                 "window_relative_paths": [],
             }
-            preserve_thumb_paths = any(
-                _extract_optional_workspace_path(photo, "thumb_path") for photo in window
-            )
-            preserve_preview_paths = any(
-                _extract_optional_workspace_path(photo, "preview_path") for photo in window
-            )
 
             for frame_offset, frame in enumerate(window, start=1):
                 suffix = f"{frame_offset:02d}"
@@ -136,14 +143,12 @@ def build_candidate_rows(
                 row[f"frame_{suffix}_timestamp"] = frame_timestamp
                 row["window_photo_ids"].append(frame_photo_id)
                 row["window_relative_paths"].append(frame_relpath)
-                if preserve_thumb_paths:
-                    row[f"frame_{suffix}_thumb_path"] = _extract_optional_workspace_path(
-                        frame, "thumb_path"
-                    )
-                if preserve_preview_paths:
-                    row[f"frame_{suffix}_preview_path"] = _extract_optional_workspace_path(
-                        frame, "preview_path"
-                    )
+                row[f"frame_{suffix}_thumb_path"] = _extract_optional_workspace_path(
+                    frame, "thumb_path"
+                )
+                row[f"frame_{suffix}_preview_path"] = _extract_optional_workspace_path(
+                    frame, "preview_path"
+                )
 
         except (KeyError, ValueError):
             report["candidate_count_excluded_missing_artifacts"] += 1
@@ -151,5 +156,7 @@ def build_candidate_rows(
 
         candidate_rows.append(row)
         report["candidate_count_retained"] += 1
+        if is_true_boundary:
+            report["true_boundary_coverage_after_exclusions"] += 1
 
     return candidate_rows, report

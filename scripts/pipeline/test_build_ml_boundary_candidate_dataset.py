@@ -36,6 +36,8 @@ def test_build_candidate_rows_excludes_candidates_without_full_window() -> None:
         "candidate_count_excluded_missing_window": 1,
         "candidate_count_excluded_missing_artifacts": 0,
         "candidate_count_retained": 0,
+        "true_boundary_coverage_before_exclusions": 1,
+        "true_boundary_coverage_after_exclusions": 0,
     }
 
 
@@ -70,6 +72,8 @@ def test_build_candidate_rows_preserves_ordered_frame_fields_and_labels() -> Non
         "candidate_count_excluded_missing_window": 0,
         "candidate_count_excluded_missing_artifacts": 0,
         "candidate_count_retained": 1,
+        "true_boundary_coverage_before_exclusions": 1,
+        "true_boundary_coverage_after_exclusions": 1,
     }
 
     row = rows[0]
@@ -102,6 +106,18 @@ def test_build_candidate_rows_preserves_ordered_frame_fields_and_labels() -> Non
     assert row["candidate_rule_name"] == "gap_threshold"
     assert row["candidate_rule_version"] == "gap-v1"
     assert row["candidate_rule_params_json"] == "{\"gap_threshold_seconds\":10.0}"
+    assert row["descriptor_schema_version"] == ""
+    assert row["split_name"] == ""
+    assert row["frame_01_thumb_path"] == ""
+    assert row["frame_02_thumb_path"] == ""
+    assert row["frame_03_thumb_path"] == ""
+    assert row["frame_04_thumb_path"] == ""
+    assert row["frame_05_thumb_path"] == ""
+    assert row["frame_01_preview_path"] == ""
+    assert row["frame_02_preview_path"] == ""
+    assert row["frame_03_preview_path"] == ""
+    assert row["frame_04_preview_path"] == ""
+    assert row["frame_05_preview_path"] == ""
 
 
 def test_build_candidate_rows_produces_deterministic_candidate_ids() -> None:
@@ -162,7 +178,7 @@ def test_build_candidate_rows_uses_right_side_segment_type_and_boundary_labels()
             {"photo_id": "p4", "segment_id": "s2", "segment_type": "ceremony"},
             {"photo_id": "p5", "segment_id": "s2", "segment_type": "ceremony"},
             {"photo_id": "p6", "segment_id": "s2", "segment_type": "ceremony"},
-            {"photo_id": "p7", "segment_id": "s2", "segment_type": "ceremony"},
+            {"photo_id": "p7", "segment_id": "s3", "segment_type": "warmup"},
         ]
     )
 
@@ -179,9 +195,58 @@ def test_build_candidate_rows_uses_right_side_segment_type_and_boundary_labels()
         "candidate_count_excluded_missing_window": 1,
         "candidate_count_excluded_missing_artifacts": 0,
         "candidate_count_retained": 1,
+        "true_boundary_coverage_before_exclusions": 1,
+        "true_boundary_coverage_after_exclusions": 0,
     }
     assert len(rows) == 1
     assert rows[0]["center_left_photo_id"] == "p4"
     assert rows[0]["center_right_photo_id"] == "p5"
     assert rows[0]["segment_type"] == "ceremony"
     assert rows[0]["boundary"] is False
+
+
+def test_build_candidate_rows_emits_schema_stable_proxy_columns_when_missing() -> None:
+    photos = [
+        {"photo_id": "p1", "order_idx": 1, "timestamp": 0.0, "relative_path": "cam/p1.jpg"},
+        {"photo_id": "p2", "order_idx": 2, "timestamp": 1.0, "relative_path": "cam/p2.jpg"},
+        {"photo_id": "p3", "order_idx": 3, "timestamp": 2.0, "relative_path": "cam/p3.jpg"},
+        {"photo_id": "p4", "order_idx": 4, "timestamp": 30.0, "relative_path": "cam/p4.jpg"},
+        {"photo_id": "p5", "order_idx": 5, "timestamp": 31.0, "relative_path": "cam/p5.jpg"},
+    ]
+    truth = build_final_photo_truth(
+        [
+            {"photo_id": "p1", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p2", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p3", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p4", "segment_id": "s2", "segment_type": "ceremony"},
+            {"photo_id": "p5", "segment_id": "s2", "segment_type": "ceremony"},
+        ]
+    )
+
+    rows, _ = build_candidate_rows(
+        photos=photos,
+        truth=truth,
+        gap_threshold_seconds=10.0,
+        day_id="20250325",
+        candidate_rule_version="gap-v1",
+    )
+
+    row = rows[0]
+    expected_empty_fields = [
+        "frame_01_thumb_path",
+        "frame_02_thumb_path",
+        "frame_03_thumb_path",
+        "frame_04_thumb_path",
+        "frame_05_thumb_path",
+        "frame_01_preview_path",
+        "frame_02_preview_path",
+        "frame_03_preview_path",
+        "frame_04_preview_path",
+        "frame_05_preview_path",
+        "descriptor_schema_version",
+        "split_name",
+    ]
+
+    for field_name in expected_empty_fields:
+        assert field_name in row
+        assert row[field_name] == ""
