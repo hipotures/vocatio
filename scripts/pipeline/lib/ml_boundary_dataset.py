@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from hashlib import sha1
 import json
 import math
+from datetime import datetime, timezone
+from hashlib import sha1
 
 
-def _normalize_timestamp(value: object) -> float:
+def normalize_timestamp(value: object) -> float:
     if value is None:
         raise ValueError("timestamp is required and must not be blank")
 
@@ -62,7 +62,7 @@ def sort_photo_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     return sorted(
         rows,
         key=lambda row: (
-            _normalize_timestamp(row.get("timestamp")),
+            normalize_timestamp(row.get("timestamp")),
             _normalize_order_idx(row.get("order_idx")),
             _normalize_photo_id(row.get("photo_id")),
         ),
