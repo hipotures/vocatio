@@ -725,6 +725,14 @@ def _required_heldout_coverage_error(
     return ValueError(message)
 
 
+def _raise_required_heldout_coverage_error(
+    required_heldout_classes: Sequence[str],
+    *,
+    reason: str | None = None,
+) -> None:
+    raise _required_heldout_coverage_error(required_heldout_classes, reason=reason)
+
+
 def _build_global_stratified_split_rows(
     candidate_rows: Sequence[dict[str, str]],
     split_config: SplitConfig,
@@ -743,34 +751,51 @@ def _build_global_stratified_split_rows(
             split_config,
             minimum_counts=_stratified_minimum_split_counts(required_heldout_classes),
         )
-        if _can_preserve_full_heldout_strata(strata, target_counts=target_counts):
-            assignments = _reserve_full_heldout_strata_assignments(strata)
-        else:
+    except ValueError as exc:
+        if required_heldout_classes and str(exc) == "minimum split counts exceed available candidate rows":
+            _raise_required_heldout_coverage_error(
+                required_heldout_classes,
+                reason=str(exc),
+            )
+        raise
+
+    if _can_preserve_full_heldout_strata(strata, target_counts=target_counts):
+        assignments = _reserve_full_heldout_strata_assignments(strata)
+    else:
+        try:
             assignments = _reserve_required_heldout_assignments(
                 strata,
                 required_heldout_classes=required_heldout_classes,
             )
-        preassigned_counts = {
-            split_name: sum(1 for value in assignments.values() if value == split_name)
-            for split_name in SPLIT_NAMES
-        }
-        remaining_target_counts = {
-            split_name: target_counts[split_name] - preassigned_counts[split_name]
-            for split_name in SPLIT_NAMES
-        }
-        if any(value < 0 for value in remaining_target_counts.values()):
-            raise ValueError("Reserved held-out assignments exceed target split counts")
-        counts_by_stratum = _allocate_remaining_stratified_counts(
-            strata,
-            target_counts=remaining_target_counts,
-        )
-    except ValueError as exc:
+        except ValueError as exc:
+            if required_heldout_classes and str(exc).startswith(
+                "Unable to reserve held-out coverage for required segment types:"
+            ):
+                _raise_required_heldout_coverage_error(
+                    required_heldout_classes,
+                    reason=str(exc),
+                )
+            raise
+
+    preassigned_counts = {
+        split_name: sum(1 for value in assignments.values() if value == split_name)
+        for split_name in SPLIT_NAMES
+    }
+    remaining_target_counts = {
+        split_name: target_counts[split_name] - preassigned_counts[split_name]
+        for split_name in SPLIT_NAMES
+    }
+    if any(value < 0 for value in remaining_target_counts.values()):
         if required_heldout_classes:
-            raise _required_heldout_coverage_error(
+            _raise_required_heldout_coverage_error(
                 required_heldout_classes,
-                reason=str(exc),
-            ) from exc
+                reason="Reserved held-out assignments exceed target split counts",
+            )
         return _build_global_random_split_rows(candidate_rows, split_config), "global_random"
+    counts_by_stratum = _allocate_remaining_stratified_counts(
+        strata,
+        target_counts=remaining_target_counts,
+    )
 
     for stratum_key in sorted(strata):
         candidate_ids = list(strata[stratum_key])
@@ -787,7 +812,7 @@ def _build_global_stratified_split_rows(
         required_heldout_classes=required_heldout_classes,
     ):
         if required_heldout_classes:
-            raise _required_heldout_coverage_error(
+            _raise_required_heldout_coverage_error(
                 required_heldout_classes,
                 reason="coverage check failed after stratified allocation",
             )

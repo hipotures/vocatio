@@ -352,6 +352,30 @@ def test_build_corpus_split_rows_rejects_duplicate_candidate_ids() -> None:
         raise AssertionError("expected duplicate candidate_id values to be rejected")
 
 
+def test_global_stratified_rejects_duplicate_candidate_ids() -> None:
+    first_row = _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=1)
+    duplicate_row = _candidate_row(day_id="20250326", segment_type="ceremony", boundary="1", offset=2)
+    duplicate_row["candidate_id"] = first_row["candidate_id"]
+    third_row = _candidate_row(day_id="20250327", segment_type="warmup", boundary="0", offset=3)
+
+    try:
+        _build_global_stratified_split_rows(
+            [first_row, duplicate_row, third_row],
+            SplitConfig(
+                strategy="global_stratified",
+                train_fraction=0.70,
+                validation_fraction=0.15,
+                test_fraction=0.15,
+                seed=42,
+            ),
+        )
+    except ValueError as exc:
+        assert "merged candidate rows contain duplicate candidate_id values" in str(exc)
+        assert first_row["candidate_id"] in str(exc)
+    else:
+        raise AssertionError("expected duplicate candidate_id values to be rejected")
+
+
 def test_main_default_global_stratified_preserves_required_heldout_classes_when_supported(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -666,6 +690,95 @@ def test_global_stratified_raises_when_required_heldout_coverage_is_impossible()
         assert "ceremony" in str(exc)
     else:
         raise AssertionError("expected impossible held-out coverage to raise a ValueError")
+
+
+def test_global_stratified_preserves_unrelated_value_errors_when_required_heldout_classes_are_set() -> None:
+    candidate_rows = []
+    for offset, segment_type in enumerate(("performance", "ceremony", "performance"), start=1):
+        row = _candidate_row(day_id="20250325", segment_type=segment_type, boundary="0", offset=offset)
+        row["candidate_id"] = f"{segment_type}-c{offset:02d}"
+        candidate_rows.append(row)
+
+    try:
+        _build_global_stratified_split_rows(
+            candidate_rows,
+            SplitConfig(
+                strategy="global_stratified",
+                train_fraction=0.80,
+                validation_fraction=0.20,
+                test_fraction=0.20,
+                seed=7,
+            ),
+            required_heldout_classes=["performance", "ceremony"],
+        )
+    except ValueError as exc:
+        assert str(exc) == "train_fraction + validation_fraction + test_fraction must equal 1.0"
+    else:
+        raise AssertionError("expected invalid split fractions to preserve the original ValueError")
+
+
+def test_main_default_global_stratified_fails_fast_when_required_heldout_coverage_is_impossible(
+    tmp_path: Path, monkeypatch
+) -> None:
+    day_dirs = []
+    for day_id in ("20250324", "20250325"):
+        day_dir = tmp_path / day_id
+        workspace_dir = tmp_path / f"{day_id}DWC"
+        day_dir.mkdir(parents=True)
+        workspace_dir.mkdir(parents=True)
+        (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+        day_dirs.append(day_dir)
+
+    recorded_commands: list[list[str]] = []
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        recorded_commands.append(command_values)
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            day_dir = Path(command_values[2]).resolve()
+            workspace_dir = resolve_workspace_dir(day_dir, None)
+            rows = []
+            if day_dir.name == "20250324":
+                for index in range(5):
+                    row = _candidate_row(day_id=day_dir.name, segment_type="performance", boundary="0", offset=index + 1)
+                    row["candidate_id"] = f"{day_dir.name}-performance-c{index:02d}"
+                    rows.append(row)
+            else:
+                for index in range(3):
+                    row = _candidate_row(day_id=day_dir.name, segment_type="performance", boundary="0", offset=index + 1)
+                    row["candidate_id"] = f"{day_dir.name}-performance-c{index:02d}"
+                    rows.append(row)
+                rare_row = _candidate_row(day_id=day_dir.name, segment_type="ceremony", boundary="1", offset=50)
+                rare_row["candidate_id"] = f"{day_dir.name}-ceremony-only"
+                rows.append(rare_row)
+            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+
+    corpus_workspace = tmp_path / "corpus"
+    try:
+        main(
+            [str(day) for day in day_dirs]
+            + [
+                "--corpus-workspace",
+                str(corpus_workspace),
+                "--prepare-only",
+            ]
+        )
+    except ValueError as exc:
+        assert "global_stratified cannot satisfy required held-out classes" in str(exc)
+        assert "ceremony" in str(exc)
+    else:
+        raise AssertionError("expected main() to fail when default held-out coverage is impossible")
+
+    assert not (corpus_workspace / "ml_boundary_splits.csv").exists()
+    assert not (corpus_workspace / "ml_boundary_pipeline_summary.json").exists()
+    assert not any("train_ml_boundary_verifier.py" in " ".join(command) for command in recorded_commands)
+    assert not any(
+        "validate_ml_boundary_dataset.py" in " ".join(command)
+        and str(corpus_workspace / CORPUS_CANDIDATES_FILENAME) in command
+        for command in recorded_commands
+    )
 
 
 def test_resolve_split_config_defaults_to_global_stratified(tmp_path: Path) -> None:
