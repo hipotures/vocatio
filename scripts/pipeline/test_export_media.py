@@ -119,13 +119,13 @@ class ExportMediaCliTests(unittest.TestCase):
             lines,
             [
                 f"Day directory: {day_dir}",
-                f"Workspace directory: {workspace_dir}",
-                f"Output manifest: {output_path}",
                 "Photo source directories:",
                 f"  - {day_dir / 'p-a7r5'}",
                 f"  - {day_dir / 'p-z9'}",
                 "Video source directories:",
                 f"  - {day_dir / 'v-gh7'}",
+                f"Workspace directory: {workspace_dir}",
+                f"Output manifest: {output_path}",
             ],
         )
 

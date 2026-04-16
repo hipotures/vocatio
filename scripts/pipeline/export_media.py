@@ -1051,11 +1051,7 @@ def build_export_context_lines(
     output_path: Path,
     streams_to_process: Sequence[Mapping[str, str]],
 ) -> List[str]:
-    lines = [
-        f"Day directory: {day_dir}",
-        f"Workspace directory: {workspace_dir}",
-        f"Output manifest: {output_path}",
-    ]
+    lines = [f"Day directory: {day_dir}"]
     for media_type, label in (("photo", "Photo source directories"), ("video", "Video source directories")):
         source_dirs = sorted(
             {
@@ -1068,6 +1064,12 @@ def build_export_context_lines(
             continue
         lines.append(f"{label}:")
         lines.extend(f"  - {source_dir}" for source_dir in source_dirs)
+    lines.extend(
+        [
+            f"Workspace directory: {workspace_dir}",
+            f"Output manifest: {output_path}",
+        ]
+    )
     return lines
 
 
