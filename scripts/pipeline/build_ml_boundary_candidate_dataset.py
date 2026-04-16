@@ -1,14 +1,154 @@
+#!/usr/bin/env python3
+
 from __future__ import annotations
 
+import argparse
+import csv
 import json
-from typing import Mapping
+from pathlib import Path
+from typing import Mapping, Optional, Sequence
 
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+
+from lib.media_manifest import read_media_manifest, select_photo_rows
+from lib.pipeline_io import atomic_write_csv, atomic_write_json
+from lib.workspace_dir import resolve_workspace_dir
 from lib.ml_boundary_dataset import canonical_candidate_id, normalize_timestamp, sort_photo_rows
-from lib.ml_boundary_truth import FinalPhotoTruth
+from lib.ml_boundary_truth import FinalPhotoTruth, build_final_photo_truth
+
+
+console = Console()
 
 WINDOW_SIZE = 5
 WINDOW_RADIUS = 2
 DEFAULT_CANDIDATE_RULE_NAME = "gap_threshold"
+DEFAULT_TRUTH_FILENAME = "ml_boundary_reviewed_truth.csv"
+DEFAULT_OUTPUT_FILENAME = "ml_boundary_candidates.csv"
+DEFAULT_ATTRITION_FILENAME = "ml_boundary_attrition.json"
+DEFAULT_REPORT_FILENAME = "ml_boundary_dataset_report.json"
+CANDIDATE_ROW_HEADERS = [
+    "candidate_id",
+    "day_id",
+    "window_size",
+    "center_left_photo_id",
+    "center_right_photo_id",
+    "left_segment_id",
+    "right_segment_id",
+    "left_segment_type",
+    "right_segment_type",
+    "segment_type",
+    "boundary",
+    "candidate_rule_name",
+    "candidate_rule_version",
+    "candidate_rule_params_json",
+    "descriptor_schema_version",
+    "split_name",
+    "window_photo_ids",
+    "window_relative_paths",
+    "frame_01_photo_id",
+    "frame_02_photo_id",
+    "frame_03_photo_id",
+    "frame_04_photo_id",
+    "frame_05_photo_id",
+    "frame_01_relpath",
+    "frame_02_relpath",
+    "frame_03_relpath",
+    "frame_04_relpath",
+    "frame_05_relpath",
+    "frame_01_timestamp",
+    "frame_02_timestamp",
+    "frame_03_timestamp",
+    "frame_04_timestamp",
+    "frame_05_timestamp",
+    "frame_01_thumb_path",
+    "frame_02_thumb_path",
+    "frame_03_thumb_path",
+    "frame_04_thumb_path",
+    "frame_05_thumb_path",
+    "frame_01_preview_path",
+    "frame_02_preview_path",
+    "frame_03_preview_path",
+    "frame_04_preview_path",
+    "frame_05_preview_path",
+]
+ATTRITION_REPORT_KEYS = [
+    "candidate_count_generated",
+    "candidate_count_excluded_missing_window",
+    "candidate_count_excluded_missing_artifacts",
+    "candidate_count_retained",
+    "true_boundary_coverage_before_exclusions",
+    "true_boundary_coverage_after_exclusions",
+]
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build an ML boundary candidate dataset CSV and attrition reports from media_manifest.csv and reviewed truth."
+    )
+    parser.add_argument("day_dir", help="Path to a single day directory like /data/20260323")
+    parser.add_argument(
+        "--workspace-dir",
+        help="Directory that holds ML boundary artifacts. Default: DAY/_workspace",
+    )
+    parser.add_argument(
+        "--manifest-csv",
+        help="Input media manifest filename or absolute path. Default: WORKSPACE/media_manifest.csv",
+    )
+    parser.add_argument(
+        "--truth-csv",
+        help=f"Input reviewed truth CSV filename or absolute path. Default: WORKSPACE/{DEFAULT_TRUTH_FILENAME}",
+    )
+    parser.add_argument(
+        "--output-csv",
+        help=f"Output candidate CSV filename or absolute path. Default: WORKSPACE/{DEFAULT_OUTPUT_FILENAME}",
+    )
+    parser.add_argument(
+        "--attrition-json",
+        help=f"Output attrition JSON filename or absolute path. Default: WORKSPACE/{DEFAULT_ATTRITION_FILENAME}",
+    )
+    parser.add_argument(
+        "--report-json",
+        help=f"Output dataset report JSON filename or absolute path. Default: WORKSPACE/{DEFAULT_REPORT_FILENAME}",
+    )
+    parser.add_argument(
+        "--gap-threshold-seconds",
+        type=float,
+        default=20.0,
+        help="Minimum center-gap size in seconds for generating a candidate. Default: 20.0",
+    )
+    parser.add_argument(
+        "--candidate-rule-version",
+        default="gap-v1",
+        help="Candidate generation rule version recorded in the dataset. Default: gap-v1",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing output files",
+    )
+    return parser.parse_args(argv)
+
+
+def _progress() -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        expand=False,
+        console=console,
+    )
 
 
 def _require_non_blank_string(row: Mapping[str, object], field_name: str) -> str:
@@ -40,6 +180,74 @@ def _build_rule_params_json(*, gap_threshold_seconds: float) -> str:
         ensure_ascii=True,
         sort_keys=True,
     )
+
+
+def _resolve_workspace_path(workspace_dir: Path, value: Optional[str], default_name: str) -> Path:
+    if not value:
+        return workspace_dir / default_name
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return candidate
+    return workspace_dir / candidate
+
+
+def _read_reviewed_truth_csv(path: Path) -> list[dict[str, str]]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Truth CSV does not exist: {path}")
+
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = set(reader.fieldnames or ())
+        required = {"photo_id", "segment_id", "segment_type"}
+        missing = sorted(required - fieldnames)
+        if missing:
+            raise ValueError(f"{path.name} missing required columns: {', '.join(missing)}")
+        return [dict(row) for row in reader]
+
+
+def _manifest_photo_to_candidate_row(row: Mapping[str, str]) -> dict[str, object]:
+    start_epoch_ms = str(row.get("start_epoch_ms") or "").strip()
+    if not start_epoch_ms:
+        raise ValueError("start_epoch_ms is required and must not be blank")
+
+    timestamp_seconds = float(start_epoch_ms) / 1000.0
+    return {
+        "photo_id": row.get("photo_id", ""),
+        "order_idx": row.get("photo_order_index", ""),
+        "timestamp": timestamp_seconds,
+        "relative_path": row.get("relative_path", ""),
+    }
+
+
+def _serialize_candidate_row(row: Mapping[str, object]) -> dict[str, object]:
+    serialized: dict[str, object] = {}
+    for header in CANDIDATE_ROW_HEADERS:
+        value = row.get(header, "")
+        if header in {"window_photo_ids", "window_relative_paths"}:
+            serialized[header] = json.dumps(
+                value if isinstance(value, list) else [],
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            continue
+        serialized[header] = value
+    return serialized
+
+
+def _build_dataset_report(
+    *,
+    day_id: str,
+    gap_threshold_seconds: float,
+    candidate_rule_version: str,
+    attrition: Mapping[str, int],
+) -> dict[str, object]:
+    return {
+        "day_id": day_id,
+        "candidate_rule_name": DEFAULT_CANDIDATE_RULE_NAME,
+        "candidate_rule_version": candidate_rule_version,
+        "gap_threshold_seconds": float(gap_threshold_seconds),
+        **{key: int(attrition[key]) for key in ATTRITION_REPORT_KEYS},
+    }
 
 
 def build_candidate_rows(
@@ -160,3 +368,80 @@ def build_candidate_rows(
             report["true_boundary_coverage_after_exclusions"] += 1
 
     return candidate_rows, report
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv)
+    day_dir = Path(args.day_dir).expanduser().resolve()
+    workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
+    manifest_path = _resolve_workspace_path(workspace_dir, args.manifest_csv, "media_manifest.csv")
+    truth_path = _resolve_workspace_path(workspace_dir, args.truth_csv, DEFAULT_TRUTH_FILENAME)
+    output_csv_path = _resolve_workspace_path(workspace_dir, args.output_csv, DEFAULT_OUTPUT_FILENAME)
+    attrition_json_path = _resolve_workspace_path(
+        workspace_dir, args.attrition_json, DEFAULT_ATTRITION_FILENAME
+    )
+    report_json_path = _resolve_workspace_path(workspace_dir, args.report_json, DEFAULT_REPORT_FILENAME)
+
+    if not args.overwrite:
+        existing_outputs = [
+            path
+            for path in (output_csv_path, attrition_json_path, report_json_path)
+            if path.exists()
+        ]
+        if existing_outputs:
+            raise SystemExit(
+                f"Refusing to overwrite existing outputs: {', '.join(str(path) for path in existing_outputs)}"
+            )
+
+    day_id = day_dir.name
+
+    with _progress() as progress:
+        read_manifest_task = progress.add_task("Read manifest".ljust(25), total=1)
+        manifest_rows = read_media_manifest(manifest_path)
+        photo_rows = select_photo_rows(manifest_rows)
+        if not photo_rows:
+            raise ValueError(f"{manifest_path.name} contains no photo rows")
+        candidate_photo_rows = [_manifest_photo_to_candidate_row(row) for row in photo_rows]
+        progress.advance(read_manifest_task)
+
+        read_truth_task = progress.add_task("Read reviewed truth".ljust(25), total=1)
+        truth_rows = _read_reviewed_truth_csv(truth_path)
+        truth = build_final_photo_truth(truth_rows)
+        progress.advance(read_truth_task)
+
+        build_task = progress.add_task("Build candidates".ljust(25), total=1)
+        candidate_rows, attrition = build_candidate_rows(
+            photos=candidate_photo_rows,
+            truth=truth,
+            gap_threshold_seconds=args.gap_threshold_seconds,
+            day_id=day_id,
+            candidate_rule_version=args.candidate_rule_version,
+        )
+        progress.advance(build_task)
+
+        write_task = progress.add_task("Write outputs".ljust(25), total=3)
+        serialized_rows = [_serialize_candidate_row(row) for row in candidate_rows]
+        dataset_report = _build_dataset_report(
+            day_id=day_id,
+            gap_threshold_seconds=args.gap_threshold_seconds,
+            candidate_rule_version=args.candidate_rule_version,
+            attrition=attrition,
+        )
+        atomic_write_csv(output_csv_path, CANDIDATE_ROW_HEADERS, serialized_rows)
+        progress.advance(write_task)
+        atomic_write_json(
+            attrition_json_path,
+            {key: int(attrition[key]) for key in ATTRITION_REPORT_KEYS},
+        )
+        progress.advance(write_task)
+        atomic_write_json(report_json_path, dataset_report)
+        progress.advance(write_task)
+
+    console.print(
+        f"Wrote {len(candidate_rows)} ML boundary candidate row(s) to {output_csv_path}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,11 +1,60 @@
+import csv
+import json
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
-from build_ml_boundary_candidate_dataset import build_candidate_rows
+from build_ml_boundary_candidate_dataset import build_candidate_rows, main
+from lib.image_pipeline_contracts import MEDIA_MANIFEST_HEADERS
 from lib.ml_boundary_truth import build_final_photo_truth
+
+
+def _write_media_manifest(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _write_truth_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["photo_id", "segment_id", "segment_type"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _build_manifest_photo_row(
+    *,
+    day: str,
+    photo_id: str,
+    relative_path: str,
+    photo_order_index: int,
+    start_epoch_ms: int,
+) -> dict[str, str]:
+    row = {header: "" for header in MEDIA_MANIFEST_HEADERS}
+    row.update(
+        {
+            "day": day,
+            "stream_id": "p-a7r5",
+            "device": "a7r5",
+            "media_type": "photo",
+            "path": f"/data/{day}/{relative_path}",
+            "relative_path": relative_path,
+            "media_id": photo_id,
+            "photo_id": photo_id,
+            "filename": Path(relative_path).name,
+            "extension": ".jpg",
+            "capture_time_local": "2025-03-25T08:00:00",
+            "capture_subsec": "000",
+            "photo_order_index": str(photo_order_index),
+            "start_local": "2025-03-25T08:00:00",
+            "start_epoch_ms": str(start_epoch_ms),
+        }
+    )
+    return row
 
 
 def test_build_candidate_rows_excludes_candidates_without_full_window() -> None:
@@ -287,3 +336,120 @@ def test_build_candidate_rows_counts_missing_artifacts_for_generated_true_bounda
         "true_boundary_coverage_before_exclusions": 1,
         "true_boundary_coverage_after_exclusions": 0,
     }
+
+
+def test_main_writes_candidate_csv_and_reports_from_manifest_and_truth() -> None:
+    with TemporaryDirectory() as tmp:
+        day_dir = Path(tmp) / "20250325"
+        workspace_dir = day_dir / "_workspace"
+        day_dir.mkdir()
+        workspace_dir.mkdir()
+
+        manifest_path = workspace_dir / "media_manifest.csv"
+        truth_path = workspace_dir / "ml_boundary_reviewed_truth.csv"
+        output_csv = workspace_dir / "ml_boundary_candidates.csv"
+        attrition_json = workspace_dir / "ml_boundary_attrition.json"
+        report_json = workspace_dir / "ml_boundary_dataset_report.json"
+
+        manifest_rows = [
+            _build_manifest_photo_row(
+                day="20250325",
+                photo_id="p1",
+                relative_path="p-a7r5/p1.jpg",
+                photo_order_index=0,
+                start_epoch_ms=0,
+            ),
+            _build_manifest_photo_row(
+                day="20250325",
+                photo_id="p2",
+                relative_path="p-a7r5/p2.jpg",
+                photo_order_index=1,
+                start_epoch_ms=1_000,
+            ),
+            _build_manifest_photo_row(
+                day="20250325",
+                photo_id="p3",
+                relative_path="p-a7r5/p3.jpg",
+                photo_order_index=2,
+                start_epoch_ms=2_000,
+            ),
+            _build_manifest_photo_row(
+                day="20250325",
+                photo_id="p4",
+                relative_path="p-a7r5/p4.jpg",
+                photo_order_index=3,
+                start_epoch_ms=30_000,
+            ),
+            _build_manifest_photo_row(
+                day="20250325",
+                photo_id="p5",
+                relative_path="p-a7r5/p5.jpg",
+                photo_order_index=4,
+                start_epoch_ms=31_000,
+            ),
+        ]
+        truth_rows = [
+            {"photo_id": "p1", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p2", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p3", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p4", "segment_id": "s2", "segment_type": "ceremony"},
+            {"photo_id": "p5", "segment_id": "s2", "segment_type": "ceremony"},
+        ]
+
+        _write_media_manifest(manifest_path, manifest_rows)
+        _write_truth_csv(truth_path, truth_rows)
+
+        exit_code = main(
+            [
+                str(day_dir),
+                "--workspace-dir",
+                str(workspace_dir),
+                "--gap-threshold-seconds",
+                "10.0",
+            ]
+        )
+
+        assert exit_code == 0
+        assert output_csv.is_file()
+        assert attrition_json.is_file()
+        assert report_json.is_file()
+
+        with output_csv.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+
+        assert len(rows) == 1
+        assert rows[0]["day_id"] == "20250325"
+        assert rows[0]["center_left_photo_id"] == "p3"
+        assert rows[0]["center_right_photo_id"] == "p4"
+        assert rows[0]["segment_type"] == "ceremony"
+        assert rows[0]["boundary"] == "True"
+        assert json.loads(rows[0]["window_photo_ids"]) == ["p1", "p2", "p3", "p4", "p5"]
+        assert json.loads(rows[0]["window_relative_paths"]) == [
+            "p-a7r5/p1.jpg",
+            "p-a7r5/p2.jpg",
+            "p-a7r5/p3.jpg",
+            "p-a7r5/p4.jpg",
+            "p-a7r5/p5.jpg",
+        ]
+
+        attrition_payload = json.loads(attrition_json.read_text(encoding="utf-8"))
+        assert attrition_payload == {
+            "candidate_count_generated": 1,
+            "candidate_count_excluded_missing_window": 0,
+            "candidate_count_excluded_missing_artifacts": 0,
+            "candidate_count_retained": 1,
+            "true_boundary_coverage_before_exclusions": 1,
+            "true_boundary_coverage_after_exclusions": 1,
+        }
+
+        report_payload = json.loads(report_json.read_text(encoding="utf-8"))
+        assert report_payload["day_id"] == "20250325"
+        assert report_payload["candidate_rule_name"] == "gap_threshold"
+        assert report_payload["candidate_rule_version"] == "gap-v1"
+        assert report_payload["gap_threshold_seconds"] == 10.0
+        assert report_payload["candidate_count_generated"] == 1
+        assert report_payload["candidate_count_excluded_missing_window"] == 0
+        assert report_payload["candidate_count_excluded_missing_artifacts"] == 0
+        assert report_payload["candidate_count_retained"] == 1
+        assert report_payload["true_boundary_coverage_before_exclusions"] == 1
+        assert report_payload["true_boundary_coverage_after_exclusions"] == 1
