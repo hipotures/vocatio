@@ -43,6 +43,8 @@ DEFAULT_TRAIN_FRACTION = 0.70
 DEFAULT_VALIDATION_FRACTION = 0.15
 DEFAULT_TEST_FRACTION = 0.15
 DEFAULT_SPLIT_SEED = 42
+SPLIT_NAMES = ("train", "validation", "test")
+HELDOUT_SPLIT_NAMES = ("validation", "test")
 
 
 @dataclass(frozen=True)
@@ -346,8 +348,13 @@ def _validate_corpus_size(merged_rows: Sequence[dict[str, str]]) -> None:
         )
 
 
-def _split_counts_for_total(total_rows: int, split_config: SplitConfig) -> dict[str, int]:
-    split_names = ("train", "validation", "test")
+def _split_counts_for_total(
+    total_rows: int,
+    split_config: SplitConfig,
+    *,
+    minimum_counts: dict[str, int] | None = None,
+) -> dict[str, int]:
+    split_names = SPLIT_NAMES
     total_fraction = (
         split_config.train_fraction
         + split_config.validation_fraction
@@ -355,13 +362,22 @@ def _split_counts_for_total(total_rows: int, split_config: SplitConfig) -> dict[
     )
     if not math.isclose(total_fraction, 1.0, rel_tol=0.0, abs_tol=1e-9):
         raise ValueError("train_fraction + validation_fraction + test_fraction must equal 1.0")
+    if minimum_counts is None:
+        minimum_counts = {split_name: 1 for split_name in split_names}
+    if set(minimum_counts) != set(split_names):
+        raise ValueError("minimum_counts must define train, validation, and test")
+    if any(value < 0 for value in minimum_counts.values()):
+        raise ValueError("minimum_counts values must be non-negative")
+    if sum(minimum_counts.values()) > total_rows:
+        raise ValueError("minimum split counts exceed available candidate rows")
+
     targets = {
         "train": total_rows * split_config.train_fraction,
         "validation": total_rows * split_config.validation_fraction,
         "test": total_rows * split_config.test_fraction,
     }
     counts = {
-        split_name: max(1, int(round(targets[split_name])))
+        split_name: max(minimum_counts[split_name], int(round(targets[split_name])))
         for split_name in split_names
     }
 
@@ -369,7 +385,7 @@ def _split_counts_for_total(total_rows: int, split_config: SplitConfig) -> dict[
         candidates = [
             split_name
             for split_name in split_names
-            if counts[split_name] > 1
+            if counts[split_name] > minimum_counts[split_name]
         ]
         if not candidates:
             break
@@ -429,7 +445,7 @@ def _build_global_random_split_rows(
 
     assignments: dict[str, str] = {}
     start_index = 0
-    for split_name in ("train", "validation", "test"):
+    for split_name in SPLIT_NAMES:
         end_index = start_index + counts[split_name]
         for candidate_id in candidate_ids[start_index:end_index]:
             assignments[candidate_id] = split_name
@@ -437,32 +453,200 @@ def _build_global_random_split_rows(
     return _build_split_rows_from_assignments(assignments)
 
 
-def _build_global_stratified_split_rows(
+def _stratified_minimum_split_counts(required_heldout_classes: Sequence[str]) -> dict[str, int]:
+    heldout_minimum = len(dict.fromkeys(required_heldout_classes))
+    return {
+        "train": 1,
+        "validation": max(1, heldout_minimum),
+        "test": max(1, heldout_minimum),
+    }
+
+
+def _shuffle_strata(
     candidate_rows: Sequence[dict[str, str]],
+    *,
     split_config: SplitConfig,
-) -> tuple[list[dict[str, str]], str]:
-    _validate_corpus_size(candidate_rows)
+) -> tuple[dict[tuple[str, str], list[str]], dict[str, str]]:
+    random_generator = random.Random(split_config.seed)
     strata: dict[tuple[str, str], list[str]] = {}
+    segment_type_by_candidate_id: dict[str, str] = {}
     for row in candidate_rows:
         candidate_id, boundary, segment_type = _validate_candidate_row(row)
         strata.setdefault((boundary, segment_type), []).append(candidate_id)
+        segment_type_by_candidate_id[candidate_id] = segment_type
+    for stratum_key in sorted(strata):
+        random_generator.shuffle(strata[stratum_key])
+    return strata, segment_type_by_candidate_id
 
-    if any(len(candidate_ids) < 3 for candidate_ids in strata.values()):
+
+def _reserve_required_heldout_assignments(
+    strata: dict[tuple[str, str], list[str]],
+    *,
+    required_heldout_classes: Sequence[str],
+) -> dict[str, str]:
+    assignments: dict[str, str] = {}
+    ordered_classes = list(dict.fromkeys(required_heldout_classes))
+    for segment_type in ordered_classes:
+        for split_name in HELDOUT_SPLIT_NAMES:
+            eligible_strata = [
+                stratum_key
+                for stratum_key in sorted(strata)
+                if stratum_key[1] == segment_type and strata[stratum_key]
+            ]
+            if not eligible_strata:
+                raise ValueError(
+                    f"Unable to reserve held-out coverage for segment_type {segment_type!r}"
+                )
+            eligible_strata.sort(key=lambda stratum_key: (-len(strata[stratum_key]), stratum_key))
+            candidate_id = strata[eligible_strata[0]].pop(0)
+            assignments[candidate_id] = split_name
+    return assignments
+
+
+def _allocate_remaining_stratified_counts(
+    strata: dict[tuple[str, str], list[str]],
+    *,
+    target_counts: dict[str, int],
+) -> dict[tuple[str, str], dict[str, int]]:
+    remaining_total = sum(len(candidate_ids) for candidate_ids in strata.values())
+    if remaining_total != sum(target_counts.values()):
+        raise ValueError("remaining stratified allocation rows do not match target counts")
+
+    counts_by_stratum = {
+        stratum_key: {split_name: 0 for split_name in SPLIT_NAMES}
+        for stratum_key in strata
+    }
+    if remaining_total == 0:
+        return counts_by_stratum
+
+    stratum_sizes = {
+        stratum_key: len(candidate_ids)
+        for stratum_key, candidate_ids in strata.items()
+    }
+    target_by_stratum = {
+        stratum_key: {
+            split_name: stratum_sizes[stratum_key] * target_counts[split_name] / remaining_total
+            for split_name in SPLIT_NAMES
+        }
+        for stratum_key in strata
+    }
+    stratum_remaining: dict[tuple[str, str], int] = {}
+    split_remaining = dict(target_counts)
+    for stratum_key in sorted(strata):
+        for split_name in SPLIT_NAMES:
+            count = int(math.floor(target_by_stratum[stratum_key][split_name]))
+            counts_by_stratum[stratum_key][split_name] = count
+            split_remaining[split_name] -= count
+        stratum_remaining[stratum_key] = stratum_sizes[stratum_key] - sum(
+            counts_by_stratum[stratum_key].values()
+        )
+
+    while sum(stratum_remaining.values()) > 0:
+        best_choice: tuple[object, ...] | None = None
+        best_stratum_key: tuple[str, str] | None = None
+        best_split_name: str | None = None
+        for stratum_key in sorted(strata):
+            if stratum_remaining[stratum_key] <= 0:
+                continue
+            for split_name in SPLIT_NAMES:
+                if split_remaining[split_name] <= 0:
+                    continue
+                remainder = (
+                    target_by_stratum[stratum_key][split_name]
+                    - counts_by_stratum[stratum_key][split_name]
+                )
+                choice = (
+                    remainder,
+                    split_remaining[split_name],
+                    stratum_sizes[stratum_key],
+                    -SPLIT_NAMES.index(split_name),
+                    stratum_key,
+                )
+                if best_choice is None or choice > best_choice:
+                    best_choice = choice
+                    best_stratum_key = stratum_key
+                    best_split_name = split_name
+        if best_stratum_key is None or best_split_name is None:
+            raise ValueError("Unable to complete stratified allocation")
+        counts_by_stratum[best_stratum_key][best_split_name] += 1
+        stratum_remaining[best_stratum_key] -= 1
+        split_remaining[best_split_name] -= 1
+
+    if any(value != 0 for value in split_remaining.values()):
+        raise ValueError("Stratified allocation left unmatched split counts")
+    return counts_by_stratum
+
+
+def _has_required_heldout_coverage(
+    assignments: dict[str, str],
+    *,
+    segment_type_by_candidate_id: dict[str, str],
+    required_heldout_classes: Sequence[str],
+) -> bool:
+    if not required_heldout_classes:
+        return True
+    classes_by_split: dict[str, set[str]] = {}
+    for candidate_id, split_name in assignments.items():
+        classes_by_split.setdefault(split_name, set()).add(segment_type_by_candidate_id[candidate_id])
+    for split_name in HELDOUT_SPLIT_NAMES:
+        if not set(required_heldout_classes).issubset(classes_by_split.get(split_name, set())):
+            return False
+    return True
+
+
+def _build_global_stratified_split_rows(
+    candidate_rows: Sequence[dict[str, str]],
+    split_config: SplitConfig,
+    *,
+    required_heldout_classes: Sequence[str] = (),
+) -> tuple[list[dict[str, str]], str]:
+    _validate_corpus_size(candidate_rows)
+    strata, segment_type_by_candidate_id = _shuffle_strata(
+        candidate_rows,
+        split_config=split_config,
+    )
+    try:
+        target_counts = _split_counts_for_total(
+            len(candidate_rows),
+            split_config,
+            minimum_counts=_stratified_minimum_split_counts(required_heldout_classes),
+        )
+        assignments = _reserve_required_heldout_assignments(
+            strata,
+            required_heldout_classes=required_heldout_classes,
+        )
+        preassigned_counts = {
+            split_name: sum(1 for value in assignments.values() if value == split_name)
+            for split_name in SPLIT_NAMES
+        }
+        remaining_target_counts = {
+            split_name: target_counts[split_name] - preassigned_counts[split_name]
+            for split_name in SPLIT_NAMES
+        }
+        if any(value < 0 for value in remaining_target_counts.values()):
+            raise ValueError("Reserved held-out assignments exceed target split counts")
+        counts_by_stratum = _allocate_remaining_stratified_counts(
+            strata,
+            target_counts=remaining_target_counts,
+        )
+    except ValueError:
         return _build_global_random_split_rows(candidate_rows, split_config), "global_random"
 
-    random_generator = random.Random(split_config.seed)
-    assignments: dict[str, str] = {}
     for stratum_key in sorted(strata):
         candidate_ids = list(strata[stratum_key])
-        random_generator.shuffle(candidate_ids)
-        counts = _split_counts_for_total(len(candidate_ids), split_config)
-
         start_index = 0
-        for split_name in ("train", "validation", "test"):
-            end_index = start_index + counts[split_name]
+        for split_name in SPLIT_NAMES:
+            end_index = start_index + counts_by_stratum[stratum_key][split_name]
             for candidate_id in candidate_ids[start_index:end_index]:
                 assignments[candidate_id] = split_name
             start_index = end_index
+
+    if not _has_required_heldout_coverage(
+        assignments,
+        segment_type_by_candidate_id=segment_type_by_candidate_id,
+        required_heldout_classes=required_heldout_classes,
+    ):
+        return _build_global_random_split_rows(candidate_rows, split_config), "global_random"
 
     return _build_split_rows_from_assignments(assignments), "global_stratified"
 
@@ -470,11 +654,17 @@ def _build_global_stratified_split_rows(
 def _build_corpus_split_rows(
     merged_rows: Sequence[dict[str, str]],
     split_config: SplitConfig,
+    *,
+    required_heldout_classes: Sequence[str] = (),
 ) -> tuple[list[dict[str, str]], str]:
     if split_config.strategy == "global_random":
         return _build_global_random_split_rows(merged_rows, split_config), "global_random"
     if split_config.strategy == "global_stratified":
-        return _build_global_stratified_split_rows(merged_rows, split_config)
+        return _build_global_stratified_split_rows(
+            merged_rows,
+            split_config,
+            required_heldout_classes=required_heldout_classes,
+        )
     raise ValueError("split strategy must be one of: global_random, global_stratified")
 
 
@@ -637,7 +827,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         day_metadata_rows,
         explicit_required=args.required_heldout_classes,
     )
-    split_rows, effective_split_strategy = _build_corpus_split_rows(merged_rows, split_config)
+    split_rows, effective_split_strategy = _build_corpus_split_rows(
+        merged_rows,
+        split_config,
+        required_heldout_classes=required_heldout_classes,
+    )
     split_manifest_path = corpus_workspace / SPLIT_MANIFEST_FILENAME
     atomic_write_csv(split_manifest_path, SPLIT_MANIFEST_HEADERS, split_rows)
     console.print(f"Wrote split manifest: {split_manifest_path}")

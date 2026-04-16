@@ -12,6 +12,8 @@ from lib.ml_boundary_dataset import canonical_candidate_id
 from lib.workspace_dir import resolve_workspace_dir
 from run_ml_boundary_pipeline import (
     CORPUS_CANDIDATES_FILENAME,
+    SplitConfig,
+    _build_global_stratified_split_rows,
     main,
     parse_args,
     resolve_split_config,
@@ -74,6 +76,20 @@ def _split_rows_by_name(split_rows: list[dict[str, str]]) -> dict[str, list[str]
     grouped: dict[str, list[str]] = {}
     for row in split_rows:
         grouped.setdefault(row["split_name"], []).append(row["candidate_id"])
+    return grouped
+
+
+def _segment_types_by_split(
+    candidate_rows: list[dict[str, str]],
+    split_rows: list[dict[str, str]],
+) -> dict[str, set[str]]:
+    segment_type_by_candidate_id = {
+        row["candidate_id"]: row["segment_type"]
+        for row in candidate_rows
+    }
+    grouped: dict[str, set[str]] = {}
+    for row in split_rows:
+        grouped.setdefault(row["split_name"], set()).add(segment_type_by_candidate_id[row["candidate_id"]])
     return grouped
 
 
@@ -283,7 +299,7 @@ def test_main_global_random_writes_deterministic_candidate_level_split_manifest(
     assert summary_payload["split_seed"] == 42
 
 
-def test_main_default_global_stratified_preserves_boundary_presence_when_supported(
+def test_main_default_global_stratified_preserves_required_heldout_classes_when_supported(
     tmp_path: Path, monkeypatch
 ) -> None:
     day_dirs = []
@@ -294,8 +310,6 @@ def test_main_default_global_stratified_preserves_boundary_presence_when_support
         workspace_dir.mkdir(parents=True)
         (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
         day_dirs.append(day_dir)
-
-    boundary_by_candidate_id: dict[str, str] = {}
 
     def _fake_run_command(command):
         command_values = [str(value) for value in command]
@@ -314,7 +328,6 @@ def test_main_default_global_stratified_preserves_boundary_presence_when_support
                     )
                     row["candidate_id"] = f"{day_dir.name}-{segment_type}-{boundary}-c{index:02d}"
                     rows.append(row)
-                    boundary_by_candidate_id[row["candidate_id"]] = boundary
             _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
 
     monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
@@ -331,22 +344,17 @@ def test_main_default_global_stratified_preserves_boundary_presence_when_support
 
     split_rows = _read_csv_rows(corpus_workspace / "ml_boundary_splits.csv")
     assert {row["split_name"] for row in split_rows} == {"train", "validation", "test"}
-
-    boundaries_by_split: dict[str, set[str]] = {}
-    for row in split_rows:
-        boundaries_by_split.setdefault(row["split_name"], set()).add(boundary_by_candidate_id[row["candidate_id"]])
-    assert boundaries_by_split == {
-        "train": {"0", "1"},
-        "validation": {"0", "1"},
-        "test": {"0", "1"},
-    }
+    candidate_rows = _read_csv_rows(corpus_workspace / CORPUS_CANDIDATES_FILENAME)
+    segment_types_by_split = _segment_types_by_split(candidate_rows, split_rows)
+    assert {"performance", "ceremony"} <= segment_types_by_split["validation"]
+    assert {"performance", "ceremony"} <= segment_types_by_split["test"]
 
     summary_payload = json.loads((corpus_workspace / "ml_boundary_pipeline_summary.json").read_text(encoding="utf-8"))
     assert summary_payload["requested_split_strategy"] == "global_stratified"
     assert summary_payload["effective_split_strategy"] == "global_stratified"
 
 
-def test_main_global_stratified_falls_back_to_global_random_for_too_small_strata(
+def test_main_global_stratified_keeps_stratified_when_small_strata_still_allow_heldout_coverage(
     tmp_path: Path, monkeypatch
 ) -> None:
     day_dirs = []
@@ -389,9 +397,80 @@ def test_main_global_stratified_falls_back_to_global_random_for_too_small_strata
         ]
     ) == 0
 
+    split_rows = _read_csv_rows(corpus_workspace / "ml_boundary_splits.csv")
+    candidate_rows = _read_csv_rows(corpus_workspace / CORPUS_CANDIDATES_FILENAME)
+    segment_types_by_split = _segment_types_by_split(candidate_rows, split_rows)
+    assert {"performance", "ceremony"} <= segment_types_by_split["validation"]
+    assert {"performance", "ceremony"} <= segment_types_by_split["test"]
+
     summary_payload = json.loads((corpus_workspace / "ml_boundary_pipeline_summary.json").read_text(encoding="utf-8"))
     assert summary_payload["requested_split_strategy"] == "global_stratified"
-    assert summary_payload["effective_split_strategy"] == "global_random"
+    assert summary_payload["effective_split_strategy"] == "global_stratified"
+
+
+def test_global_stratified_keeps_strategy_when_small_stratum_still_supports_heldout_classes() -> None:
+    candidate_rows = []
+    for offset in range(8):
+        row = _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=offset + 1)
+        row["candidate_id"] = f"performance-c{offset:02d}"
+        candidate_rows.append(row)
+    for offset in range(2):
+        row = _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1", offset=offset + 101)
+        row["candidate_id"] = f"ceremony-c{offset:02d}"
+        candidate_rows.append(row)
+
+    split_rows, effective_strategy = _build_global_stratified_split_rows(
+        candidate_rows,
+        SplitConfig(
+            strategy="global_stratified",
+            train_fraction=0.70,
+            validation_fraction=0.15,
+            test_fraction=0.15,
+            seed=7,
+        ),
+        required_heldout_classes=["performance", "ceremony"],
+    )
+
+    assert effective_strategy == "global_stratified"
+    split_counts = {split_name: len(candidate_ids) for split_name, candidate_ids in _split_rows_by_name(split_rows).items()}
+    assert split_counts == {"train": 6, "validation": 2, "test": 2}
+    segment_types_by_split = _segment_types_by_split(candidate_rows, split_rows)
+    assert {"performance", "ceremony"} <= segment_types_by_split["validation"]
+    assert {"performance", "ceremony"} <= segment_types_by_split["test"]
+
+
+def test_global_stratified_preserves_global_fraction_targets_across_multiple_small_strata() -> None:
+    candidate_rows = []
+    for boundary in ("0", "1"):
+        for segment_type in ("performance", "ceremony"):
+            for offset in range(3):
+                row = _candidate_row(
+                    day_id="20250325",
+                    segment_type=segment_type,
+                    boundary=boundary,
+                    offset=len(candidate_rows) + 1,
+                )
+                row["candidate_id"] = f"{segment_type}-{boundary}-c{offset:02d}"
+                candidate_rows.append(row)
+
+    split_rows, effective_strategy = _build_global_stratified_split_rows(
+        candidate_rows,
+        SplitConfig(
+            strategy="global_stratified",
+            train_fraction=0.70,
+            validation_fraction=0.15,
+            test_fraction=0.15,
+            seed=11,
+        ),
+        required_heldout_classes=["performance", "ceremony"],
+    )
+
+    assert effective_strategy == "global_stratified"
+    split_counts = {split_name: len(candidate_ids) for split_name, candidate_ids in _split_rows_by_name(split_rows).items()}
+    assert split_counts == {"train": 8, "validation": 2, "test": 2}
+    segment_types_by_split = _segment_types_by_split(candidate_rows, split_rows)
+    assert {"performance", "ceremony"} <= segment_types_by_split["validation"]
+    assert {"performance", "ceremony"} <= segment_types_by_split["test"]
 
 
 def test_resolve_split_config_defaults_to_global_stratified(tmp_path: Path) -> None:
