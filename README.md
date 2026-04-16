@@ -546,7 +546,8 @@ Global corpus split rule:
 - input days are data sources, not split units
 - one day is enough as long as the merged corpus contains at least 3 candidate rows
 - supported strategies are `global_random` and `global_stratified`
-- the corpus split surface is `--split-strategy`, `--train-fraction`, `--validation-fraction`, `--test-fraction`, `--split-seed`
+- `global_stratified` is the requested strategy by default; the pipeline may fall back to `global_random` when stratified allocation or held-out coverage cannot be satisfied
+- the corpus split surface is `--split-strategy`, `--train-fraction`, `--validation-fraction`, `--test-fraction`, `--split-seed`, `--required-heldout-classes`
 
 Exact defaults:
 
@@ -574,6 +575,12 @@ The default resolution path is:
 - CLI flags if provided
 - otherwise the first day directory's `.vocatio`
 - otherwise built-in defaults shown above
+
+Verification:
+
+- inspect `FIRST_DAY_WORKSPACE/ml_boundary_corpus/ml_boundary_pipeline_summary.json`
+- check `requested_split_strategy` and `effective_split_strategy` to confirm whether the run stayed on `global_stratified` or fell back to `global_random`
+- inspect `required_heldout_classes` in the same summary when you are enforcing held-out coverage explicitly
 
 #### Manual flow (step-by-step)
 

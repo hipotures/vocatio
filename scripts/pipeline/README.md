@@ -99,6 +99,7 @@ ML boundary corpus split surface:
 - input days are data sources, not split units
 - one-day runs are allowed when the merged corpus has at least 3 candidate rows
 - `--split-strategy` accepts `global_random` or `global_stratified`
+- `global_stratified` is the requested default, but the pipeline may fall back to `global_random` when stratified allocation or held-out coverage cannot be satisfied
 - exact defaults:
   - `split_strategy = global_stratified`
   - `train_fraction = 0.70`
@@ -110,6 +111,7 @@ ML boundary corpus split surface:
   - `--validation-fraction`
   - `--test-fraction`
   - `--split-seed`
+  - `--required-heldout-classes`
 - `.vocatio` keys on the first day directory:
   - `ML_SPLIT_STRATEGY`
   - `ML_SPLIT_TRAIN_FRACTION`
@@ -154,3 +156,9 @@ python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 --mode tabul
 python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 /data/20260324 /data/20260325 --mode tabular_only --split-strategy global_stratified --model-run-id run-001
 python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 /data/20260324 /data/20260325 --mode tabular_only --prepare-only --model-run-id run-001
 ```
+
+After a pipeline run, inspect `FIRST_DAY_WORKSPACE/ml_boundary_corpus/ml_boundary_pipeline_summary.json` and verify:
+
+- `requested_split_strategy`
+- `effective_split_strategy`
+- `required_heldout_classes` when held-out coverage is part of the run contract
