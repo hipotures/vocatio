@@ -205,7 +205,7 @@ def _build_rule_params_json(*, gap_threshold_seconds: float) -> str:
 def _resolve_workspace_path(workspace_dir: Path, value: Optional[str], default_name: str) -> Path:
     if not value:
         return workspace_dir / default_name
-    candidate = Path(value)
+    candidate = Path(value).expanduser()
     if candidate.is_absolute():
         return candidate
     return workspace_dir / candidate

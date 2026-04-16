@@ -462,14 +462,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def _resolve_workspace_path(workspace_dir: Path, value: Optional[str], default_name: str) -> Path:
     if not value:
         return workspace_dir / default_name
-    candidate = Path(value)
+    candidate = Path(value).expanduser()
     if candidate.is_absolute():
         return candidate
     return workspace_dir / candidate
 
 
 def _looks_like_day_dir(path: Path) -> bool:
-    return path.is_dir() or path.suffix.lower() != ".csv"
+    if path.is_dir():
+        return True
+    return not path.exists() and path.suffix == "" and path.name.isdigit() and len(path.name) == 8
 
 
 def _resolve_cli_paths(

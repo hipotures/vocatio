@@ -570,6 +570,86 @@ def test_main_uses_workspace_dir_from_vocatio_defaults() -> None:
         assert report_json.is_file()
 
 
+def test_main_expands_user_home_in_day_mode_workspace_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    day_dir = tmp_path / "20250325"
+    workspace_dir = tmp_path / "external-workspace"
+    home_dir = tmp_path / "home"
+    report_json = home_dir / "ml_boundary_dataset_report.json"
+
+    day_dir.mkdir()
+    workspace_dir.mkdir()
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    (day_dir / ".vocatio").write_text(
+        f"WORKSPACE_DIR={workspace_dir}\n",
+        encoding="utf-8",
+    )
+
+    manifest_path = workspace_dir / "media_manifest.csv"
+    truth_path = workspace_dir / "ml_boundary_reviewed_truth.csv"
+    output_csv = workspace_dir / "ml_boundary_candidates.csv"
+    attrition_json = workspace_dir / "ml_boundary_attrition.json"
+
+    manifest_rows = [
+        _build_manifest_photo_row(
+            day="20250325",
+            photo_id="p1",
+            relative_path="p-a7r5/p1.jpg",
+            photo_order_index=0,
+            start_epoch_ms=0,
+        ),
+        _build_manifest_photo_row(
+            day="20250325",
+            photo_id="p2",
+            relative_path="p-a7r5/p2.jpg",
+            photo_order_index=1,
+            start_epoch_ms=1_000,
+        ),
+        _build_manifest_photo_row(
+            day="20250325",
+            photo_id="p3",
+            relative_path="p-a7r5/p3.jpg",
+            photo_order_index=2,
+            start_epoch_ms=2_000,
+        ),
+        _build_manifest_photo_row(
+            day="20250325",
+            photo_id="p4",
+            relative_path="p-a7r5/p4.jpg",
+            photo_order_index=3,
+            start_epoch_ms=30_000,
+        ),
+        _build_manifest_photo_row(
+            day="20250325",
+            photo_id="p5",
+            relative_path="p-a7r5/p5.jpg",
+            photo_order_index=4,
+            start_epoch_ms=31_000,
+        ),
+    ]
+    truth_rows = [
+        {"photo_id": "p1", "segment_id": "s1", "segment_type": "performance"},
+        {"photo_id": "p2", "segment_id": "s1", "segment_type": "performance"},
+        {"photo_id": "p3", "segment_id": "s1", "segment_type": "performance"},
+        {"photo_id": "p4", "segment_id": "s2", "segment_type": "ceremony"},
+        {"photo_id": "p5", "segment_id": "s2", "segment_type": "ceremony"},
+    ]
+
+    _write_media_manifest(manifest_path, manifest_rows)
+    _write_truth_csv(truth_path, truth_rows)
+
+    exit_code = main([str(day_dir), "--report-json", "~/ml_boundary_dataset_report.json"])
+
+    assert exit_code == 0
+    assert output_csv.is_file()
+    assert attrition_json.is_file()
+    assert report_json.is_file()
+    assert not (workspace_dir / "~" / "ml_boundary_dataset_report.json").exists()
+
+
 @pytest.mark.parametrize("threshold_text", ["nan", "inf", "-inf", "0", "-1"])
 def test_parse_args_rejects_non_finite_gap_thresholds(threshold_text: str) -> None:
     with pytest.raises(SystemExit):

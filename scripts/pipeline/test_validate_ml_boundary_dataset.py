@@ -3,6 +3,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
@@ -468,3 +470,52 @@ def test_cli_main_resolves_day_workspace_defaults_from_vocatio(tmp_path: Path) -
         "candidate_count_excluded_missing_window": 0,
         "candidate_count_excluded_missing_artifacts": 0,
     }
+
+
+def test_cli_main_expands_user_home_in_day_mode_workspace_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    day_dir = tmp_path / "20250325"
+    workspace_dir = tmp_path / "external-workspace"
+    home_dir = tmp_path / "home"
+    candidate_csv = workspace_dir / "ml_boundary_candidates.csv"
+    attrition_json = workspace_dir / "ml_boundary_attrition.json"
+    report_json = home_dir / "ml_boundary_validation_report.json"
+
+    day_dir.mkdir()
+    workspace_dir.mkdir()
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    (day_dir / ".vocatio").write_text(
+        f"WORKSPACE_DIR={workspace_dir}\n",
+        encoding="utf-8",
+    )
+
+    _write_candidate_csv(candidate_csv, [_candidate_row(day_id="20250325")])
+    attrition_json.write_text(
+        json.dumps(
+            {
+                "candidate_count_generated": 1,
+                "candidate_count_excluded_missing_window": 0,
+                "candidate_count_excluded_missing_artifacts": 0,
+                "candidate_count_retained": 1,
+                "true_boundary_coverage_before_exclusions": 1,
+                "true_boundary_coverage_after_exclusions": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = main([str(day_dir), "--report-json", "~/ml_boundary_validation_report.json"])
+
+    assert result == 0
+    assert report_json.is_file()
+    assert not (workspace_dir / "~" / "ml_boundary_validation_report.json").exists()
+
+
+def test_cli_main_treats_mistyped_non_csv_candidate_path_as_explicit_file(tmp_path: Path) -> None:
+    candidate_csv = tmp_path / "ml_boundary_candidates.cvs"
+
+    with pytest.raises(SystemExit, match="--attrition-json is required when candidate_csv is a CSV path"):
+        main([str(candidate_csv)])
