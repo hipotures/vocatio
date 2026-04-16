@@ -74,9 +74,13 @@ def _read_csv_rows(path: Path, *, required_headers: Sequence[str]) -> list[dict[
 
 def _detect_split_manifest_key(fieldnames: Sequence[str]) -> str:
     available = set(fieldnames)
-    if {"candidate_id", "split_name"} <= available:
+    has_candidate_id = {"candidate_id", "split_name"} <= available
+    has_day_id = {"day_id", "split_name"} <= available
+    if has_candidate_id and has_day_id:
+        raise ValueError("split manifest must not contain both day_id and candidate_id columns")
+    if has_candidate_id:
         return "candidate_id"
-    if {"day_id", "split_name"} <= available:
+    if has_day_id:
         return "day_id"
     raise ValueError("split manifest must contain either day_id/split_name or candidate_id/split_name")
 
@@ -382,6 +386,8 @@ def validate_split_manifest(
     manifest_key: Optional[str] = None,
     required_classes: Optional[Sequence[str]] = None,
 ) -> None:
+    if not split_rows:
+        raise ValueError("split manifest must contain at least one row")
     if manifest_key is None:
         manifest_key = _detect_split_manifest_key(
             [field_name for row in split_rows for field_name in row.keys()]

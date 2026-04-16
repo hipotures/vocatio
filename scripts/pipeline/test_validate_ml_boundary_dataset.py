@@ -273,6 +273,30 @@ def test_validate_split_manifest_accepts_candidate_level_assignments() -> None:
     validate_split_manifest(split_rows, candidate_rows)
 
 
+def test_validate_split_manifest_rejects_ambiguous_manifest_keys() -> None:
+    candidate_rows = [_candidate_row(day_id="20250325", candidate_rule_version="gap-v1")]
+    split_rows = [
+        {
+            "day_id": "20250325",
+            "candidate_id": candidate_rows[0]["candidate_id"],
+            "split_name": "train",
+        }
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match="split manifest must not contain both day_id and candidate_id columns",
+    ):
+        validate_split_manifest(split_rows, candidate_rows)
+
+
+def test_validate_split_manifest_rejects_empty_split_rows_direct_call() -> None:
+    candidate_rows = [_candidate_row(day_id="20250325", candidate_rule_version="gap-v1")]
+
+    with pytest.raises(ValueError, match="split manifest must contain at least one row"):
+        validate_split_manifest([], candidate_rows)
+
+
 def test_validate_split_manifest_requires_heldout_classes_for_candidate_level_assignments() -> None:
     candidate_rows = [
         _candidate_row(

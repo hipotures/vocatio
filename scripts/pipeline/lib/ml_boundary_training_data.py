@@ -172,9 +172,13 @@ def load_split_manifest_frame(split_manifest_path: Path) -> TrainingTable:
 
 def _detect_split_manifest_key(columns: list[str]) -> str:
     available_columns = set(columns)
-    if {"candidate_id", *SPLIT_MANIFEST_VALUE_COLUMNS} <= available_columns:
+    has_candidate_id = {"candidate_id", *SPLIT_MANIFEST_VALUE_COLUMNS} <= available_columns
+    has_day_id = {"day_id", *SPLIT_MANIFEST_VALUE_COLUMNS} <= available_columns
+    if has_candidate_id and has_day_id:
+        raise ValueError("split manifest must not contain both day_id and candidate_id columns")
+    if has_candidate_id:
         return "candidate_id"
-    if {"day_id", *SPLIT_MANIFEST_VALUE_COLUMNS} <= available_columns:
+    if has_day_id:
         return "day_id"
     raise ValueError("split manifest must contain either day_id/split_name or candidate_id/split_name")
 

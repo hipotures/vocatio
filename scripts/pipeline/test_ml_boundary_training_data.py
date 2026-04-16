@@ -189,6 +189,43 @@ def test_load_training_data_bundle_accepts_candidate_level_split_manifest(
     assert bundle.split_counts_by_name == {"train": 1, "validation": 1, "test": 1}
 
 
+def test_load_training_data_bundle_rejects_ambiguous_split_manifest_keys(
+    tmp_path: Path,
+) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    candidate_rows = [
+        _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
+        _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+    ]
+    _write_candidate_csv(dataset_path, candidate_rows)
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {
+                "day_id": "20250324",
+                "candidate_id": candidate_rows[0]["candidate_id"],
+                "split_name": "train",
+            },
+            {
+                "day_id": "20250325",
+                "candidate_id": candidate_rows[1]["candidate_id"],
+                "split_name": "validation",
+            },
+        ],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="split manifest must not contain both day_id and candidate_id columns",
+    ):
+        load_training_data_bundle(
+            dataset_path,
+            split_manifest_path=split_manifest_path,
+            mode="tabular_only",
+        )
+
+
 def test_load_training_data_bundle_requires_base_columns_for_tabular_mode(
     tmp_path: Path,
 ) -> None:
