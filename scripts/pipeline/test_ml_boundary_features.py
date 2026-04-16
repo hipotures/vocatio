@@ -9,6 +9,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
 from lib.ml_boundary_features import (
     CANONICAL_MISSING,
+    CANONICAL_COSTUME_TYPE_VOCABULARY,
     aggregate_window_descriptors,
     build_candidate_feature_row,
     cosine_distance,
@@ -48,12 +49,37 @@ def test_normalize_descriptor_value_preserves_explicit_missing() -> None:
     assert normalize_descriptor_value(None) == CANONICAL_MISSING
     assert normalize_descriptor_value("") == CANONICAL_MISSING
     assert normalize_descriptor_value("   ") == CANONICAL_MISSING
-    assert normalize_descriptor_value("TuTu") == "tutu"
+    assert normalize_descriptor_value("TuTu", allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY) == "tutu"
+
+
+def test_normalize_descriptor_value_rejects_invalid_types_and_out_of_vocabulary_values() -> None:
+    with pytest.raises(ValueError, match="strings or null"):
+        normalize_descriptor_value(True, allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY)
+
+    with pytest.raises(ValueError, match="strings or null"):
+        normalize_descriptor_value(1, allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY)
+
+    with pytest.raises(ValueError, match="canonical vocabulary"):
+        normalize_descriptor_value("cape", allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY)
 
 
 def test_aggregate_window_descriptors_uses_majority_vote_and_tie_break() -> None:
-    assert aggregate_window_descriptors(["dress", "tutu", "tutu"], tie_break_value="dress") == "tutu"
-    assert aggregate_window_descriptors(["dress", "tutu"], tie_break_value="dress") == "dress"
+    assert (
+        aggregate_window_descriptors(
+            ["dress", "tutu", "tutu"],
+            tie_break_value="dress",
+            allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY,
+        )
+        == "tutu"
+    )
+    assert (
+        aggregate_window_descriptors(
+            ["dress", "tutu"],
+            tie_break_value="dress",
+            allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY,
+        )
+        == "dress"
+    )
     assert aggregate_window_descriptors([], tie_break_value="dress") == CANONICAL_MISSING
 
 
@@ -208,6 +234,50 @@ def test_build_candidate_feature_row_preserves_missingness_in_descriptor_feature
     assert row["costume_type_right_missing"] == 1
     assert row["costume_type_left_consistency"] == pytest.approx(2.0 / 3.0)
     assert row["costume_type_right_consistency"] == pytest.approx(0.5)
+
+
+def test_build_candidate_feature_row_rejects_malformed_descriptor_record_shape() -> None:
+    candidate = {
+        "frame_01_timestamp": 0.0,
+        "frame_02_timestamp": 1.0,
+        "frame_03_timestamp": 2.0,
+        "frame_04_timestamp": 3.0,
+        "frame_05_timestamp": 4.0,
+        "frame_01_photo_id": "p1",
+        "frame_02_photo_id": "p2",
+        "frame_03_photo_id": "p3",
+        "frame_04_photo_id": "p4",
+        "frame_05_photo_id": "p5",
+    }
+    descriptors = {
+        "p1": {"costume_type": "dress"},
+        "p2": "not-a-mapping",
+    }
+
+    with pytest.raises(ValueError, match="must be a mapping"):
+        build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
+
+
+def test_build_candidate_feature_row_rejects_out_of_vocabulary_descriptor_values() -> None:
+    candidate = {
+        "frame_01_timestamp": 0.0,
+        "frame_02_timestamp": 1.0,
+        "frame_03_timestamp": 2.0,
+        "frame_04_timestamp": 3.0,
+        "frame_05_timestamp": 4.0,
+        "frame_01_photo_id": "p1",
+        "frame_02_photo_id": "p2",
+        "frame_03_photo_id": "p3",
+        "frame_04_photo_id": "p4",
+        "frame_05_photo_id": "p5",
+    }
+    descriptors = {
+        "p1": {"costume_type": "dress"},
+        "p2": {"costume_type": "cape"},
+    }
+
+    with pytest.raises(ValueError, match="canonical vocabulary"):
+        build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
 
 
 def test_build_candidate_feature_row_computes_embedding_features() -> None:

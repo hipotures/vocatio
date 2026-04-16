@@ -8,6 +8,29 @@ from typing import Mapping, Sequence
 
 GAP_OUTLIER_K = 3.0
 CANONICAL_MISSING = "__missing__"
+CANONICAL_COSTUME_TYPE_VOCABULARY = frozenset(
+    {
+        "ballgown",
+        "bodysuit",
+        "coat",
+        "dress",
+        "jacket",
+        "leggings",
+        "pants",
+        "romper",
+        "shirt",
+        "shorts",
+        "skirt",
+        "suit",
+        "tights",
+        "top",
+        "trousers",
+        "tunic",
+        "tutu",
+        "unitard",
+        "vest",
+    }
+)
 
 
 def safe_divide(num: float, den: float) -> float:
@@ -20,15 +43,34 @@ def safe_divide(num: float, den: float) -> float:
     return numerator / denominator
 
 
-def normalize_descriptor_value(value: object) -> str:
+def normalize_descriptor_value(
+    value: object,
+    *,
+    allowed_values: frozenset[str] | None = None,
+) -> str:
     if value is None:
         return CANONICAL_MISSING
-    text = str(value).strip().lower()
-    return text if text else CANONICAL_MISSING
+    if isinstance(value, bool) or not isinstance(value, str):
+        raise ValueError("descriptor values must be strings or null")
+    text = value.strip().lower()
+    if not text:
+        return CANONICAL_MISSING
+    if text == CANONICAL_MISSING:
+        return CANONICAL_MISSING
+    if allowed_values is not None and text not in allowed_values:
+        raise ValueError(f"descriptor value {text!r} is outside the canonical vocabulary")
+    return text
 
 
-def aggregate_window_descriptors(values: Sequence[object], *, tie_break_value: object) -> str:
-    normalized_values = [normalize_descriptor_value(value) for value in values]
+def aggregate_window_descriptors(
+    values: Sequence[object],
+    *,
+    tie_break_value: object,
+    allowed_values: frozenset[str] | None = None,
+) -> str:
+    normalized_values = [
+        normalize_descriptor_value(value, allowed_values=allowed_values) for value in values
+    ]
     if not normalized_values:
         return CANONICAL_MISSING
 
@@ -38,10 +80,26 @@ def aggregate_window_descriptors(values: Sequence[object], *, tie_break_value: o
     if len(winners) == 1:
         return next(iter(winners))
 
-    normalized_tie_break = normalize_descriptor_value(tie_break_value)
+    normalized_tie_break = normalize_descriptor_value(
+        tie_break_value,
+        allowed_values=allowed_values,
+    )
     if normalized_tie_break in winners:
         return normalized_tie_break
     return sorted(winners)[0]
+
+
+def _get_descriptor_record(
+    descriptors: Mapping[str, object],
+    *,
+    photo_id: str,
+) -> Mapping[str, object]:
+    if photo_id not in descriptors:
+        return {}
+    record = descriptors[photo_id]
+    if not isinstance(record, MappingABC):
+        raise ValueError(f"descriptor record for {photo_id} must be a mapping")
+    return record
 
 
 def _normalize_embedding(value: Sequence[float]) -> list[float]:
@@ -165,32 +223,30 @@ def build_candidate_feature_row(
         _require_photo_id(candidate, "frame_04_photo_id"),
         _require_photo_id(candidate, "frame_05_photo_id"),
     ]
-    descriptor_map = {
-        photo_id: value for photo_id, value in descriptors.items() if isinstance(photo_id, str)
-    }
+    descriptor_map = {photo_id: value for photo_id, value in descriptors.items() if isinstance(photo_id, str)}
     left_costume_values = [
         normalize_descriptor_value(
-            descriptor_map.get(photo_id, {}).get("costume_type")
-            if isinstance(descriptor_map.get(photo_id), MappingABC)
-            else None
+            _get_descriptor_record(descriptor_map, photo_id=photo_id).get("costume_type"),
+            allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY,
         )
         for photo_id in left_photo_ids
     ]
     right_costume_values = [
         normalize_descriptor_value(
-            descriptor_map.get(photo_id, {}).get("costume_type")
-            if isinstance(descriptor_map.get(photo_id), MappingABC)
-            else None
+            _get_descriptor_record(descriptor_map, photo_id=photo_id).get("costume_type"),
+            allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY,
         )
         for photo_id in right_photo_ids
     ]
     left_costume_value = aggregate_window_descriptors(
         left_costume_values,
         tie_break_value=left_costume_values[-1],
+        allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY,
     )
     right_costume_value = aggregate_window_descriptors(
         right_costume_values,
         tie_break_value=right_costume_values[0],
+        allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY,
     )
     row.update(
         {
