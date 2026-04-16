@@ -19,14 +19,21 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
-from build_ml_boundary_candidate_dataset import ATTRITION_REPORT_KEYS, CANDIDATE_ROW_HEADERS
+from build_ml_boundary_candidate_dataset import (
+    ATTRITION_REPORT_KEYS,
+    CANDIDATE_ROW_HEADERS,
+    DEFAULT_ATTRITION_FILENAME,
+    DEFAULT_OUTPUT_FILENAME,
+)
 from lib.ml_boundary_dataset import canonical_candidate_id, normalize_timestamp
 from lib.ml_boundary_truth import VALID_SEGMENT_TYPES
+from lib.workspace_dir import resolve_workspace_dir
 
 
 console = Console(stderr=True)
 
 WINDOW_SIZE = 5
+DEFAULT_REPORT_FILENAME = "ml_boundary_validation_report.json"
 FRAME_TIMESTAMP_FIELDS = [f"frame_0{index}_timestamp" for index in range(1, 6)]
 FRAME_PHOTO_ID_FIELDS = [f"frame_0{index}_photo_id" for index in range(1, 6)]
 FRAME_RELPATH_FIELDS = [f"frame_0{index}_relpath" for index in range(1, 6)]
@@ -415,15 +422,27 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Validate ML boundary candidate datasets, attrition reports, and optional split manifests."
     )
-    parser.add_argument("candidate_csv", help="Path to ml_boundary_candidates.csv")
+    parser.add_argument(
+        "candidate_csv",
+        help="Path to ml_boundary_candidates.csv or a single day directory like /data/20260323",
+    )
+    parser.add_argument(
+        "--workspace-dir",
+        help="Directory that holds ML boundary artifacts. Default: DAY/.vocatio WORKSPACE_DIR or DAY/_workspace",
+    )
     parser.add_argument(
         "--attrition-json",
-        required=True,
-        help="Path to ml_boundary_attrition.json",
+        help=(
+            "Path to ml_boundary_attrition.json. "
+            f"Default: WORKSPACE/{DEFAULT_ATTRITION_FILENAME} when candidate_csv is DAY"
+        ),
     )
     parser.add_argument(
         "--split-manifest-csv",
-        help="Optional split manifest CSV with day_id and split_name columns",
+        help=(
+            "Optional split manifest CSV with day_id and split_name columns. "
+            "Relative paths resolve from WORKSPACE when candidate_csv is DAY."
+        ),
     )
     parser.add_argument(
         "--required-heldout-classes",
@@ -432,9 +451,77 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--report-json",
-        help="Optional path to write a validation report JSON",
+        help=(
+            "Optional path to write a validation report JSON. "
+            f"Default: WORKSPACE/{DEFAULT_REPORT_FILENAME} when candidate_csv is DAY"
+        ),
     )
     return parser.parse_args(argv)
+
+
+def _resolve_workspace_path(workspace_dir: Path, value: Optional[str], default_name: str) -> Path:
+    if not value:
+        return workspace_dir / default_name
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return candidate
+    return workspace_dir / candidate
+
+
+def _looks_like_day_dir(path: Path) -> bool:
+    return path.is_dir() or path.suffix.lower() != ".csv"
+
+
+def _resolve_cli_paths(
+    args: argparse.Namespace,
+) -> tuple[Path, Path, Optional[Path], Optional[Path]]:
+    candidate_input_path = Path(args.candidate_csv).expanduser()
+    if _looks_like_day_dir(candidate_input_path):
+        day_dir = candidate_input_path.resolve()
+        workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
+        candidate_csv_path = _resolve_workspace_path(
+            workspace_dir,
+            None,
+            DEFAULT_OUTPUT_FILENAME,
+        )
+        attrition_json_path = _resolve_workspace_path(
+            workspace_dir,
+            args.attrition_json,
+            DEFAULT_ATTRITION_FILENAME,
+        )
+        split_manifest_path = (
+            _resolve_workspace_path(workspace_dir, args.split_manifest_csv, "ml_boundary_splits.csv")
+            if args.split_manifest_csv
+            else None
+        )
+        report_json_path = _resolve_workspace_path(
+            workspace_dir,
+            args.report_json,
+            DEFAULT_REPORT_FILENAME,
+        )
+        return (
+            candidate_csv_path.resolve(),
+            attrition_json_path.resolve(),
+            split_manifest_path.resolve() if split_manifest_path is not None else None,
+            report_json_path.resolve(),
+        )
+
+    if not args.attrition_json:
+        raise SystemExit("--attrition-json is required when candidate_csv is a CSV path")
+
+    candidate_csv_path = candidate_input_path.resolve()
+    attrition_json_path = Path(args.attrition_json).expanduser().resolve()
+    split_manifest_path = (
+        Path(args.split_manifest_csv).expanduser().resolve()
+        if args.split_manifest_csv
+        else None
+    )
+    report_json_path = (
+        Path(args.report_json).expanduser().resolve()
+        if args.report_json
+        else None
+    )
+    return candidate_csv_path, attrition_json_path, split_manifest_path, report_json_path
 
 
 def _validate_row_count_against_attrition(
@@ -501,17 +588,8 @@ def build_validation_report(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
-    candidate_csv_path = Path(args.candidate_csv).expanduser().resolve()
-    attrition_json_path = Path(args.attrition_json).expanduser().resolve()
-    split_manifest_path = (
-        Path(args.split_manifest_csv).expanduser().resolve()
-        if args.split_manifest_csv
-        else None
-    )
-    report_json_path = (
-        Path(args.report_json).expanduser().resolve()
-        if args.report_json
-        else None
+    candidate_csv_path, attrition_json_path, split_manifest_path, report_json_path = _resolve_cli_paths(
+        args
     )
 
     try:

@@ -117,7 +117,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("day_dir", help="Path to a single day directory like /data/20260323")
     parser.add_argument(
         "--workspace-dir",
-        help="Directory that holds ML boundary artifacts. Default: DAY/_workspace",
+        help="Directory that holds ML boundary artifacts. Default: DAY/.vocatio WORKSPACE_DIR or DAY/_workspace",
     )
     parser.add_argument(
         "--manifest-csv",

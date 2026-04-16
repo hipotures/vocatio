@@ -426,3 +426,45 @@ def test_cli_main_validates_candidate_csv_attrition_and_split_manifest(tmp_path:
         "available": False,
         "reason": "candidate CSV does not include is_hard_negative",
     }
+
+
+def test_cli_main_resolves_day_workspace_defaults_from_vocatio(tmp_path: Path) -> None:
+    day_dir = tmp_path / "20250325"
+    workspace_dir = tmp_path / "external-workspace"
+    candidate_csv = workspace_dir / "ml_boundary_candidates.csv"
+    attrition_json = workspace_dir / "ml_boundary_attrition.json"
+    report_json = workspace_dir / "ml_boundary_validation_report.json"
+
+    day_dir.mkdir()
+    workspace_dir.mkdir()
+    (day_dir / ".vocatio").write_text(
+        f"WORKSPACE_DIR={workspace_dir}\n",
+        encoding="utf-8",
+    )
+
+    _write_candidate_csv(candidate_csv, [_candidate_row(day_id="20250325")])
+    attrition_json.write_text(
+        json.dumps(
+            {
+                "candidate_count_generated": 1,
+                "candidate_count_excluded_missing_window": 0,
+                "candidate_count_excluded_missing_artifacts": 0,
+                "candidate_count_retained": 1,
+                "true_boundary_coverage_before_exclusions": 1,
+                "true_boundary_coverage_after_exclusions": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = main([str(day_dir)])
+
+    assert result == 0
+    assert report_json.is_file()
+    payload = json.loads(report_json.read_text(encoding="utf-8"))
+    assert payload["candidate_row_count"] == 1
+    assert payload["class_balance_by_segment_type"] == {"ceremony": 1}
+    assert payload["attrition_exclusion_counts"] == {
+        "candidate_count_excluded_missing_window": 0,
+        "candidate_count_excluded_missing_artifacts": 0,
+    }
