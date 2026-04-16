@@ -36,6 +36,7 @@ DEFAULT_TRUTH_FILENAME = "ml_boundary_reviewed_truth.csv"
 DEFAULT_OUTPUT_FILENAME = "ml_boundary_candidates.csv"
 DEFAULT_ATTRITION_FILENAME = "ml_boundary_attrition.json"
 DEFAULT_REPORT_FILENAME = "ml_boundary_dataset_report.json"
+DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1 = "not_included_v1"
 CANDIDATE_ROW_HEADERS = [
     "candidate_id",
     "day_id",
@@ -210,6 +211,29 @@ def _resolve_workspace_path(workspace_dir: Path, value: Optional[str], default_n
     return workspace_dir / candidate
 
 
+def _validate_distinct_paths(
+    *,
+    manifest_path: Path,
+    truth_path: Path,
+    output_csv_path: Path,
+    attrition_json_path: Path,
+    report_json_path: Path,
+) -> None:
+    labeled_paths = {
+        "manifest_csv": manifest_path.resolve(),
+        "truth_csv": truth_path.resolve(),
+        "output_csv": output_csv_path.resolve(),
+        "attrition_json": attrition_json_path.resolve(),
+        "report_json": report_json_path.resolve(),
+    }
+    seen: dict[Path, str] = {}
+    for label, path in labeled_paths.items():
+        prior = seen.get(path)
+        if prior is not None:
+            raise ValueError(f"Path collision between {prior} and {label}: {path}")
+        seen[path] = label
+
+
 def _read_reviewed_truth_csv(path: Path) -> list[dict[str, str]]:
     if not path.is_file():
         raise FileNotFoundError(f"Truth CSV does not exist: {path}")
@@ -231,8 +255,20 @@ def _manifest_photo_to_candidate_row(row: Mapping[str, str]) -> dict[str, object
     start_epoch_ms = str(row.get("start_epoch_ms") or "").strip()
     if not start_epoch_ms:
         raise ValueError("start_epoch_ms is required and must not be blank")
+    photo_id = str(row.get("photo_id") or "").strip() or "<unknown>"
 
-    timestamp_seconds = float(start_epoch_ms) / 1000.0
+    try:
+        start_epoch_ms_value = float(start_epoch_ms)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid start_epoch_ms for photo_id={photo_id}: {start_epoch_ms}"
+        ) from exc
+    if not math.isfinite(start_epoch_ms_value):
+        raise ValueError(
+            f"Invalid start_epoch_ms for photo_id={photo_id}: {start_epoch_ms}"
+        )
+
+    timestamp_seconds = start_epoch_ms_value / 1000.0
     return {
         "photo_id": row.get("photo_id", ""),
         "order_idx": row.get("photo_order_index", ""),
@@ -359,7 +395,7 @@ def build_candidate_rows(
                 "candidate_rule_name": candidate_rule_name,
                 "candidate_rule_version": candidate_rule_version,
                 "candidate_rule_params_json": candidate_rule_params_json,
-                "descriptor_schema_version": "",
+                "descriptor_schema_version": DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1,
                 "split_name": "",
                 "window_photo_ids": [],
                 "window_relative_paths": [],
@@ -405,6 +441,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         workspace_dir, args.attrition_json, DEFAULT_ATTRITION_FILENAME
     )
     report_json_path = _resolve_workspace_path(workspace_dir, args.report_json, DEFAULT_REPORT_FILENAME)
+    _validate_distinct_paths(
+        manifest_path=manifest_path,
+        truth_path=truth_path,
+        output_csv_path=output_csv_path,
+        attrition_json_path=attrition_json_path,
+        report_json_path=report_json_path,
+    )
 
     if not args.overwrite:
         existing_outputs = [

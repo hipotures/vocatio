@@ -9,7 +9,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
-from build_ml_boundary_candidate_dataset import build_candidate_rows, main
+from build_ml_boundary_candidate_dataset import (
+    DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1,
+    build_candidate_rows,
+    main,
+)
 from lib.image_pipeline_contracts import MEDIA_MANIFEST_HEADERS
 from lib.ml_boundary_truth import build_final_photo_truth
 
@@ -166,7 +170,7 @@ def test_build_candidate_rows_preserves_ordered_frame_fields_and_labels() -> Non
     assert row["candidate_rule_name"] == "gap_threshold"
     assert row["candidate_rule_version"] == "gap-v1"
     assert row["candidate_rule_params_json"] == "{\"gap_threshold_seconds\":10.0}"
-    assert row["descriptor_schema_version"] == ""
+    assert row["descriptor_schema_version"] == DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1
     assert row["split_name"] == ""
     assert row["frame_01_thumb_path"] == ""
     assert row["frame_02_thumb_path"] == ""
@@ -303,13 +307,13 @@ def test_build_candidate_rows_emits_schema_stable_proxy_columns_when_missing() -
         "frame_03_preview_path",
         "frame_04_preview_path",
         "frame_05_preview_path",
-        "descriptor_schema_version",
         "split_name",
     ]
 
     for field_name in expected_empty_fields:
         assert field_name in row
         assert row[field_name] == ""
+    assert row["descriptor_schema_version"] == DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1
 
 
 def test_build_candidate_rows_counts_missing_artifacts_for_generated_true_boundary() -> None:
@@ -468,6 +472,7 @@ def test_main_writes_candidate_csv_and_reports_from_manifest_and_truth() -> None
         assert rows[0]["frame_01_preview_path"] == "embedded_jpg/preview/p1.jpg"
         assert rows[0]["frame_03_preview_path"] == "embedded_jpg/preview/p3.jpg"
         assert rows[0]["frame_05_preview_path"] == "embedded_jpg/preview/p5.jpg"
+        assert rows[0]["descriptor_schema_version"] == DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1
 
         attrition_payload = json.loads(attrition_json.read_text(encoding="utf-8"))
         assert attrition_payload == {
@@ -563,5 +568,116 @@ def test_main_rejects_empty_reviewed_truth_csv() -> None:
                     str(workspace_dir),
                     "--gap-threshold-seconds",
                     "10.0",
+                ]
+            )
+
+
+def test_main_rejects_path_collision_between_input_and_output() -> None:
+    with TemporaryDirectory() as tmp:
+        day_dir = Path(tmp) / "20250325"
+        workspace_dir = day_dir / "_workspace"
+        day_dir.mkdir()
+        workspace_dir.mkdir()
+
+        manifest_path = workspace_dir / "media_manifest.csv"
+        truth_path = workspace_dir / "ml_boundary_reviewed_truth.csv"
+        manifest_rows = [
+            _build_manifest_photo_row(
+                day="20250325",
+                photo_id="p1",
+                relative_path="p-a7r5/p1.jpg",
+                photo_order_index=0,
+                start_epoch_ms=0,
+            ),
+        ]
+        truth_rows = [
+            {"photo_id": "p1", "segment_id": "s1", "segment_type": "performance"},
+        ]
+        _write_media_manifest(manifest_path, manifest_rows)
+        _write_truth_csv(truth_path, truth_rows)
+
+        with pytest.raises(ValueError, match="Path collision"):
+            main(
+                [
+                    str(day_dir),
+                    "--workspace-dir",
+                    str(workspace_dir),
+                    "--output-csv",
+                    "media_manifest.csv",
+                    "--overwrite",
+                ]
+            )
+
+
+def test_main_rejects_output_path_collision() -> None:
+    with TemporaryDirectory() as tmp:
+        day_dir = Path(tmp) / "20250325"
+        workspace_dir = day_dir / "_workspace"
+        day_dir.mkdir()
+        workspace_dir.mkdir()
+
+        manifest_path = workspace_dir / "media_manifest.csv"
+        truth_path = workspace_dir / "ml_boundary_reviewed_truth.csv"
+        manifest_rows = [
+            _build_manifest_photo_row(
+                day="20250325",
+                photo_id="p1",
+                relative_path="p-a7r5/p1.jpg",
+                photo_order_index=0,
+                start_epoch_ms=0,
+            ),
+        ]
+        truth_rows = [
+            {"photo_id": "p1", "segment_id": "s1", "segment_type": "performance"},
+        ]
+        _write_media_manifest(manifest_path, manifest_rows)
+        _write_truth_csv(truth_path, truth_rows)
+
+        with pytest.raises(ValueError, match="Path collision"):
+            main(
+                [
+                    str(day_dir),
+                    "--workspace-dir",
+                    str(workspace_dir),
+                    "--attrition-json",
+                    "same.json",
+                    "--report-json",
+                    "same.json",
+                    "--overwrite",
+                ]
+            )
+
+
+def test_main_rejects_invalid_manifest_start_epoch_ms_with_context() -> None:
+    with TemporaryDirectory() as tmp:
+        day_dir = Path(tmp) / "20250325"
+        workspace_dir = day_dir / "_workspace"
+        day_dir.mkdir()
+        workspace_dir.mkdir()
+
+        manifest_path = workspace_dir / "media_manifest.csv"
+        truth_path = workspace_dir / "ml_boundary_reviewed_truth.csv"
+        manifest_rows = [
+            _build_manifest_photo_row(
+                day="20250325",
+                photo_id="p1",
+                relative_path="p-a7r5/p1.jpg",
+                photo_order_index=0,
+                start_epoch_ms="bad-ms",  # type: ignore[arg-type]
+            ),
+        ]
+        truth_rows = [
+            {"photo_id": "p1", "segment_id": "s1", "segment_type": "performance"},
+        ]
+        _write_media_manifest(manifest_path, manifest_rows)
+        _write_truth_csv(truth_path, truth_rows)
+
+        with pytest.raises(ValueError, match=r"Invalid start_epoch_ms for photo_id=p1: bad-ms"):
+            main(
+                [
+                    str(day_dir),
+                    "--workspace-dir",
+                    str(workspace_dir),
+                    "--overwrite",
                 ]
             )
