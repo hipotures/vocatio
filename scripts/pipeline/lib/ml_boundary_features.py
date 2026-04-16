@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Mapping as MappingABC
 import math
 from statistics import median, pvariance
 from typing import Mapping, Sequence
 
 GAP_OUTLIER_K = 3.0
+CANONICAL_MISSING = "__missing__"
 
 
 def safe_divide(num: float, den: float) -> float:
@@ -15,6 +18,30 @@ def safe_divide(num: float, den: float) -> float:
             return 0.0
         return math.copysign(math.inf, numerator)
     return numerator / denominator
+
+
+def normalize_descriptor_value(value: object) -> str:
+    if value is None:
+        return CANONICAL_MISSING
+    text = str(value).strip().lower()
+    return text if text else CANONICAL_MISSING
+
+
+def aggregate_window_descriptors(values: Sequence[object], *, tie_break_value: object) -> str:
+    normalized_values = [normalize_descriptor_value(value) for value in values]
+    if not normalized_values:
+        return CANONICAL_MISSING
+
+    counts = Counter(normalized_values)
+    max_count = max(counts.values())
+    winners = {value for value, count in counts.items() if count == max_count}
+    if len(winners) == 1:
+        return next(iter(winners))
+
+    normalized_tie_break = normalize_descriptor_value(tie_break_value)
+    if normalized_tie_break in winners:
+        return normalized_tie_break
+    return sorted(winners)[0]
 
 
 def _normalize_embedding(value: Sequence[float]) -> list[float]:
@@ -92,8 +119,7 @@ def build_candidate_feature_row(
     candidate: Mapping[str, object],
     descriptors: Mapping[str, object],
     embeddings: Mapping[str, Sequence[float]] | None,
-) -> dict[str, float | int]:
-    _ = descriptors
+) -> dict[str, float | int | str]:
 
     timestamps = [
         _require_timestamp(candidate, "frame_01_timestamp"),
@@ -115,7 +141,7 @@ def build_candidate_feature_row(
     local_gap_median = float(median(gaps))
     non_central_gap_median = float(median(non_central_gaps))
 
-    row: dict[str, float | int] = {
+    row: dict[str, float | int | str] = {
         "gap_12": gaps[0],
         "gap_23": gaps[1],
         "gap_34": gaps[2],
@@ -129,6 +155,60 @@ def build_candidate_feature_row(
         "max_gap_in_window": max(gaps),
         "gap_variance": float(pvariance(gaps)),
     }
+
+    left_photo_ids = [
+        _require_photo_id(candidate, "frame_01_photo_id"),
+        _require_photo_id(candidate, "frame_02_photo_id"),
+        _require_photo_id(candidate, "frame_03_photo_id"),
+    ]
+    right_photo_ids = [
+        _require_photo_id(candidate, "frame_04_photo_id"),
+        _require_photo_id(candidate, "frame_05_photo_id"),
+    ]
+    descriptor_map = {
+        photo_id: value for photo_id, value in descriptors.items() if isinstance(photo_id, str)
+    }
+    left_costume_values = [
+        normalize_descriptor_value(
+            descriptor_map.get(photo_id, {}).get("costume_type")
+            if isinstance(descriptor_map.get(photo_id), MappingABC)
+            else None
+        )
+        for photo_id in left_photo_ids
+    ]
+    right_costume_values = [
+        normalize_descriptor_value(
+            descriptor_map.get(photo_id, {}).get("costume_type")
+            if isinstance(descriptor_map.get(photo_id), MappingABC)
+            else None
+        )
+        for photo_id in right_photo_ids
+    ]
+    left_costume_value = aggregate_window_descriptors(
+        left_costume_values,
+        tie_break_value=left_costume_values[-1],
+    )
+    right_costume_value = aggregate_window_descriptors(
+        right_costume_values,
+        tie_break_value=right_costume_values[0],
+    )
+    row.update(
+        {
+            "costume_type_left_value": left_costume_value,
+            "costume_type_right_value": right_costume_value,
+            "costume_type_changed": int(left_costume_value != right_costume_value),
+            "costume_type_left_missing": int(CANONICAL_MISSING in left_costume_values),
+            "costume_type_right_missing": int(CANONICAL_MISSING in right_costume_values),
+            "costume_type_left_consistency": sum(
+                value == left_costume_value for value in left_costume_values
+            )
+            / len(left_costume_values),
+            "costume_type_right_consistency": sum(
+                value == right_costume_value for value in right_costume_values
+            )
+            / len(right_costume_values),
+        }
+    )
 
     if embeddings is None:
         return row
