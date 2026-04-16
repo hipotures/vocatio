@@ -295,30 +295,42 @@ def _write_pipeline_summary(
     day_workspaces: Sequence[Path],
     corpus_candidates_path: Path,
     day_metadata_path: Path,
-    split_manifest_path: Path,
-    validation_report_path: Path,
+    split_manifest_path: Path | None,
+    validation_report_path: Path | None,
     model_dir: Path | None,
     eval_dir: Path | None,
     required_heldout_classes: Sequence[str],
     mode: str,
     prepare_only: bool,
+    note: str | None = None,
 ) -> None:
     payload: dict[str, object] = {
         "day_dirs": [str(path) for path in day_dirs],
         "day_workspaces": [str(path) for path in day_workspaces],
         "corpus_candidates_csv": str(corpus_candidates_path),
         "day_metadata_csv": str(day_metadata_path),
-        "split_manifest_csv": str(split_manifest_path),
-        "validation_report_json": str(validation_report_path),
         "required_heldout_classes": list(required_heldout_classes),
         "mode": mode,
         "prepare_only": prepare_only,
     }
+    if split_manifest_path is not None:
+        payload["split_manifest_csv"] = str(split_manifest_path)
+    if validation_report_path is not None:
+        payload["validation_report_json"] = str(validation_report_path)
     if model_dir is not None:
         payload["model_dir"] = str(model_dir)
     if eval_dir is not None:
         payload["eval_dir"] = str(eval_dir)
+    if note:
+        payload["note"] = note
     atomic_write_json(summary_path, payload)
+
+
+def _minimum_day_count_note(day_count: int) -> str:
+    return (
+        "ML boundary training/evaluation requires at least three day_id values to build "
+        f"train/validation/test splits without leakage; got {day_count}."
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -346,6 +358,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     day_metadata_path = corpus_workspace / DAY_METADATA_FILENAME
     atomic_write_csv(day_metadata_path, day_metadata_headers, day_metadata_rows)
     console.print(f"Wrote day metadata: {day_metadata_path}")
+
+    if len(day_metadata_rows) < 3:
+        note = _minimum_day_count_note(len(day_metadata_rows))
+        summary_path = corpus_workspace / PIPELINE_SUMMARY_FILENAME
+        if args.prepare_only:
+            _write_pipeline_summary(
+                summary_path=summary_path,
+                day_dirs=day_dirs,
+                day_workspaces=day_workspaces,
+                corpus_candidates_path=corpus_candidates_path,
+                day_metadata_path=day_metadata_path,
+                split_manifest_path=None,
+                validation_report_path=None,
+                model_dir=None,
+                eval_dir=None,
+                required_heldout_classes=[],
+                mode=args.mode,
+                prepare_only=True,
+                note=note,
+            )
+            console.print(f"Stop after corpus preparation: {note}")
+            console.print(f"Wrote pipeline summary: {summary_path}")
+            return 0
+        raise ValueError(f"{note} Pass at least three day directories or use --prepare-only.")
 
     required_heldout_classes = _required_classes(
         day_metadata_rows,
