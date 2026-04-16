@@ -27,22 +27,23 @@ def _candidate_row(
     day_id: str,
     segment_type: str,
     boundary: str,
+    offset: int = 0,
 ) -> dict[str, str]:
     row = {header: "" for header in CANDIDATE_ROW_HEADERS}
     row.update(
         {
             "candidate_id": canonical_candidate_id(
                 day_id=day_id,
-                center_left_photo_id=f"{day_id}-p3",
-                center_right_photo_id=f"{day_id}-p4",
+                center_left_photo_id=f"{day_id}-p3-{offset}",
+                center_right_photo_id=f"{day_id}-p4-{offset}",
                 candidate_rule_version="gap-v1",
             ),
             "day_id": day_id,
             "window_size": "5",
-            "center_left_photo_id": f"{day_id}-p3",
-            "center_right_photo_id": f"{day_id}-p4",
-            "left_segment_id": f"{day_id}-seg-a",
-            "right_segment_id": f"{day_id}-seg-b",
+            "center_left_photo_id": f"{day_id}-p3-{offset}",
+            "center_right_photo_id": f"{day_id}-p4-{offset}",
+            "left_segment_id": f"{day_id}-seg-a-{offset}",
+            "right_segment_id": f"{day_id}-seg-b-{offset}",
             "left_segment_type": "performance",
             "right_segment_type": segment_type,
             "segment_type": segment_type,
@@ -58,11 +59,11 @@ def _candidate_row(
     )
     for frame_index in range(1, 6):
         suffix = f"{frame_index:02d}"
-        row[f"frame_{suffix}_photo_id"] = f"{day_id}-p{frame_index}"
-        row[f"frame_{suffix}_relpath"] = f"cam/{day_id}-p{frame_index}.jpg"
-        row[f"frame_{suffix}_timestamp"] = str(float(frame_index))
-        row[f"frame_{suffix}_thumb_path"] = f"thumb/{day_id}-p{frame_index}.jpg"
-        row[f"frame_{suffix}_preview_path"] = f"preview/{day_id}-p{frame_index}.jpg"
+        row[f"frame_{suffix}_photo_id"] = f"{day_id}-p{frame_index}-{offset}"
+        row[f"frame_{suffix}_relpath"] = f"cam/{day_id}-p{frame_index}-{offset}.jpg"
+        row[f"frame_{suffix}_timestamp"] = str(float(offset * 10 + frame_index))
+        row[f"frame_{suffix}_thumb_path"] = f"thumb/{day_id}-p{frame_index}-{offset}.jpg"
+        row[f"frame_{suffix}_preview_path"] = f"preview/{day_id}-p{frame_index}-{offset}.jpg"
     return row
 
 
@@ -75,7 +76,7 @@ def _write_candidate_csv(path: Path, rows: list[dict[str, str]]) -> None:
 
 def _write_split_manifest(path: Path, rows: list[dict[str, str]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["day_id", "split_name"])
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
 
@@ -296,6 +297,7 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path) -
         "mode": "tabular_only",
         "dataset_path": str(dataset_path),
         "split_manifest_path": str(split_manifest_path),
+        "split_manifest_scope": "day_id",
         "predictors": [
             {"name": "segment_type", "problem_type": "multiclass"},
             {"name": "boundary", "problem_type": "binary"},
@@ -309,6 +311,7 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path) -
         "predictor_names": ["segment_type", "boundary"],
         "train_row_count": 1,
         "validation_row_count": 1,
+        "split_manifest_scope": "day_id",
         "split_counts_by_name": {"train": 1, "validation": 1, "test": 1},
         "artifacts": {
             "training_plan": str(output_dir / TRAINING_PLAN_FILENAME),
@@ -357,6 +360,61 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path) -
     assert "frame_01_relpath" not in train_columns
     assert "frame_01_timestamp" not in train_columns
     assert "frame_01_preview_path" not in train_columns
+
+
+def test_train_cli_records_candidate_keyed_split_manifest_scope(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    FakeTabularPredictor.instances.clear()
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    output_dir = tmp_path / "models" / "run-candidate-keyed"
+    candidate_rows = [
+        _candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=1),
+        _candidate_row(day_id="20250324", segment_type="ceremony", boundary="1", offset=2),
+        _candidate_row(day_id="20250325", segment_type="warmup", boundary="0", offset=3),
+    ]
+    _write_candidate_csv(dataset_path, candidate_rows)
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"candidate_id": candidate_rows[0]["candidate_id"], "split_name": "train"},
+            {"candidate_id": candidate_rows[1]["candidate_id"], "split_name": "validation"},
+            {"candidate_id": candidate_rows[2]["candidate_id"], "split_name": "test"},
+        ],
+    )
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_tabular_predictor_class",
+        lambda: FakeTabularPredictor,
+    )
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_multimodal_predictor_class",
+        lambda: FakeMultiModalPredictor,
+    )
+
+    exit_code = main(
+        [
+            str(dataset_path),
+            "--split-manifest-csv",
+            str(split_manifest_path),
+            "--mode",
+            "tabular_only",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    training_plan = json.loads((output_dir / TRAINING_PLAN_FILENAME).read_text(encoding="utf-8"))
+    training_metadata = json.loads((output_dir / TRAINING_METADATA_FILENAME).read_text(encoding="utf-8"))
+
+    assert training_plan["split_manifest_path"] == str(split_manifest_path)
+    assert training_plan["split_manifest_scope"] == "candidate_id"
+    assert training_metadata["split_manifest_scope"] == "candidate_id"
+    assert training_metadata["split_counts_by_name"] == {"train": 1, "validation": 1, "test": 1}
+    assert FakeTabularPredictor.instances[0].fit_calls[0]["train_rows"] == 1
+    assert FakeTabularPredictor.instances[0].fit_calls[0]["validation_rows"] == 1
 
 
 def test_train_cli_uses_multimodal_predictor_for_thumbnail_mode(

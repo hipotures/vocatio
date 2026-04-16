@@ -100,7 +100,7 @@ def _write_candidate_csv(path: Path, rows: list[dict[str, str]]) -> None:
 
 def _write_split_manifest(path: Path, rows: list[dict[str, str]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["day_id", "split_name"])
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
 
@@ -226,6 +226,7 @@ def test_eval_cli_writes_metrics_artifact(tmp_path: Path, monkeypatch) -> None:
         "model_mode": "tabular_only",
         "dataset_path": str(dataset_path),
         "split_manifest_path": str(split_manifest_path),
+        "split_manifest_scope": "day_id",
         "split_name": "test",
         "threshold_policy": {"policy": "fixed", "threshold": 0.5},
         "final_boundary_threshold": 0.5,
@@ -238,6 +239,70 @@ def test_eval_cli_writes_metrics_artifact(tmp_path: Path, monkeypatch) -> None:
             "estimated_correction_actions": 0,
         },
     }
+
+
+def test_eval_cli_records_candidate_keyed_split_manifest_scope(tmp_path: Path, monkeypatch) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    candidate_rows = [
+        _candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=1),
+        _candidate_row(day_id="20250324", segment_type="ceremony", boundary="1", offset=2),
+        _candidate_row(day_id="20250325", segment_type="warmup", boundary="0", offset=3),
+    ]
+    _write_candidate_csv(dataset_path, candidate_rows)
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"candidate_id": candidate_rows[0]["candidate_id"], "split_name": "train"},
+            {"candidate_id": candidate_rows[1]["candidate_id"], "split_name": "validation"},
+            {"candidate_id": candidate_rows[2]["candidate_id"], "split_name": "test"},
+        ],
+    )
+    model_dir = tmp_path / "models" / "run-candidate-keyed"
+    _write_model_artifacts(model_dir, split_manifest_path=split_manifest_path, threshold=0.5)
+    output_dir = tmp_path / "eval" / "run-candidate-keyed"
+
+    class _FakePredictor:
+        def __init__(self, label: str):
+            self.label = label
+
+        @classmethod
+        def load(cls, path: str):
+            label = "boundary" if "boundary_model" in path else "segment_type"
+            return cls(label)
+
+        def predict(self, frame):
+            rows = _records_from_frame(frame)
+            if self.label == "segment_type":
+                return [str(row["segment_type"]) for row in rows]
+            return [int(row["boundary"]) for row in rows]
+
+        def predict_proba(self, frame):
+            rows = _records_from_frame(frame)
+            return [
+                {"0": 1.0 if int(row["boundary"]) == 0 else 0.0, "1": 1.0 if int(row["boundary"]) == 1 else 0.0}
+                for row in rows
+            ]
+
+    monkeypatch.setattr("evaluate_ml_boundary_verifier.load_tabular_predictor_class", lambda: _FakePredictor)
+    monkeypatch.setattr("evaluate_ml_boundary_verifier.load_multimodal_predictor_class", lambda: _FakePredictor)
+
+    exit_code = eval_main(
+        [
+            str(dataset_path),
+            "--model-dir",
+            str(model_dir),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    metrics_payload = json.loads((output_dir / METRICS_FILENAME).read_text(encoding="utf-8"))
+    assert metrics_payload["split_manifest_path"] == str(split_manifest_path)
+    assert metrics_payload["split_manifest_scope"] == "candidate_id"
+    assert metrics_payload["split_name"] == "test"
+    assert metrics_payload["row_count"] == 1
 
 
 def test_eval_cli_requires_model_artifacts(tmp_path: Path) -> None:

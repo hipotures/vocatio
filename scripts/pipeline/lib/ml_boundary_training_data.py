@@ -45,6 +45,7 @@ class TrainingDataBundle:
     train_rows: "TrainingTable"
     validation_rows: "TrainingTable"
     test_rows: "TrainingTable"
+    split_manifest_scope: str
     split_counts_by_name: dict[str, int]
     shared_feature_columns: list[str]
     image_feature_columns: list[str]
@@ -213,10 +214,12 @@ def load_training_data_bundle(
         mode=mode,
         resource_name=dataset_path.name,
     )
+    split_manifest_frame = load_split_manifest_frame(split_manifest_path)
+    split_manifest_scope = _detect_split_manifest_key(split_manifest_frame.columns)
 
     joined_frame = _join_split_manifest(
         candidate_frame,
-        split_manifest_frame=load_split_manifest_frame(split_manifest_path),
+        split_manifest_frame=split_manifest_frame,
     )
     joined_frame, derived_feature_columns = _derive_feature_view(joined_frame)
     train_rows = TrainingTable(
@@ -250,6 +253,7 @@ def load_training_data_bundle(
         train_rows=train_rows,
         validation_rows=validation_rows,
         test_rows=test_rows,
+        split_manifest_scope=split_manifest_scope,
         split_counts_by_name=_split_counts(joined_frame["split_name"]),
         shared_feature_columns=columns_by_mode["shared_feature_columns"],
         image_feature_columns=columns_by_mode["image_feature_columns"],

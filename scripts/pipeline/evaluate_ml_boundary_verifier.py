@@ -367,6 +367,7 @@ def _build_metrics_payload(
         "model_mode": mode,
         "dataset_path": str(dataset_path),
         "split_manifest_path": str(split_manifest_path),
+        "split_manifest_scope": training_bundle.split_manifest_scope,
         "split_name": "test",
         "threshold_policy": threshold_policy,
         "final_boundary_threshold": threshold,

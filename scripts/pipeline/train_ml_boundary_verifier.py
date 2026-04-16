@@ -148,7 +148,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         atomic_write_json(
             staged_output_dir / TRAINING_PLAN_FILENAME,
-            _build_training_plan_payload(dataset_path, split_manifest_path, args.mode),
+            _build_training_plan_payload(
+                dataset_path,
+                split_manifest_path,
+                training_bundle.split_manifest_scope,
+                args.mode,
+            ),
         )
         atomic_write_json(
             staged_output_dir / TRAINING_METADATA_FILENAME,
@@ -240,12 +245,14 @@ def _publish_staged_output(staging_dir: Path, output_dir: Path, *, overwrite: bo
 def _build_training_plan_payload(
     dataset_path: Path,
     split_manifest_path: Path,
+    split_manifest_scope: str,
     mode: str,
 ) -> dict[str, object]:
     return {
         "mode": mode,
         "dataset_path": str(dataset_path),
         "split_manifest_path": str(split_manifest_path),
+        "split_manifest_scope": split_manifest_scope,
         "predictors": build_training_plan(mode),
         "image_feature_columns": image_feature_columns_for_mode(mode),
         "boundary_threshold_policy": default_boundary_threshold_policy(),
@@ -264,6 +271,7 @@ def _build_training_metadata_payload(
         "predictor_names": [predictor["name"] for predictor in build_training_plan(mode)],
         "train_row_count": int(len(training_bundle.train_rows)),
         "validation_row_count": int(len(training_bundle.validation_rows)),
+        "split_manifest_scope": training_bundle.split_manifest_scope,
         "split_counts_by_name": training_bundle.split_counts_by_name,
         "artifacts": {
             name: str(path)
