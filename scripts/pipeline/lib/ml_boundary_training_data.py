@@ -26,16 +26,7 @@ REQUIRED_DERIVED_FEATURE_SOURCE_COLUMNS = tuple(
         for frame_index in range(1, 6)
     ]
 )
-NON_FEATURE_COLUMNS = frozenset(
-    REQUIRED_BASE_COLUMNS
-    + (
-        "split_name",
-        "left_segment_id",
-        "right_segment_id",
-        "left_segment_type",
-        "right_segment_type",
-    )
-)
+NON_MODEL_FEATURE_COLUMNS = frozenset(REQUIRED_BASE_COLUMNS + ("split_name",))
 REQUIRED_SPLIT_MANIFEST_COLUMNS = ("day_id", "split_name")
 ALLOWED_SPLIT_NAMES = ("train", "validation", "test")
 
@@ -174,7 +165,7 @@ def feature_columns_for_mode(dataset_columns: list[str], mode: str) -> dict[str,
     shared_feature_columns = [
         column
         for column in dataset_columns
-        if column not in NON_FEATURE_COLUMNS and column not in THUMBNAIL_IMAGE_COLUMNS
+        if column not in NON_MODEL_FEATURE_COLUMNS and column not in THUMBNAIL_IMAGE_COLUMNS
     ]
     predictor_feature_columns = shared_feature_columns + image_feature_columns
     return {
@@ -193,12 +184,9 @@ def load_training_data_bundle(
 ) -> TrainingDataBundle:
     validate_mode(mode)
     candidate_frame = load_candidate_training_frame(dataset_path)
-    required_columns = list(REQUIRED_BASE_COLUMNS)
-    required_columns.extend(REQUIRED_DERIVED_FEATURE_SOURCE_COLUMNS)
-    required_columns.extend(image_feature_columns_for_mode(mode))
-    _require_columns(
+    validate_candidate_training_columns(
         candidate_frame.columns,
-        required_columns=required_columns,
+        mode=mode,
         resource_name=dataset_path.name,
     )
 
@@ -206,7 +194,7 @@ def load_training_data_bundle(
         candidate_frame,
         split_manifest_frame=load_split_manifest_frame(split_manifest_path),
     )
-    joined_frame = _derive_feature_view(joined_frame)
+    joined_frame, derived_feature_columns = _derive_feature_view(joined_frame)
     train_rows = TrainingTable(
         [row for row in joined_frame.rows if row["split_name"] == "train"]
     )
@@ -221,7 +209,11 @@ def load_training_data_bundle(
     _normalize_labels(train_rows, split_name="train")
     _normalize_labels(validation_rows, split_name="validation")
 
-    columns_by_mode = feature_columns_for_mode(joined_frame.columns, mode)
+    model_feature_source_columns = (
+        list(derived_feature_columns)
+        + [column_name for column_name in THUMBNAIL_IMAGE_COLUMNS if column_name in joined_frame.columns]
+    )
+    columns_by_mode = feature_columns_for_mode(model_feature_source_columns, mode)
     segment_type_feature_columns = columns_by_mode["segment_type_feature_columns"]
     boundary_feature_columns = columns_by_mode["boundary_feature_columns"]
 
@@ -255,6 +247,22 @@ def _require_columns(
     missing = [column for column in required_columns if column not in columns]
     if missing:
         raise ValueError(f"{resource_name} missing required columns: {', '.join(missing)}")
+
+
+def validate_candidate_training_columns(
+    columns: list[str],
+    *,
+    mode: str,
+    resource_name: str,
+) -> None:
+    required_columns = list(REQUIRED_BASE_COLUMNS)
+    required_columns.extend(REQUIRED_DERIVED_FEATURE_SOURCE_COLUMNS)
+    required_columns.extend(image_feature_columns_for_mode(mode))
+    _require_columns(
+        columns,
+        required_columns=required_columns,
+        resource_name=resource_name,
+    )
 
 
 def _join_split_manifest(
@@ -317,19 +325,30 @@ def _split_counts(split_values: ColumnValues) -> dict[str, int]:
     return counts
 
 
-def _derive_feature_view(table: TrainingTable) -> TrainingTable:
+def _derive_feature_view(table: TrainingTable) -> tuple[TrainingTable, list[str]]:
     derived_rows: list[dict[str, object]] = []
     derived_feature_columns: list[str] = []
     for row in table.rows:
         derived_features = build_candidate_feature_row(row, descriptors={}, embeddings=None)
         if not derived_feature_columns:
             derived_feature_columns = list(derived_features.keys())
-        derived_row = dict(row)
-        derived_row.update(derived_features)
+        derived_row: dict[str, object] = {column_name: derived_features[column_name] for column_name in derived_feature_columns}
+        derived_row["day_id"] = row["day_id"]
+        derived_row["segment_type"] = row["segment_type"]
+        derived_row["boundary"] = row["boundary"]
+        derived_row["split_name"] = row["split_name"]
+        for image_column in THUMBNAIL_IMAGE_COLUMNS:
+            if image_column in row:
+                derived_row[image_column] = row[image_column]
         derived_rows.append(derived_row)
-    return TrainingTable(
-        derived_rows,
-        column_names=table.columns + [
-            column_name for column_name in derived_feature_columns if column_name not in table.columns
-        ],
+    return (
+        TrainingTable(
+            derived_rows,
+            column_names=(
+                ["day_id", "segment_type", "boundary", "split_name"]
+                + derived_feature_columns
+                + [column_name for column_name in THUMBNAIL_IMAGE_COLUMNS if column_name in table.columns]
+            ),
+        ),
+        derived_feature_columns,
     )

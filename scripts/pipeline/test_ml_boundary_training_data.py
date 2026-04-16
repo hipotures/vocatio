@@ -130,6 +130,12 @@ def test_load_training_data_bundle_joins_split_manifest_and_selects_train_valida
         "frame_04_thumb_path",
         "frame_05_thumb_path",
     ]
+    assert "gap_34" in bundle.shared_feature_columns
+    assert "candidate_id" not in bundle.shared_feature_columns
+    assert "candidate_rule_name" not in bundle.shared_feature_columns
+    assert "frame_01_relpath" not in bundle.shared_feature_columns
+    assert "frame_01_timestamp" not in bundle.shared_feature_columns
+    assert "frame_01_preview_path" not in bundle.shared_feature_columns
 
 
 def test_load_training_data_bundle_requires_base_columns_for_tabular_mode(

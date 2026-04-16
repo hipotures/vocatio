@@ -15,7 +15,9 @@ from lib.ml_boundary_training_data import (
     TrainingDataBundle,
     TrainingTable,
     image_feature_columns_for_mode as training_image_feature_columns_for_mode,
+    load_candidate_training_frame,
     load_training_data_bundle,
+    validate_candidate_training_columns,
     validate_dataset_path,
     validate_mode,
 )
@@ -83,6 +85,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def validate_dataset_contract(dataset_path: Path, mode: str) -> None:
     validate_mode(mode)
     validate_dataset_path(dataset_path)
+    dataset_frame = load_candidate_training_frame(dataset_path)
+    validate_candidate_training_columns(
+        dataset_frame.columns,
+        mode=mode,
+        resource_name=dataset_path.name,
+    )
 
 
 def load_tabular_predictor_class():

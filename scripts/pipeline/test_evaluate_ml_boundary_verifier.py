@@ -164,25 +164,59 @@ def test_eval_cli_rejects_unsupported_dataset_extension(tmp_path: Path) -> None:
         raise AssertionError("expected ValueError")
 
 
-def test_train_and_eval_cli_integration_writes_scaffold_metrics(tmp_path: Path) -> None:
+def test_train_and_eval_cli_integration_writes_scaffold_metrics(tmp_path: Path, monkeypatch) -> None:
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
     dataset_path.write_text(
         (
-            "segment_type,boundary,"
+            "day_id,segment_type,boundary,"
+            "frame_01_timestamp,frame_02_timestamp,frame_03_timestamp,frame_04_timestamp,frame_05_timestamp,"
+            "frame_01_photo_id,frame_02_photo_id,frame_03_photo_id,frame_04_photo_id,frame_05_photo_id,"
             "frame_01_thumb_path,frame_02_thumb_path,frame_03_thumb_path,"
             "frame_04_thumb_path,frame_05_thumb_path\n"
-            "performance,0,thumb/1.jpg,thumb/2.jpg,thumb/3.jpg,thumb/4.jpg,thumb/5.jpg\n"
-            "ceremony,1,thumb/6.jpg,thumb/7.jpg,thumb/8.jpg,thumb/9.jpg,thumb/10.jpg\n"
-            "warmup,0,thumb/11.jpg,thumb/12.jpg,thumb/13.jpg,thumb/14.jpg,thumb/15.jpg\n"
+            "20250324,performance,0,1,2,3,4,5,p1,p2,p3,p4,p5,thumb/1.jpg,thumb/2.jpg,thumb/3.jpg,thumb/4.jpg,thumb/5.jpg\n"
+            "20250325,ceremony,1,1,2,3,4,5,q1,q2,q3,q4,q5,thumb/6.jpg,thumb/7.jpg,thumb/8.jpg,thumb/9.jpg,thumb/10.jpg\n"
+            "20250326,warmup,0,1,2,3,4,5,r1,r2,r3,r4,r5,thumb/11.jpg,thumb/12.jpg,thumb/13.jpg,thumb/14.jpg,thumb/15.jpg\n"
         ),
+        encoding="utf-8",
+    )
+    split_manifest_path.write_text(
+        "day_id,split_name\n20250324,train\n20250325,validation\n20250326,test\n",
         encoding="utf-8",
     )
     model_dir = tmp_path / "models" / "run-001"
     eval_dir = tmp_path / "eval" / "run-001"
 
+    class _FakeMultiModalPredictor:
+        def __init__(self, *, label=None, problem_type=None, path=None, **_kwargs):
+            self.label = label
+            self.problem_type = problem_type
+            self.path = path
+
+        def fit(self, train_data, tuning_data=None, **_kwargs):
+            Path(self.path).mkdir(parents=True, exist_ok=True)
+            return self
+
+        def evaluate(self, _data):
+            return {"accuracy": 0.87}
+
+        def fit_summary(self):
+            return {"best_model": "fake", "num_models_trained": 1}
+
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_multimodal_predictor_class",
+        lambda: _FakeMultiModalPredictor,
+    )
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_tabular_predictor_class",
+        lambda: _FakeMultiModalPredictor,
+    )
+
     train_exit_code = train_main(
         [
             str(dataset_path),
+            "--split-manifest-csv",
+            str(split_manifest_path),
             "--mode",
             "tabular_plus_thumbnail",
             "--output-dir",
