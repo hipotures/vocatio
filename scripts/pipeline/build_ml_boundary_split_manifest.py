@@ -5,9 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from collections import Counter
 from dataclasses import dataclass
-from itertools import combinations
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
@@ -30,7 +28,6 @@ console = Console(stderr=True)
 
 DEFAULT_OUTPUT_FILENAME = "ml_boundary_splits.csv"
 OUTPUT_HEADERS = ["day_id", "split_name"]
-HELDOUT_SPLIT_NAMES = ("validation", "test")
 REQUIRED_DAY_METADATA_HEADERS = ("day_id", "segment_types")
 
 
@@ -39,6 +36,7 @@ class DayMetadata:
     day_id: str
     segment_types: frozenset[str]
     domain_key: tuple[str, ...] | None
+    has_domain_shift_hint: bool
 
 
 def _progress() -> Progress:
@@ -126,6 +124,10 @@ def _domain_key_for_row(row: Mapping[str, str]) -> tuple[str, ...] | None:
     return tuple(components)
 
 
+def _has_domain_shift_hint(row: Mapping[str, str]) -> bool:
+    return bool(str(row.get("domain_shift_hint", "") or "").strip())
+
+
 def _read_csv_rows(path: Path) -> list[dict[str, str]]:
     if not path.is_file():
         raise FileNotFoundError(f"CSV does not exist: {path}")
@@ -148,17 +150,21 @@ def _load_day_metadata(paths: Sequence[Path]) -> list[DayMetadata]:
         task_id = progress.add_task(task_description, total=len(paths))
         for path in paths:
             for row_number, row in enumerate(_read_csv_rows(path), start=2):
-                day_id = _require_non_blank_text(row, "day_id", row_number=row_number)
-                if day_id in metadata_by_day:
-                    raise ValueError(f"Duplicate day_id across metadata inputs: {day_id}")
-                metadata_by_day[day_id] = DayMetadata(
-                    day_id=day_id,
-                    segment_types=_parse_segment_types(
-                        _require_non_blank_text(row, "segment_types", row_number=row_number),
-                        row_number=row_number,
-                    ),
-                    domain_key=_domain_key_for_row(row),
-                )
+                try:
+                    day_id = _require_non_blank_text(row, "day_id", row_number=row_number)
+                    if day_id in metadata_by_day:
+                        raise ValueError(f"Duplicate day_id across metadata inputs: {day_id}")
+                    metadata_by_day[day_id] = DayMetadata(
+                        day_id=day_id,
+                        segment_types=_parse_segment_types(
+                            _require_non_blank_text(row, "segment_types", row_number=row_number),
+                            row_number=row_number,
+                        ),
+                        domain_key=_domain_key_for_row(row),
+                        has_domain_shift_hint=_has_domain_shift_hint(row),
+                    )
+                except ValueError as exc:
+                    raise ValueError(f"{path.name}: {exc}") from exc
             progress.advance(task_id)
 
     if len(metadata_by_day) < 3:
@@ -186,42 +192,31 @@ def _covered_classes(days: Sequence[DayMetadata]) -> frozenset[str]:
     return frozenset(covered)
 
 
-def _baseline_domain_key(days: Sequence[DayMetadata]) -> tuple[str, ...] | None:
-    counts = Counter(day.domain_key for day in days)
-    return min(
-        counts,
-        key=lambda key: (-counts[key], key is None, key or ()),
-    )
-
-
-def _supports_domain_shift(days: Sequence[DayMetadata], baseline_domain_key: tuple[str, ...] | None) -> bool:
-    return any(
-        day.domain_key is not None and day.domain_key != baseline_domain_key
-        for day in days
-    )
-
-
-def _heldout_represents_domain_shift(
-    heldout_days: Sequence[DayMetadata],
-    baseline_domain_key: tuple[str, ...] | None,
-) -> bool:
-    for day in heldout_days:
-        if day.domain_key is not None and day.domain_key != baseline_domain_key:
-            return True
-    return False
+def _is_domain_shift_day(day: DayMetadata, train_days: Sequence[DayMetadata]) -> bool:
+    if day.domain_key is None:
+        return False
+    train_domain_keys = {item.domain_key for item in train_days if item.domain_key is not None}
+    return day.domain_key not in train_domain_keys
 
 
 def _assignment_score(
-    validation_days: Sequence[DayMetadata],
-    test_days: Sequence[DayMetadata],
-    baseline_domain_key: tuple[str, ...] | None,
+    validation_day: DayMetadata,
+    test_day: DayMetadata,
+    train_days: Sequence[DayMetadata],
 ) -> tuple[object, ...]:
+    validation_is_domain_shift = _is_domain_shift_day(validation_day, train_days)
+    test_is_domain_shift = _is_domain_shift_day(test_day, train_days)
+    validation_is_hint_shift = (
+        validation_is_domain_shift and validation_day.has_domain_shift_hint
+    )
+    test_is_hint_shift = test_is_domain_shift and test_day.has_domain_shift_hint
     return (
-        len(validation_days) + len(test_days),
-        0 if _heldout_represents_domain_shift(test_days, baseline_domain_key) else 1,
-        len(validation_days),
-        tuple(day.day_id for day in validation_days),
-        tuple(day.day_id for day in test_days),
+        0 if (validation_is_hint_shift or test_is_hint_shift) else 1,
+        0 if test_is_hint_shift else 1,
+        0 if (validation_is_domain_shift or test_is_domain_shift) else 1,
+        0 if test_is_domain_shift else 1,
+        validation_day.day_id,
+        test_day.day_id,
     )
 
 
@@ -242,64 +237,46 @@ def _build_split_manifest_from_days(
             f"{missing}"
         )
 
-    baseline_domain_key = _baseline_domain_key(days)
-    require_domain_shift = _supports_domain_shift(days, baseline_domain_key)
-    best_assignment: tuple[tuple[int, ...], tuple[int, ...]] | None = None
+    best_assignment: tuple[int, int] | None = None
     best_score: tuple[object, ...] | None = None
     day_indexes = tuple(range(len(days)))
 
-    for validation_size in range(1, len(days) - 1):
-        for validation_indexes in combinations(day_indexes, validation_size):
-            validation_days = [days[index] for index in validation_indexes]
-            if required_classes and not required_classes.issubset(_covered_classes(validation_days)):
+    for validation_index in day_indexes:
+        validation_day = days[validation_index]
+        if required_classes and not required_classes.issubset(validation_day.segment_types):
+            continue
+        for test_index in day_indexes:
+            if test_index == validation_index:
+                continue
+            test_day = days[test_index]
+            if required_classes and not required_classes.issubset(test_day.segment_types):
                 continue
 
-            remaining_indexes = tuple(
-                index for index in day_indexes if index not in validation_indexes
-            )
-            for test_size in range(1, len(remaining_indexes)):
-                for test_indexes in combinations(remaining_indexes, test_size):
-                    train_indexes = tuple(
-                        index
-                        for index in day_indexes
-                        if index not in validation_indexes and index not in test_indexes
-                    )
-                    if not train_indexes:
-                        continue
-
-                    test_days = [days[index] for index in test_indexes]
-                    if required_classes and not required_classes.issubset(_covered_classes(test_days)):
-                        continue
-
-                    if require_domain_shift and not (
-                        _heldout_represents_domain_shift(validation_days, baseline_domain_key)
-                        or _heldout_represents_domain_shift(test_days, baseline_domain_key)
-                    ):
-                        continue
-
-                    score = _assignment_score(
-                        validation_days,
-                        test_days,
-                        baseline_domain_key,
-                    )
-                    if best_score is None or score < best_score:
-                        best_score = score
-                        best_assignment = (validation_indexes, test_indexes)
+            train_days = [
+                day
+                for index, day in enumerate(days)
+                if index not in {validation_index, test_index}
+            ]
+            score = _assignment_score(validation_day, test_day, train_days)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_assignment = (validation_index, test_index)
 
     if best_assignment is None:
         classes_text = ", ".join(sorted(required_classes)) if required_classes else "none requested"
         raise ValueError(
             "Unable to satisfy required held-out class coverage under day-level isolation "
-            f"without leakage. Required held-out classes: {classes_text}."
+            "with the single-day validation/test policy. "
+            f"Required held-out classes: {classes_text}."
         )
 
-    validation_indexes, test_indexes = best_assignment
+    validation_index, test_index = best_assignment
     split_by_day: dict[str, str] = {}
     for index, day in enumerate(days):
         split_name = "train"
-        if index in validation_indexes:
+        if index == validation_index:
             split_name = "validation"
-        elif index in test_indexes:
+        elif index == test_index:
             split_name = "test"
         split_by_day[day.day_id] = split_name
 
@@ -326,6 +303,7 @@ def build_split_manifest_rows(
                 row_number=row_number,
             ),
             domain_key=_domain_key_for_row(row),
+            has_domain_shift_hint=_has_domain_shift_hint(row),
         )
 
     return _build_split_manifest_from_days(
