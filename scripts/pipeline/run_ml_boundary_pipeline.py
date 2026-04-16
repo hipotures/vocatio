@@ -346,88 +346,136 @@ def _validate_corpus_size(merged_rows: Sequence[dict[str, str]]) -> None:
         )
 
 
-def _split_target_counts(total_rows: int, split_config: SplitConfig) -> dict[str, int]:
+def _split_counts_for_total(total_rows: int, split_config: SplitConfig) -> dict[str, int]:
     split_names = ("train", "validation", "test")
-    fractions = (
-        split_config.train_fraction,
-        split_config.validation_fraction,
-        split_config.test_fraction,
+    total_fraction = (
+        split_config.train_fraction
+        + split_config.validation_fraction
+        + split_config.test_fraction
     )
-    counts = {split_name: 1 for split_name in split_names}
-    remainder = total_rows - len(split_names)
-    if remainder <= 0:
-        return counts
+    if not math.isclose(total_fraction, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("train_fraction + validation_fraction + test_fraction must equal 1.0")
+    targets = {
+        "train": total_rows * split_config.train_fraction,
+        "validation": total_rows * split_config.validation_fraction,
+        "test": total_rows * split_config.test_fraction,
+    }
+    counts = {
+        split_name: max(1, int(round(targets[split_name])))
+        for split_name in split_names
+    }
 
-    scaled = [fraction * remainder for fraction in fractions]
-    extra_counts = [int(math.floor(value)) for value in scaled]
-    for index, split_name in enumerate(split_names):
-        counts[split_name] += extra_counts[index]
+    while sum(counts.values()) > total_rows:
+        candidates = [
+            split_name
+            for split_name in split_names
+            if counts[split_name] > 1
+        ]
+        if not candidates:
+            break
+        split_name = max(
+            candidates,
+            key=lambda name: (
+                counts[name] - targets[name],
+                counts[name],
+                -split_names.index(name),
+            ),
+        )
+        counts[split_name] -= 1
 
-    assigned = sum(extra_counts)
-    leftovers = remainder - assigned
-    ranked_remainders = sorted(
-        enumerate(scaled),
-        key=lambda item: (item[1] - math.floor(item[1]), -item[0]),
-        reverse=True,
-    )
-    for index in range(leftovers):
-        split_position = ranked_remainders[index][0]
-        counts[split_names[split_position]] += 1
+    while sum(counts.values()) < total_rows:
+        split_name = max(
+            split_names,
+            key=lambda name: (
+                targets[name] - counts[name],
+                targets[name],
+                -split_names.index(name),
+            ),
+        )
+        counts[split_name] += 1
+
     return counts
 
 
-def _ordered_rows_for_split(
-    merged_rows: Sequence[dict[str, str]],
+def _validate_candidate_row(row: dict[str, str]) -> tuple[str, str, str]:
+    candidate_id = str(row.get("candidate_id", "")).strip()
+    if candidate_id == "":
+        raise ValueError("merged candidate rows must include non-blank candidate_id values")
+    boundary = str(row.get("boundary", "")).strip().lower()
+    if boundary == "":
+        raise ValueError("merged candidate rows must include non-blank boundary values")
+    segment_type = str(row.get("segment_type", "")).strip()
+    if segment_type == "":
+        raise ValueError("merged candidate rows must include non-blank segment_type values")
+    return candidate_id, boundary, segment_type
+
+
+def _build_split_rows_from_assignments(assignments: dict[str, str]) -> list[dict[str, str]]:
+    return [
+        {"candidate_id": candidate_id, "split_name": assignments[candidate_id]}
+        for candidate_id in sorted(assignments)
+    ]
+
+
+def _build_global_random_split_rows(
+    candidate_rows: Sequence[dict[str, str]],
     split_config: SplitConfig,
 ) -> list[dict[str, str]]:
+    _validate_corpus_size(candidate_rows)
+    candidate_ids = [_validate_candidate_row(row)[0] for row in candidate_rows]
     random_generator = random.Random(split_config.seed)
-    rows = [dict(row) for row in merged_rows]
-    if split_config.strategy == "global_random":
-        random_generator.shuffle(rows)
-        return rows
+    random_generator.shuffle(candidate_ids)
+    counts = _split_counts_for_total(len(candidate_ids), split_config)
 
-    grouped_rows: dict[str, list[dict[str, str]]] = {}
-    for row in rows:
-        grouped_rows.setdefault(str(row.get("segment_type", "")), []).append(row)
-    for bucket in grouped_rows.values():
-        random_generator.shuffle(bucket)
+    assignments: dict[str, str] = {}
+    start_index = 0
+    for split_name in ("train", "validation", "test"):
+        end_index = start_index + counts[split_name]
+        for candidate_id in candidate_ids[start_index:end_index]:
+            assignments[candidate_id] = split_name
+        start_index = end_index
+    return _build_split_rows_from_assignments(assignments)
 
-    ordered_rows: list[dict[str, str]] = []
-    ordered_keys = sorted(grouped_rows)
-    while any(grouped_rows.values()):
-        for key in ordered_keys:
-            bucket = grouped_rows[key]
-            if bucket:
-                ordered_rows.append(bucket.pop())
-    return ordered_rows
+
+def _build_global_stratified_split_rows(
+    candidate_rows: Sequence[dict[str, str]],
+    split_config: SplitConfig,
+) -> tuple[list[dict[str, str]], str]:
+    _validate_corpus_size(candidate_rows)
+    strata: dict[tuple[str, str], list[str]] = {}
+    for row in candidate_rows:
+        candidate_id, boundary, segment_type = _validate_candidate_row(row)
+        strata.setdefault((boundary, segment_type), []).append(candidate_id)
+
+    if any(len(candidate_ids) < 3 for candidate_ids in strata.values()):
+        return _build_global_random_split_rows(candidate_rows, split_config), "global_random"
+
+    random_generator = random.Random(split_config.seed)
+    assignments: dict[str, str] = {}
+    for stratum_key in sorted(strata):
+        candidate_ids = list(strata[stratum_key])
+        random_generator.shuffle(candidate_ids)
+        counts = _split_counts_for_total(len(candidate_ids), split_config)
+
+        start_index = 0
+        for split_name in ("train", "validation", "test"):
+            end_index = start_index + counts[split_name]
+            for candidate_id in candidate_ids[start_index:end_index]:
+                assignments[candidate_id] = split_name
+            start_index = end_index
+
+    return _build_split_rows_from_assignments(assignments), "global_stratified"
 
 
 def _build_corpus_split_rows(
     merged_rows: Sequence[dict[str, str]],
     split_config: SplitConfig,
-) -> list[dict[str, str]]:
-    target_counts = _split_target_counts(len(merged_rows), split_config)
-    ordered_rows = _ordered_rows_for_split(merged_rows, split_config)
-
-    split_rows: list[dict[str, str]] = []
-    split_index = 0
-    split_names = ("train", "validation", "test")
-    remaining_in_split = target_counts[split_names[split_index]]
-    for row in ordered_rows:
-        while remaining_in_split == 0 and split_index < len(split_names) - 1:
-            split_index += 1
-            remaining_in_split = target_counts[split_names[split_index]]
-        candidate_id = str(row.get("candidate_id", "")).strip()
-        if candidate_id == "":
-            raise ValueError("merged candidate rows must include non-blank candidate_id values")
-        split_rows.append(
-            {
-                "candidate_id": candidate_id,
-                "split_name": split_names[split_index],
-            }
-        )
-        remaining_in_split -= 1
-    return split_rows
+) -> tuple[list[dict[str, str]], str]:
+    if split_config.strategy == "global_random":
+        return _build_global_random_split_rows(merged_rows, split_config), "global_random"
+    if split_config.strategy == "global_stratified":
+        return _build_global_stratified_split_rows(merged_rows, split_config)
+    raise ValueError("split strategy must be one of: global_random, global_stratified")
 
 
 def _required_classes(
@@ -522,6 +570,9 @@ def _write_pipeline_summary(
     model_dir: Path | None,
     eval_dir: Path | None,
     required_heldout_classes: Sequence[str],
+    requested_split_strategy: str,
+    effective_split_strategy: str,
+    split_config: SplitConfig,
     mode: str,
     prepare_only: bool,
     note: str | None = None,
@@ -532,6 +583,12 @@ def _write_pipeline_summary(
         "corpus_candidates_csv": str(corpus_candidates_path),
         "day_metadata_csv": str(day_metadata_path),
         "required_heldout_classes": list(required_heldout_classes),
+        "requested_split_strategy": requested_split_strategy,
+        "effective_split_strategy": effective_split_strategy,
+        "train_fraction": split_config.train_fraction,
+        "validation_fraction": split_config.validation_fraction,
+        "test_fraction": split_config.test_fraction,
+        "split_seed": split_config.seed,
         "mode": mode,
         "prepare_only": prepare_only,
     }
@@ -580,7 +637,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         day_metadata_rows,
         explicit_required=args.required_heldout_classes,
     )
-    split_rows = _build_corpus_split_rows(merged_rows, split_config)
+    split_rows, effective_split_strategy = _build_corpus_split_rows(merged_rows, split_config)
     split_manifest_path = corpus_workspace / SPLIT_MANIFEST_FILENAME
     atomic_write_csv(split_manifest_path, SPLIT_MANIFEST_HEADERS, split_rows)
     console.print(f"Wrote split manifest: {split_manifest_path}")
@@ -626,6 +683,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         model_dir=model_dir,
         eval_dir=eval_dir,
         required_heldout_classes=required_heldout_classes,
+        requested_split_strategy=split_config.strategy,
+        effective_split_strategy=effective_split_strategy,
+        split_config=split_config,
         mode=args.mode,
         prepare_only=args.prepare_only,
     )

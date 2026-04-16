@@ -65,6 +65,18 @@ def _write_candidate_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _split_rows_by_name(split_rows: list[dict[str, str]]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for row in split_rows:
+        grouped.setdefault(row["split_name"], []).append(row["candidate_id"])
+    return grouped
+
+
 def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, monkeypatch) -> None:
     day_dirs = []
     for day_id in ("20250324", "20250325", "20250326"):
@@ -201,6 +213,185 @@ def test_main_single_day_global_random_is_allowed(tmp_path: Path, monkeypatch) -
 
     exit_code = main([str(day_dir), "--split-strategy", "global_random"])
     assert exit_code == 0
+
+
+def test_main_global_random_writes_deterministic_candidate_level_split_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    day_dirs = []
+    for day_id in ("20250324", "20250325"):
+        day_dir = tmp_path / day_id
+        workspace_dir = tmp_path / f"{day_id}DWC"
+        day_dir.mkdir(parents=True)
+        workspace_dir.mkdir(parents=True)
+        (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+        day_dirs.append(day_dir)
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            day_dir = Path(command_values[2]).resolve()
+            workspace_dir = resolve_workspace_dir(day_dir, None)
+            rows = []
+            for index in range(10):
+                row = _candidate_row(day_id=day_dir.name, segment_type="performance", boundary="0", offset=index + 1)
+                row["candidate_id"] = f"{day_dir.name}-c{index:02d}"
+                rows.append(row)
+            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+
+    first_corpus_workspace = tmp_path / "corpus-a"
+    second_corpus_workspace = tmp_path / "corpus-b"
+    cli_args = [str(day) for day in day_dirs] + [
+        "--split-strategy",
+        "global_random",
+        "--train-fraction",
+        "0.70",
+        "--validation-fraction",
+        "0.15",
+        "--test-fraction",
+        "0.15",
+        "--split-seed",
+        "42",
+        "--prepare-only",
+    ]
+
+    assert main(cli_args + ["--corpus-workspace", str(first_corpus_workspace)]) == 0
+    assert main(cli_args + ["--corpus-workspace", str(second_corpus_workspace)]) == 0
+
+    first_rows = _read_csv_rows(first_corpus_workspace / "ml_boundary_splits.csv")
+    second_rows = _read_csv_rows(second_corpus_workspace / "ml_boundary_splits.csv")
+    assert set(first_rows[0].keys()) == {"candidate_id", "split_name"}
+    assert len(first_rows) == 20
+    assert first_rows == second_rows
+    assert {row["split_name"] for row in first_rows} == {"train", "validation", "test"}
+    assert {row["candidate_id"] for row in first_rows} == {
+        f"{day_id}-c{index:02d}"
+        for day_id in ("20250324", "20250325")
+        for index in range(10)
+    }
+    split_counts = {split_name: len(candidate_ids) for split_name, candidate_ids in _split_rows_by_name(first_rows).items()}
+    assert split_counts == {"train": 14, "validation": 3, "test": 3}
+
+    summary_payload = json.loads((first_corpus_workspace / "ml_boundary_pipeline_summary.json").read_text(encoding="utf-8"))
+    assert summary_payload["requested_split_strategy"] == "global_random"
+    assert summary_payload["effective_split_strategy"] == "global_random"
+    assert summary_payload["train_fraction"] == 0.70
+    assert summary_payload["validation_fraction"] == 0.15
+    assert summary_payload["test_fraction"] == 0.15
+    assert summary_payload["split_seed"] == 42
+
+
+def test_main_default_global_stratified_preserves_boundary_presence_when_supported(
+    tmp_path: Path, monkeypatch
+) -> None:
+    day_dirs = []
+    for day_id in ("20250324", "20250325"):
+        day_dir = tmp_path / day_id
+        workspace_dir = tmp_path / f"{day_id}DWC"
+        day_dir.mkdir(parents=True)
+        workspace_dir.mkdir(parents=True)
+        (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+        day_dirs.append(day_dir)
+
+    boundary_by_candidate_id: dict[str, str] = {}
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            day_dir = Path(command_values[2]).resolve()
+            workspace_dir = resolve_workspace_dir(day_dir, None)
+            rows = []
+            for boundary, segment_type in (("0", "performance"), ("1", "performance"), ("0", "ceremony"), ("1", "ceremony")):
+                for index in range(3):
+                    offset = len(rows) + 1
+                    row = _candidate_row(
+                        day_id=day_dir.name,
+                        segment_type=segment_type,
+                        boundary=boundary,
+                        offset=offset,
+                    )
+                    row["candidate_id"] = f"{day_dir.name}-{segment_type}-{boundary}-c{index:02d}"
+                    rows.append(row)
+                    boundary_by_candidate_id[row["candidate_id"]] = boundary
+            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+
+    corpus_workspace = tmp_path / "corpus"
+    assert main(
+        [str(day) for day in day_dirs]
+        + [
+            "--corpus-workspace",
+            str(corpus_workspace),
+            "--prepare-only",
+        ]
+    ) == 0
+
+    split_rows = _read_csv_rows(corpus_workspace / "ml_boundary_splits.csv")
+    assert {row["split_name"] for row in split_rows} == {"train", "validation", "test"}
+
+    boundaries_by_split: dict[str, set[str]] = {}
+    for row in split_rows:
+        boundaries_by_split.setdefault(row["split_name"], set()).add(boundary_by_candidate_id[row["candidate_id"]])
+    assert boundaries_by_split == {
+        "train": {"0", "1"},
+        "validation": {"0", "1"},
+        "test": {"0", "1"},
+    }
+
+    summary_payload = json.loads((corpus_workspace / "ml_boundary_pipeline_summary.json").read_text(encoding="utf-8"))
+    assert summary_payload["requested_split_strategy"] == "global_stratified"
+    assert summary_payload["effective_split_strategy"] == "global_stratified"
+
+
+def test_main_global_stratified_falls_back_to_global_random_for_too_small_strata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    day_dirs = []
+    for day_id in ("20250324", "20250325"):
+        day_dir = tmp_path / day_id
+        workspace_dir = tmp_path / f"{day_id}DWC"
+        day_dir.mkdir(parents=True)
+        workspace_dir.mkdir(parents=True)
+        (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+        day_dirs.append(day_dir)
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            day_dir = Path(command_values[2]).resolve()
+            workspace_dir = resolve_workspace_dir(day_dir, None)
+            rows = []
+            for index in range(5):
+                row = _candidate_row(day_id=day_dir.name, segment_type="performance", boundary="0", offset=index + 1)
+                row["candidate_id"] = f"{day_dir.name}-stable-c{index:02d}"
+                rows.append(row)
+            rare_row = _candidate_row(day_id=day_dir.name, segment_type="ceremony", boundary="1", offset=50)
+            rare_row["candidate_id"] = f"{day_dir.name}-rare"
+            rows.append(rare_row)
+            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+
+    corpus_workspace = tmp_path / "corpus"
+    assert main(
+        [str(day) for day in day_dirs]
+        + [
+            "--corpus-workspace",
+            str(corpus_workspace),
+            "--split-strategy",
+            "global_stratified",
+            "--split-seed",
+            "7",
+            "--prepare-only",
+        ]
+    ) == 0
+
+    summary_payload = json.loads((corpus_workspace / "ml_boundary_pipeline_summary.json").read_text(encoding="utf-8"))
+    assert summary_payload["requested_split_strategy"] == "global_stratified"
+    assert summary_payload["effective_split_strategy"] == "global_random"
 
 
 def test_resolve_split_config_defaults_to_global_stratified(tmp_path: Path) -> None:
