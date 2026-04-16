@@ -692,6 +692,34 @@ def test_global_stratified_raises_when_required_heldout_coverage_is_impossible()
         raise AssertionError("expected impossible held-out coverage to raise a ValueError")
 
 
+def test_global_stratified_raises_when_required_heldout_minimum_counts_exceed_available_rows() -> None:
+    candidate_rows = []
+    for offset, segment_type in enumerate(("performance", "ceremony", "warmup"), start=1):
+        row = _candidate_row(day_id="20250325", segment_type=segment_type, boundary="0", offset=offset)
+        row["candidate_id"] = f"{segment_type}-c{offset:02d}"
+        candidate_rows.append(row)
+
+    try:
+        _build_global_stratified_split_rows(
+            candidate_rows,
+            SplitConfig(
+                strategy="global_stratified",
+                train_fraction=0.70,
+                validation_fraction=0.15,
+                test_fraction=0.15,
+                seed=7,
+            ),
+            required_heldout_classes=["performance", "ceremony", "warmup"],
+        )
+    except ValueError as exc:
+        assert "global_stratified cannot satisfy required held-out classes" in str(exc)
+        assert "minimum split counts exceed available candidate rows" in str(exc)
+        assert exc.__cause__ is not None
+        assert str(exc.__cause__) == "minimum split counts exceed available candidate rows"
+    else:
+        raise AssertionError("expected impossible minimum split counts to raise a ValueError")
+
+
 def test_global_stratified_preserves_unrelated_value_errors_when_required_heldout_classes_are_set() -> None:
     candidate_rows = []
     for offset, segment_type in enumerate(("performance", "ceremony", "performance"), start=1):

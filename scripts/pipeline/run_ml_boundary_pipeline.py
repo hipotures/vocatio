@@ -729,8 +729,12 @@ def _raise_required_heldout_coverage_error(
     required_heldout_classes: Sequence[str],
     *,
     reason: str | None = None,
+    cause: Exception | None = None,
 ) -> None:
-    raise _required_heldout_coverage_error(required_heldout_classes, reason=reason)
+    error = _required_heldout_coverage_error(required_heldout_classes, reason=reason)
+    if cause is not None:
+        raise error from cause
+    raise error
 
 
 def _build_global_stratified_split_rows(
@@ -756,6 +760,7 @@ def _build_global_stratified_split_rows(
             _raise_required_heldout_coverage_error(
                 required_heldout_classes,
                 reason=str(exc),
+                cause=exc,
             )
         raise
 
@@ -774,6 +779,7 @@ def _build_global_stratified_split_rows(
                 _raise_required_heldout_coverage_error(
                     required_heldout_classes,
                     reason=str(exc),
+                    cause=exc,
                 )
             raise
 
