@@ -94,10 +94,17 @@ ML boundary verifier:
 
 ML boundary corpus split surface:
 
-- split happens after merging candidate rows across all provided day directories
+- all input days are merged into one candidate corpus first
+- train/validation/test split is applied to merged candidate rows
+- input days are data sources, not split units
 - one-day runs are allowed when the merged corpus has at least 3 candidate rows
 - `--split-strategy` accepts `global_random` or `global_stratified`
-- default strategy resolution is `global_stratified`
+- exact defaults:
+  - `split_strategy = global_stratified`
+  - `train_fraction = 0.70`
+  - `validation_fraction = 0.15`
+  - `test_fraction = 0.15`
+  - `split_seed = 42`
 - fraction and seed controls:
   - `--train-fraction`
   - `--validation-fraction`
@@ -109,6 +116,15 @@ ML boundary corpus split surface:
   - `ML_SPLIT_VALIDATION_FRACTION`
   - `ML_SPLIT_TEST_FRACTION`
   - `ML_SPLIT_SEED`
+- CLI flags override `.vocatio`; `.vocatio` overrides built-in defaults
+
+```bash
+ML_SPLIT_STRATEGY=global_stratified
+ML_SPLIT_TRAIN_FRACTION=0.70
+ML_SPLIT_VALIDATION_FRACTION=0.15
+ML_SPLIT_TEST_FRACTION=0.15
+ML_SPLIT_SEED=42
+```
 
 Important for `uv` users:
 
@@ -134,6 +150,7 @@ python3 scripts/pipeline/review_performance_proxy_gui.py /data/20260323 --index 
 ML boundary verifier checklist:
 
 ```bash
-python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 --mode tabular_only --split-strategy global_random --model-run-id run-001
-python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 /data/20260324 /data/20260325 --mode tabular_only --model-run-id run-001
+python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 --mode tabular_only --split-strategy global_stratified --train-fraction 0.70 --validation-fraction 0.15 --test-fraction 0.15 --split-seed 42 --model-run-id run-001
+python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 /data/20260324 /data/20260325 --mode tabular_only --split-strategy global_stratified --model-run-id run-001
+python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 /data/20260324 /data/20260325 --mode tabular_only --prepare-only --model-run-id run-001
 ```

@@ -492,10 +492,34 @@ The ML verifier flow starts from reviewed image-only segmentation truth and trai
 
 #### One-command end-to-end pipeline (recommended)
 
+Single-day run with explicit split config:
+
 ```bash
-python3 scripts/pipeline/run_ml_boundary_pipeline.py DAY_A [DAY_B ...] \
+python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 \
   --mode tabular_only \
   --split-strategy global_stratified \
+  --train-fraction 0.70 \
+  --validation-fraction 0.15 \
+  --test-fraction 0.15 \
+  --split-seed 42 \
+  --model-run-id run-001
+```
+
+Multi-day run with `global_stratified`:
+
+```bash
+python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 /data/20260324 /data/20260325 \
+  --mode tabular_only \
+  --split-strategy global_stratified \
+  --model-run-id run-001
+```
+
+Multi-day prepare-only run:
+
+```bash
+python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 /data/20260324 /data/20260325 \
+  --mode tabular_only \
+  --prepare-only \
   --model-run-id run-001
 ```
 
@@ -515,20 +539,27 @@ Main corpus outputs are written to:
 
 Use `--prepare-only` to stop before train/evaluate.
 
-Split contract:
+Global corpus split rule:
 
-- the split happens after merging all candidate rows from all provided day directories
+- all input days are merged into one candidate corpus first
+- train/validation/test split is applied to merged candidate rows
+- input days are data sources, not split units
 - one day is enough as long as the merged corpus contains at least 3 candidate rows
-- if `--split-strategy` is omitted, `run_ml_boundary_pipeline.py` resolves it to `global_stratified`
 - supported strategies are `global_random` and `global_stratified`
-- the corpus split surface is:
-  - `--split-strategy`
-  - `--train-fraction`
-  - `--validation-fraction`
-  - `--test-fraction`
-  - `--split-seed`
+- the corpus split surface is `--split-strategy`, `--train-fraction`, `--validation-fraction`, `--test-fraction`, `--split-seed`
 
-You can set the same defaults in `DAY/.vocatio` on the first day directory:
+Exact defaults:
+
+- `split_strategy = global_stratified`
+- `train_fraction = 0.70`
+- `validation_fraction = 0.15`
+- `test_fraction = 0.15`
+- `split_seed = 42`
+
+`.vocatio` support:
+
+- `run_ml_boundary_pipeline.py` reads these keys from the first day directory's `.vocatio`
+- CLI flags override `.vocatio` when both are provided
 
 ```bash
 ML_SPLIT_STRATEGY=global_stratified
@@ -537,6 +568,12 @@ ML_SPLIT_VALIDATION_FRACTION=0.15
 ML_SPLIT_TEST_FRACTION=0.15
 ML_SPLIT_SEED=42
 ```
+
+The default resolution path is:
+
+- CLI flags if provided
+- otherwise the first day directory's `.vocatio`
+- otherwise built-in defaults shown above
 
 #### Manual flow (step-by-step)
 
