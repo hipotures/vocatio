@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
@@ -90,6 +91,20 @@ ATTRITION_REPORT_KEYS = [
 ]
 
 
+def _parse_gap_threshold_seconds(value: str) -> float:
+    try:
+        threshold = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"gap threshold seconds must be a finite number: {value}"
+        ) from exc
+    if not math.isfinite(threshold):
+        raise argparse.ArgumentTypeError(
+            f"gap threshold seconds must be a finite number: {value}"
+        )
+    return threshold
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build an ML boundary candidate dataset CSV and attrition reports from media_manifest.csv and reviewed truth."
@@ -121,7 +136,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--gap-threshold-seconds",
-        type=float,
+        type=_parse_gap_threshold_seconds,
         default=20.0,
         help="Minimum center-gap size in seconds for generating a candidate. Default: 20.0",
     )
@@ -216,6 +231,8 @@ def _manifest_photo_to_candidate_row(row: Mapping[str, str]) -> dict[str, object
         "order_idx": row.get("photo_order_index", ""),
         "timestamp": timestamp_seconds,
         "relative_path": row.get("relative_path", ""),
+        "thumb_path": row.get("thumb_path", ""),
+        "preview_path": row.get("preview_path", ""),
     }
 
 

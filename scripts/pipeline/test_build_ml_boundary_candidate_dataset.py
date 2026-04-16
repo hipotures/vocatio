@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
@@ -13,8 +15,17 @@ from lib.ml_boundary_truth import build_final_photo_truth
 
 
 def _write_media_manifest(path: Path, rows: list[dict[str, str]]) -> None:
+    fieldnames = list(MEDIA_MANIFEST_HEADERS)
+    extra_fieldnames = sorted(
+        {
+            key
+            for row in rows
+            for key in row.keys()
+            if key not in fieldnames
+        }
+    )
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames + extra_fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -358,35 +369,55 @@ def test_main_writes_candidate_csv_and_reports_from_manifest_and_truth() -> None
                 relative_path="p-a7r5/p1.jpg",
                 photo_order_index=0,
                 start_epoch_ms=0,
-            ),
+            )
+            | {
+                "thumb_path": "embedded_jpg/thumb/p1.jpg",
+                "preview_path": "embedded_jpg/preview/p1.jpg",
+            },
             _build_manifest_photo_row(
                 day="20250325",
                 photo_id="p2",
                 relative_path="p-a7r5/p2.jpg",
                 photo_order_index=1,
                 start_epoch_ms=1_000,
-            ),
+            )
+            | {
+                "thumb_path": "embedded_jpg/thumb/p2.jpg",
+                "preview_path": "embedded_jpg/preview/p2.jpg",
+            },
             _build_manifest_photo_row(
                 day="20250325",
                 photo_id="p3",
                 relative_path="p-a7r5/p3.jpg",
                 photo_order_index=2,
                 start_epoch_ms=2_000,
-            ),
+            )
+            | {
+                "thumb_path": "embedded_jpg/thumb/p3.jpg",
+                "preview_path": "embedded_jpg/preview/p3.jpg",
+            },
             _build_manifest_photo_row(
                 day="20250325",
                 photo_id="p4",
                 relative_path="p-a7r5/p4.jpg",
                 photo_order_index=3,
                 start_epoch_ms=30_000,
-            ),
+            )
+            | {
+                "thumb_path": "embedded_jpg/thumb/p4.jpg",
+                "preview_path": "embedded_jpg/preview/p4.jpg",
+            },
             _build_manifest_photo_row(
                 day="20250325",
                 photo_id="p5",
                 relative_path="p-a7r5/p5.jpg",
                 photo_order_index=4,
                 start_epoch_ms=31_000,
-            ),
+            )
+            | {
+                "thumb_path": "embedded_jpg/thumb/p5.jpg",
+                "preview_path": "embedded_jpg/preview/p5.jpg",
+            },
         ]
         truth_rows = [
             {"photo_id": "p1", "segment_id": "s1", "segment_type": "performance"},
@@ -431,6 +462,12 @@ def test_main_writes_candidate_csv_and_reports_from_manifest_and_truth() -> None
             "p-a7r5/p4.jpg",
             "p-a7r5/p5.jpg",
         ]
+        assert rows[0]["frame_01_thumb_path"] == "embedded_jpg/thumb/p1.jpg"
+        assert rows[0]["frame_03_thumb_path"] == "embedded_jpg/thumb/p3.jpg"
+        assert rows[0]["frame_05_thumb_path"] == "embedded_jpg/thumb/p5.jpg"
+        assert rows[0]["frame_01_preview_path"] == "embedded_jpg/preview/p1.jpg"
+        assert rows[0]["frame_03_preview_path"] == "embedded_jpg/preview/p3.jpg"
+        assert rows[0]["frame_05_preview_path"] == "embedded_jpg/preview/p5.jpg"
 
         attrition_payload = json.loads(attrition_json.read_text(encoding="utf-8"))
         assert attrition_payload == {
@@ -453,3 +490,15 @@ def test_main_writes_candidate_csv_and_reports_from_manifest_and_truth() -> None
         assert report_payload["candidate_count_retained"] == 1
         assert report_payload["true_boundary_coverage_before_exclusions"] == 1
         assert report_payload["true_boundary_coverage_after_exclusions"] == 1
+
+
+@pytest.mark.parametrize("threshold_text", ["nan", "inf", "-inf"])
+def test_parse_args_rejects_non_finite_gap_thresholds(threshold_text: str) -> None:
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "/tmp/20250325",
+                "--gap-threshold-seconds",
+                threshold_text,
+            ]
+        )
