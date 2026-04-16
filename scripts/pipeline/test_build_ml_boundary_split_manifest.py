@@ -142,44 +142,55 @@ def test_build_split_manifest_rows_fails_when_requested_coverage_requires_leakag
     assert "day-level isolation" in str(exc_info.value)
 
 
-def test_build_split_manifest_rows_fails_when_no_single_day_can_cover_heldout_classes() -> None:
-    with pytest.raises(ValueError) as exc_info:
-        build_split_manifest_rows(
-            [
-                {
-                    "day_id": "20250323",
-                    "year": "2025",
-                    "camera": "cam-a",
-                    "domain_shift_hint": "",
-                    "segment_types": '["performance"]',
-                },
-                {
-                    "day_id": "20250324",
-                    "year": "2025",
-                    "camera": "cam-a",
-                    "domain_shift_hint": "",
-                    "segment_types": '["ceremony","warmup"]',
-                },
-                {
-                    "day_id": "20260323",
-                    "year": "2026",
-                    "camera": "cam-b",
-                    "domain_shift_hint": "new-camera",
-                    "segment_types": '["performance"]',
-                },
-                {
-                    "day_id": "20260324",
-                    "year": "2026",
-                    "camera": "cam-b",
-                    "domain_shift_hint": "new-camera",
-                    "segment_types": '["ceremony","warmup"]',
-                },
-            ],
-            required_heldout_classes=["performance", "ceremony", "warmup"],
-        )
+def test_build_split_manifest_rows_expands_heldout_groups_when_single_days_lack_coverage() -> None:
+    rows = build_split_manifest_rows(
+        [
+            {
+                "day_id": "20250323",
+                "year": "2025",
+                "camera": "cam-a",
+                "domain_shift_hint": "",
+                "segment_types": '["performance"]',
+            },
+            {
+                "day_id": "20250324",
+                "year": "2025",
+                "camera": "cam-a",
+                "domain_shift_hint": "",
+                "segment_types": '["ceremony","warmup"]',
+            },
+            {
+                "day_id": "20260323",
+                "year": "2026",
+                "camera": "cam-b",
+                "domain_shift_hint": "new-camera",
+                "segment_types": '["performance"]',
+            },
+            {
+                "day_id": "20260324",
+                "year": "2026",
+                "camera": "cam-b",
+                "domain_shift_hint": "new-camera",
+                "segment_types": '["ceremony","warmup"]',
+            },
+            {
+                "day_id": "20250325",
+                "year": "2025",
+                "camera": "cam-a",
+                "domain_shift_hint": "",
+                "segment_types": '["performance","ceremony","warmup"]',
+            },
+        ],
+        required_heldout_classes=["performance", "ceremony", "warmup"],
+    )
 
-    assert "single-day validation/test policy" in str(exc_info.value)
-    assert "day-level isolation" in str(exc_info.value)
+    assert rows == [
+        {"day_id": "20250323", "split_name": "train"},
+        {"day_id": "20250324", "split_name": "train"},
+        {"day_id": "20250325", "split_name": "validation"},
+        {"day_id": "20260323", "split_name": "test"},
+        {"day_id": "20260324", "split_name": "test"},
+    ]
 
 
 def test_main_merges_repeated_day_metadata_csv_inputs_and_writes_manifest(tmp_path: Path) -> None:

@@ -199,24 +199,82 @@ def _is_domain_shift_day(day: DayMetadata, train_days: Sequence[DayMetadata]) ->
     return day.domain_key not in train_domain_keys
 
 
+def _split_has_domain_shift(split_days: Sequence[DayMetadata], train_days: Sequence[DayMetadata]) -> bool:
+    return any(_is_domain_shift_day(day, train_days) for day in split_days)
+
+
+def _split_has_hint_domain_shift(split_days: Sequence[DayMetadata], train_days: Sequence[DayMetadata]) -> bool:
+    return any(
+        day.has_domain_shift_hint and _is_domain_shift_day(day, train_days)
+        for day in split_days
+    )
+
+
+def _missing_required_classes(
+    selected_days: Sequence[DayMetadata],
+    required_classes: frozenset[str],
+) -> frozenset[str]:
+    return frozenset(required_classes - _covered_classes(selected_days))
+
+
+def _greedy_expand_split(
+    selected_days: list[DayMetadata],
+    available_days: list[DayMetadata],
+    required_classes: frozenset[str],
+) -> tuple[list[DayMetadata], list[DayMetadata]] | None:
+    expanded_days = list(selected_days)
+    remaining_days = list(available_days)
+
+    while True:
+        missing_classes = _missing_required_classes(expanded_days, required_classes)
+        if not missing_classes:
+            return expanded_days, remaining_days
+
+        best_index: int | None = None
+        best_score: tuple[object, ...] | None = None
+        for index, day in enumerate(remaining_days):
+            newly_covered = day.segment_types & missing_classes
+            if not newly_covered:
+                continue
+
+            projected_split = expanded_days + [day]
+            projected_train = [
+                candidate for candidate_index, candidate in enumerate(remaining_days)
+                if candidate_index != index
+            ]
+            score = (
+                -len(newly_covered),
+                0 if _split_has_hint_domain_shift(projected_split, projected_train) else 1,
+                0 if _split_has_domain_shift(projected_split, projected_train) else 1,
+                day.day_id,
+            )
+            if best_score is None or score < best_score:
+                best_score = score
+                best_index = index
+
+        if best_index is None:
+            return None
+
+        expanded_days.append(remaining_days.pop(best_index))
+
+
 def _assignment_score(
-    validation_day: DayMetadata,
-    test_day: DayMetadata,
+    validation_days: Sequence[DayMetadata],
+    test_days: Sequence[DayMetadata],
     train_days: Sequence[DayMetadata],
 ) -> tuple[object, ...]:
-    validation_is_domain_shift = _is_domain_shift_day(validation_day, train_days)
-    test_is_domain_shift = _is_domain_shift_day(test_day, train_days)
-    validation_is_hint_shift = (
-        validation_is_domain_shift and validation_day.has_domain_shift_hint
-    )
-    test_is_hint_shift = test_is_domain_shift and test_day.has_domain_shift_hint
+    validation_is_domain_shift = _split_has_domain_shift(validation_days, train_days)
+    test_is_domain_shift = _split_has_domain_shift(test_days, train_days)
+    validation_is_hint_shift = _split_has_hint_domain_shift(validation_days, train_days)
+    test_is_hint_shift = _split_has_hint_domain_shift(test_days, train_days)
     return (
-        0 if (validation_is_hint_shift or test_is_hint_shift) else 1,
+        len(validation_days) + len(test_days),
+        -int(validation_is_hint_shift) - int(test_is_hint_shift),
         0 if test_is_hint_shift else 1,
-        0 if (validation_is_domain_shift or test_is_domain_shift) else 1,
+        -int(validation_is_domain_shift) - int(test_is_domain_shift),
         0 if test_is_domain_shift else 1,
-        validation_day.day_id,
-        test_day.day_id,
+        tuple(day.day_id for day in validation_days),
+        tuple(day.day_id for day in test_days),
     )
 
 
@@ -237,46 +295,78 @@ def _build_split_manifest_from_days(
             f"{missing}"
         )
 
-    best_assignment: tuple[int, int] | None = None
+    best_assignment: tuple[tuple[str, ...], tuple[str, ...]] | None = None
     best_score: tuple[object, ...] | None = None
     day_indexes = tuple(range(len(days)))
 
     for validation_index in day_indexes:
         validation_day = days[validation_index]
-        if required_classes and not required_classes.issubset(validation_day.segment_types):
-            continue
         for test_index in day_indexes:
             if test_index == validation_index:
                 continue
             test_day = days[test_index]
-            if required_classes and not required_classes.issubset(test_day.segment_types):
-                continue
-
-            train_days = [
+            base_remaining_days = [
                 day
                 for index, day in enumerate(days)
                 if index not in {validation_index, test_index}
             ]
-            score = _assignment_score(validation_day, test_day, train_days)
-            if best_score is None or score < best_score:
-                best_score = score
-                best_assignment = (validation_index, test_index)
+
+            for first_split_name in ("validation", "test"):
+                validation_days = [validation_day]
+                test_days = [test_day]
+                remaining_days = list(base_remaining_days)
+
+                split_order = (first_split_name, "test" if first_split_name == "validation" else "validation")
+                construction_failed = False
+                for split_name in split_order:
+                    if split_name == "validation":
+                        expanded = _greedy_expand_split(
+                            validation_days,
+                            remaining_days,
+                            required_classes,
+                        )
+                        if expanded is None:
+                            construction_failed = True
+                            break
+                        validation_days, remaining_days = expanded
+                    else:
+                        expanded = _greedy_expand_split(
+                            test_days,
+                            remaining_days,
+                            required_classes,
+                        )
+                        if expanded is None:
+                            construction_failed = True
+                            break
+                        test_days, remaining_days = expanded
+
+                if construction_failed:
+                    continue
+
+                train_days = list(remaining_days)
+                score = _assignment_score(validation_days, test_days, train_days)
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_assignment = (
+                        tuple(day.day_id for day in validation_days),
+                        tuple(day.day_id for day in test_days),
+                    )
 
     if best_assignment is None:
         classes_text = ", ".join(sorted(required_classes)) if required_classes else "none requested"
         raise ValueError(
             "Unable to satisfy required held-out class coverage under day-level isolation "
-            "with the single-day validation/test policy. "
+            "without leakage. "
             f"Required held-out classes: {classes_text}."
         )
 
-    validation_index, test_index = best_assignment
+    validation_day_ids, test_day_ids = best_assignment
     split_by_day: dict[str, str] = {}
     for index, day in enumerate(days):
         split_name = "train"
-        if index == validation_index:
+        if day.day_id in validation_day_ids:
             split_name = "validation"
-        elif index == test_index:
+        elif day.day_id in test_day_ids:
             split_name = "test"
         split_by_day[day.day_id] = split_name
 
