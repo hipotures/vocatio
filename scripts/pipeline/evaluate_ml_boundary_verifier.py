@@ -3,22 +3,26 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 from pathlib import Path
-from typing import Sequence
+from typing import Iterable, Mapping, Sequence
 
 from rich.console import Console
 
+from lib.ml_boundary_training_data import load_training_data_bundle
 from lib.pipeline_io import atomic_write_json
-from train_ml_boundary_verifier import TRAINING_METADATA_FILENAME, TRAINING_PLAN_FILENAME
+from train_ml_boundary_verifier import (
+    TRAINING_METADATA_FILENAME,
+    TRAINING_PLAN_FILENAME,
+    load_multimodal_predictor_class,
+    load_tabular_predictor_class,
+)
 
 
 console = Console(stderr=True)
 
 METRICS_FILENAME = "metrics.json"
-SCAFFOLD_EVALUATION_MODE = "scaffold_truth_replay"
-SCAFFOLD_EVALUATION_SOURCE = "dataset_boundary_truth_replayed_as_probabilities"
+MODEL_INFERENCE_EVALUATION_MODE = "model_inference_test_split"
 
 
 def threshold_boundary_probabilities(probs: Sequence[float], threshold: float) -> list[int]:
@@ -58,7 +62,7 @@ def compute_review_cost_metrics(predicted: Sequence[int], truth: Sequence[int]) 
 
 def _load_required_json(path: Path) -> dict[str, object]:
     if not path.is_file():
-        raise FileNotFoundError(f"Missing required scaffold model artifact: {path}")
+        raise FileNotFoundError(f"Missing required model artifact: {path}")
     with path.open(encoding="utf-8") as handle:
         payload = json.load(handle)
     if not isinstance(payload, dict):
@@ -66,23 +70,28 @@ def _load_required_json(path: Path) -> dict[str, object]:
     return payload
 
 
-def _load_threshold_policy(model_dir: Path) -> dict[str, float | str]:
+def _load_model_contract(model_dir: Path) -> tuple[dict[str, object], dict[str, object]]:
     training_plan = _load_required_json(model_dir / TRAINING_PLAN_FILENAME)
     training_metadata = _load_required_json(model_dir / TRAINING_METADATA_FILENAME)
+    return training_plan, training_metadata
 
+
+def _load_threshold_policy(
+    training_plan: Mapping[str, object], training_metadata: Mapping[str, object]
+) -> dict[str, float | str]:
     policy = training_plan.get("boundary_threshold_policy")
     if policy is None:
         policy = training_metadata.get("threshold_policy")
     if not isinstance(policy, dict):
-        raise ValueError("Scaffold model artifacts missing threshold policy")
+        raise ValueError("Model artifacts missing threshold policy")
 
     threshold = policy.get("threshold")
     if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
-        raise ValueError("Scaffold model threshold must be numeric")
+        raise ValueError("Model threshold must be numeric")
 
     policy_name = policy.get("policy")
     if not isinstance(policy_name, str) or not policy_name.strip():
-        raise ValueError("Scaffold model threshold policy must be a non-empty string")
+        raise ValueError("Model threshold policy must be a non-empty string")
 
     return {
         "policy": policy_name,
@@ -90,38 +99,35 @@ def _load_threshold_policy(model_dir: Path) -> dict[str, float | str]:
     }
 
 
-def _parse_boundary_label(raw_value: str, *, row_index: int) -> int:
-    normalized = raw_value.strip().lower()
-    if normalized in {"0", "false"}:
-        return 0
-    if normalized in {"1", "true"}:
-        return 1
-    raise ValueError(f"Invalid boundary value at row {row_index}: {raw_value!r}")
+def _load_training_mode(training_plan: Mapping[str, object]) -> str:
+    mode = training_plan.get("mode")
+    if not isinstance(mode, str) or not mode.strip():
+        raise ValueError("training_plan.json missing non-empty mode")
+    return mode.strip()
 
 
-def _load_boundary_sequences(dataset_path: Path) -> list[list[int]]:
-    with dataset_path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        fieldnames = reader.fieldnames or []
-        if "boundary" not in fieldnames:
-            raise ValueError(f"{dataset_path.name} missing required column: boundary")
-        if "day_id" in fieldnames:
-            grouped_truth: dict[str, list[int]] = {}
-            for row_index, row in enumerate(reader, start=2):
-                day_id = (row.get("day_id") or "").strip()
-                if not day_id:
-                    raise ValueError(f"Blank day_id at row {row_index}")
-                if day_id not in grouped_truth:
-                    grouped_truth[day_id] = []
-                grouped_truth[day_id].append(
-                    _parse_boundary_label(row.get("boundary", ""), row_index=row_index)
-                )
-            return list(grouped_truth.values())
+def _resolve_split_manifest_path(
+    *,
+    cli_value: str | None,
+    training_plan: Mapping[str, object],
+) -> Path:
+    if cli_value:
+        return Path(cli_value).expanduser()
+    split_manifest_value = training_plan.get("split_manifest_path")
+    if not isinstance(split_manifest_value, str) or not split_manifest_value.strip():
+        raise ValueError(
+            "split manifest path is required. Provide --split-manifest-csv or include split_manifest_path in training_plan.json"
+        )
+    return Path(split_manifest_value).expanduser()
 
-        truth_values: list[int] = []
-        for row_index, row in enumerate(reader, start=2):
-            truth_values.append(_parse_boundary_label(row.get("boundary", ""), row_index=row_index))
-    return [truth_values]
+
+def _guard_existing_metrics(output_dir: Path, *, overwrite: bool) -> None:
+    metrics_path = output_dir / METRICS_FILENAME
+    if metrics_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"Output artifact already exists in {output_dir}: {METRICS_FILENAME}. "
+            "Use --overwrite to replace it."
+        )
 
 
 def _compute_boundary_f1(predicted: Sequence[int], truth: Sequence[int]) -> float:
@@ -131,13 +137,19 @@ def _compute_boundary_f1(predicted: Sequence[int], truth: Sequence[int]) -> floa
         raise ValueError("predicted and truth must have the same length")
 
     true_positive = sum(
-        1 for predicted_value, truth_value in zip(predicted_values, truth_values) if predicted_value == 1 and truth_value == 1
+        1
+        for predicted_value, truth_value in zip(predicted_values, truth_values)
+        if predicted_value == 1 and truth_value == 1
     )
     false_positive = sum(
-        1 for predicted_value, truth_value in zip(predicted_values, truth_values) if predicted_value == 1 and truth_value == 0
+        1
+        for predicted_value, truth_value in zip(predicted_values, truth_values)
+        if predicted_value == 1 and truth_value == 0
     )
     false_negative = sum(
-        1 for predicted_value, truth_value in zip(predicted_values, truth_values) if predicted_value == 0 and truth_value == 1
+        1
+        for predicted_value, truth_value in zip(predicted_values, truth_values)
+        if predicted_value == 0 and truth_value == 1
     )
 
     denominator = (2 * true_positive) + false_positive + false_negative
@@ -146,9 +158,228 @@ def _compute_boundary_f1(predicted: Sequence[int], truth: Sequence[int]) -> floa
     return (2 * true_positive) / denominator
 
 
+def _compute_accuracy(predicted: Sequence[str], truth: Sequence[str]) -> float:
+    predicted_values = list(predicted)
+    truth_values = list(truth)
+    if len(predicted_values) != len(truth_values):
+        raise ValueError("predicted and truth must have the same length")
+    if not truth_values:
+        return 0.0
+    matches = sum(
+        1
+        for predicted_value, truth_value in zip(predicted_values, truth_values)
+        if predicted_value == truth_value
+    )
+    return matches / len(truth_values)
+
+
+def _to_plain_list(value: object) -> list[object]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if hasattr(value, "tolist"):
+        converted = value.tolist()
+        if isinstance(converted, list):
+            return converted
+        return [converted]
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Iterable):
+        return list(value)
+    return [value]
+
+
+def _to_scalar_float_list(value: object) -> list[float]:
+    values = _to_plain_list(value)
+    normalized: list[float] = []
+    for index, item in enumerate(values):
+        if isinstance(item, (list, tuple, dict)):
+            raise ValueError(
+                f"Expected scalar probabilities but found nested payload at index {index}"
+            )
+        if isinstance(item, bool):
+            raise ValueError("Boolean values are not valid probability scalars")
+        normalized.append(float(item))
+    return normalized
+
+
+def _extract_positive_class_probabilities(
+    probability_payload: object,
+    *,
+    expected_rows: int,
+) -> list[float]:
+    if hasattr(probability_payload, "columns"):
+        columns = list(probability_payload.columns)
+        positive_column = None
+        for candidate in (1, "1", True, "true", "True"):
+            if candidate in columns:
+                positive_column = candidate
+                break
+        if positive_column is None:
+            if len(columns) == 2:
+                positive_column = columns[1]
+            elif len(columns) == 1:
+                positive_column = columns[0]
+            else:
+                raise ValueError(
+                    "Unable to resolve positive-class column from predictor probability output"
+                )
+        probabilities = _to_scalar_float_list(probability_payload[positive_column])
+    else:
+        raw_values = _to_plain_list(probability_payload)
+        if not raw_values:
+            probabilities = []
+        elif isinstance(raw_values[0], dict):
+            probabilities = []
+            for value in raw_values:
+                if not isinstance(value, dict):
+                    raise ValueError("Mixed probability payload types are not supported")
+                if 1 in value:
+                    probabilities.append(float(value[1]))
+                elif "1" in value:
+                    probabilities.append(float(value["1"]))
+                else:
+                    raise ValueError("Probability payload dict is missing positive class key")
+        elif isinstance(raw_values[0], (list, tuple)):
+            probabilities = [float(value[-1]) for value in raw_values]
+        else:
+            probabilities = [float(value) for value in raw_values]
+
+    if len(probabilities) != expected_rows:
+        raise ValueError(
+            f"boundary probability row count mismatch: expected {expected_rows}, got {len(probabilities)}"
+        )
+    return probabilities
+
+
+def _normalize_segment_predictions(predictions: object, *, expected_rows: int) -> list[str]:
+    values = [str(value).strip() for value in _to_plain_list(predictions)]
+    if len(values) != expected_rows:
+        raise ValueError(
+            f"segment_type prediction row count mismatch: expected {expected_rows}, got {len(values)}"
+        )
+    return values
+
+
+def _to_model_frame(table):
+    try:
+        import pandas as pd
+    except ImportError:
+        return table
+    return pd.DataFrame(table.rows)
+
+
+def _load_predictor(*, mode: str, model_dir: Path, predictor_name: str):
+    predictor_dir = model_dir / f"{predictor_name}_model"
+    if not predictor_dir.exists():
+        raise FileNotFoundError(f"Missing required predictor directory: {predictor_dir}")
+    if mode == "tabular_plus_thumbnail":
+        predictor_class = load_multimodal_predictor_class()
+    else:
+        predictor_class = load_tabular_predictor_class()
+    if not hasattr(predictor_class, "load"):
+        raise ValueError(f"{predictor_class.__name__} does not support load()")
+    return predictor_class.load(str(predictor_dir))
+
+
+def _build_metrics_payload(
+    *,
+    model_dir: Path,
+    dataset_path: Path,
+    split_manifest_path: Path,
+) -> dict[str, object]:
+    training_plan, training_metadata = _load_model_contract(model_dir)
+    mode = _load_training_mode(training_plan)
+    threshold_policy = _load_threshold_policy(training_plan, training_metadata)
+    threshold = float(threshold_policy["threshold"])
+
+    training_bundle = load_training_data_bundle(
+        dataset_path,
+        split_manifest_path=split_manifest_path,
+        mode=mode,
+        require_train_validation=False,
+    )
+    if not training_bundle.test_rows.rows:
+        raise ValueError(
+            "split manifest must assign at least one test row for evaluation"
+        )
+
+    segment_predictor = _load_predictor(
+        mode=mode,
+        model_dir=model_dir,
+        predictor_name="segment_type",
+    )
+    boundary_predictor = _load_predictor(
+        mode=mode,
+        model_dir=model_dir,
+        predictor_name="boundary",
+    )
+
+    segment_test_frame = _to_model_frame(training_bundle.segment_type.test_data)
+    boundary_test_frame = _to_model_frame(training_bundle.boundary.test_data)
+    boundary_truth = [int(value) for value in training_bundle.boundary.test_data["boundary"].tolist()]
+    segment_truth = [str(value) for value in training_bundle.segment_type.test_data["segment_type"].tolist()]
+
+    segment_predictions = _normalize_segment_predictions(
+        segment_predictor.predict(segment_test_frame),
+        expected_rows=len(segment_truth),
+    )
+    boundary_probabilities = _extract_positive_class_probabilities(
+        boundary_predictor.predict_proba(boundary_test_frame),
+        expected_rows=len(boundary_truth),
+    )
+    boundary_predictions = threshold_boundary_probabilities(boundary_probabilities, threshold)
+
+    review_cost_totals = {
+        "merge_run_count": 0,
+        "split_run_count": 0,
+        "estimated_correction_actions": 0,
+    }
+    current_day_id = None
+    day_truth: list[int] = []
+    day_predicted: list[int] = []
+    for predicted_value, truth_value, row in zip(
+        boundary_predictions,
+        boundary_truth,
+        training_bundle.test_rows.rows,
+        strict=True,
+    ):
+        day_id = str(row["day_id"])
+        if current_day_id is None:
+            current_day_id = day_id
+        if day_id != current_day_id:
+            day_metrics = compute_review_cost_metrics(day_predicted, day_truth)
+            for key, value in day_metrics.items():
+                review_cost_totals[key] += value
+            current_day_id = day_id
+            day_truth = []
+            day_predicted = []
+        day_truth.append(truth_value)
+        day_predicted.append(predicted_value)
+    if day_truth:
+        day_metrics = compute_review_cost_metrics(day_predicted, day_truth)
+        for key, value in day_metrics.items():
+            review_cost_totals[key] += value
+
+    return {
+        "evaluation_mode": MODEL_INFERENCE_EVALUATION_MODE,
+        "model_mode": mode,
+        "dataset_path": str(dataset_path),
+        "split_manifest_path": str(split_manifest_path),
+        "split_name": "test",
+        "threshold_policy": threshold_policy,
+        "final_boundary_threshold": threshold,
+        "row_count": len(boundary_truth),
+        "segment_type_accuracy": _compute_accuracy(segment_predictions, segment_truth),
+        "boundary_f1": _compute_boundary_f1(boundary_predictions, boundary_truth),
+        "review_cost_metrics": review_cost_totals,
+    }
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Write ML boundary verifier evaluation contract artifacts from a CSV dataset.",
+        description="Evaluate ML boundary verifier predictors on the test split from a CSV dataset.",
     )
     parser.add_argument(
         "dataset_path",
@@ -157,7 +388,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--model-dir",
         required=True,
-        help="Directory containing scaffolded ML boundary model artifacts.",
+        help="Directory containing ML boundary model artifacts.",
+    )
+    parser.add_argument(
+        "--split-manifest-csv",
+        help=(
+            "Path to ml_boundary_splits CSV. "
+            "Default: use split_manifest_path from training_plan.json."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -179,51 +417,6 @@ def validate_dataset_contract(dataset_path: Path) -> None:
         )
 
 
-def _guard_existing_metrics(output_dir: Path, *, overwrite: bool) -> None:
-    metrics_path = output_dir / METRICS_FILENAME
-    if metrics_path.exists() and not overwrite:
-        raise FileExistsError(
-            f"Output artifact already exists in {output_dir}: {METRICS_FILENAME}. "
-            "Use --overwrite to replace it."
-        )
-
-
-def _build_metrics_payload(dataset_path: Path, model_dir: Path) -> dict[str, object]:
-    threshold_policy = _load_threshold_policy(model_dir)
-    threshold = float(threshold_policy["threshold"])
-    truth_sequences = _load_boundary_sequences(dataset_path)
-    predicted_sequences: list[list[int]] = []
-    flattened_truth_values: list[int] = []
-    review_cost_totals = {
-        "merge_run_count": 0,
-        "split_run_count": 0,
-        "estimated_correction_actions": 0,
-    }
-
-    for truth_values in truth_sequences:
-        scaffold_probabilities = [float(value) for value in truth_values]
-        predicted_values = threshold_boundary_probabilities(scaffold_probabilities, threshold)
-        predicted_sequences.append(predicted_values)
-        flattened_truth_values.extend(truth_values)
-        sequence_review_cost = compute_review_cost_metrics(predicted=predicted_values, truth=truth_values)
-        for key, value in sequence_review_cost.items():
-            review_cost_totals[key] += value
-
-    flattened_predicted_values = [
-        predicted_value for predicted_sequence in predicted_sequences for predicted_value in predicted_sequence
-    ]
-
-    return {
-        "evaluation_mode": SCAFFOLD_EVALUATION_MODE,
-        "evaluation_source": SCAFFOLD_EVALUATION_SOURCE,
-        "threshold_policy": threshold_policy,
-        "final_boundary_threshold": threshold,
-        "row_count": len(flattened_truth_values),
-        "boundary_f1": _compute_boundary_f1(flattened_predicted_values, flattened_truth_values),
-        "review_cost_metrics": review_cost_totals,
-    }
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     dataset_path = Path(args.dataset_path).expanduser()
@@ -235,12 +428,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not model_dir.is_dir():
         raise FileNotFoundError(f"Model directory does not exist: {model_dir}")
 
+    training_plan, _training_metadata = _load_model_contract(model_dir)
+    split_manifest_path = _resolve_split_manifest_path(
+        cli_value=args.split_manifest_csv,
+        training_plan=training_plan,
+    )
+    if not split_manifest_path.is_file():
+        raise FileNotFoundError(f"Split manifest does not exist: {split_manifest_path}")
+
     output_dir = Path(args.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     _guard_existing_metrics(output_dir, overwrite=args.overwrite)
 
-    atomic_write_json(output_dir / METRICS_FILENAME, _build_metrics_payload(dataset_path, model_dir))
-    console.print(f"Wrote evaluation contract artifacts to {output_dir}")
+    metrics_payload = _build_metrics_payload(
+        model_dir=model_dir,
+        dataset_path=dataset_path,
+        split_manifest_path=split_manifest_path,
+    )
+    atomic_write_json(output_dir / METRICS_FILENAME, metrics_payload)
+    console.print(f"Wrote evaluation artifacts to {output_dir}")
     return 0
 
 

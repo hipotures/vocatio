@@ -37,12 +37,14 @@ class PredictorTrainingData:
     feature_columns: list[str]
     train_data: "TrainingTable"
     validation_data: "TrainingTable"
+    test_data: "TrainingTable"
 
 
 @dataclass(frozen=True)
 class TrainingDataBundle:
     train_rows: "TrainingTable"
     validation_rows: "TrainingTable"
+    test_rows: "TrainingTable"
     split_counts_by_name: dict[str, int]
     shared_feature_columns: list[str]
     image_feature_columns: list[str]
@@ -188,6 +190,7 @@ def load_training_data_bundle(
     *,
     split_manifest_path: Path,
     mode: str,
+    require_train_validation: bool = True,
 ) -> TrainingDataBundle:
     validate_mode(mode)
     candidate_frame = load_candidate_training_frame(dataset_path)
@@ -208,13 +211,18 @@ def load_training_data_bundle(
     validation_rows = TrainingTable(
         [row for row in joined_frame.rows if row["split_name"] == "validation"]
     )
-    if not train_rows.rows:
-        raise ValueError("split manifest must assign at least one train row")
-    if not validation_rows.rows:
-        raise ValueError("split manifest must assign at least one validation row")
+    test_rows = TrainingTable(
+        [row for row in joined_frame.rows if row["split_name"] == "test"]
+    )
+    if require_train_validation:
+        if not train_rows.rows:
+            raise ValueError("split manifest must assign at least one train row")
+        if not validation_rows.rows:
+            raise ValueError("split manifest must assign at least one validation row")
 
     _normalize_labels(train_rows, split_name="train")
     _normalize_labels(validation_rows, split_name="validation")
+    _normalize_labels(test_rows, split_name="test")
 
     model_feature_source_columns = (
         list(derived_feature_columns)
@@ -227,6 +235,7 @@ def load_training_data_bundle(
     return TrainingDataBundle(
         train_rows=train_rows,
         validation_rows=validation_rows,
+        test_rows=test_rows,
         split_counts_by_name=_split_counts(joined_frame["split_name"]),
         shared_feature_columns=columns_by_mode["shared_feature_columns"],
         image_feature_columns=columns_by_mode["image_feature_columns"],
@@ -235,12 +244,14 @@ def load_training_data_bundle(
             feature_columns=segment_type_feature_columns,
             train_data=train_rows.select(segment_type_feature_columns + ["segment_type"]),
             validation_data=validation_rows.select(segment_type_feature_columns + ["segment_type"]),
+            test_data=test_rows.select(segment_type_feature_columns + ["segment_type"]),
         ),
         boundary=PredictorTrainingData(
             label_column="boundary",
             feature_columns=boundary_feature_columns,
             train_data=train_rows.select(boundary_feature_columns + ["boundary"]),
             validation_data=validation_rows.select(boundary_feature_columns + ["boundary"]),
+            test_data=test_rows.select(boundary_feature_columns + ["boundary"]),
         ),
     )
 

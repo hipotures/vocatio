@@ -486,92 +486,76 @@ python3 scripts/pipeline/review_performance_proxy_gui.py DAY \
 
 Use a dedicated VLM review-state file so you do not mix VLM review decisions with the heuristic image-only or audio-assisted states.
 
-### ML Boundary Verifier Scaffold
+### ML Boundary Verifier
 
-The ML verifier flow starts from reviewed image-only segmentation truth and builds a fixed-window candidate dataset for a tabular verifier or an ordered thumbnail experiment.
+The ML verifier flow starts from reviewed image-only segmentation truth and trains two independent predictors (`segment_type`, `boundary`) on fixed 5-photo candidate windows.
 
-#### 1. Build candidate rows from reviewed truth
+#### One-command end-to-end pipeline (recommended)
+
+```bash
+python3 scripts/pipeline/run_ml_boundary_pipeline.py DAY_A DAY_B DAY_C \
+  --mode tabular_only \
+  --model-run-id run-001
+```
+
+By default this uses each day's `.vocatio` `WORKSPACE_DIR` (or `DAY/_workspace`), then:
+
+1. exports reviewed truth (`ml_boundary_reviewed_truth.csv`) from GUI index + state
+2. builds and validates per-day candidate datasets
+3. merges day candidates into a corpus dataset
+4. builds day metadata and split manifest
+5. validates corpus + split policy
+6. trains model artifacts under `ml_boundary_models/RUN_ID`
+7. evaluates on the `test` split under `ml_boundary_eval/RUN_ID`
+
+Main corpus outputs are written to:
+
+- `FIRST_DAY_WORKSPACE/ml_boundary_corpus/` (or `--corpus-workspace`)
+
+Use `--prepare-only` to stop before train/evaluate.
+
+#### Manual flow (step-by-step)
+
+1. Export reviewed truth per day:
+
+```bash
+python3 scripts/pipeline/export_ml_boundary_reviewed_truth.py DAY
+```
+
+2. Build and validate per-day candidates:
 
 ```bash
 python3 scripts/pipeline/build_ml_boundary_candidate_dataset.py DAY
+python3 scripts/pipeline/validate_ml_boundary_dataset.py DAY
 ```
 
-This creates:
-
-- `DAY/_workspace/ml_boundary_candidates.csv`
-- `DAY/_workspace/ml_boundary_attrition.json`
-- `DAY/_workspace/ml_boundary_dataset_report.json`
-
-#### 2. Validate the candidate dataset and write a validation report
-
-```bash
-python3 scripts/pipeline/validate_ml_boundary_dataset.py \
-  DAY/_workspace/ml_boundary_candidates.csv \
-  --attrition-json DAY/_workspace/ml_boundary_attrition.json \
-  --report-json DAY/_workspace/ml_boundary_validation_report.json
-```
-
-Optional split-manifest validation:
-
-```bash
-python3 scripts/pipeline/validate_ml_boundary_dataset.py \
-  DAY/_workspace/ml_boundary_candidates.csv \
-  --attrition-json DAY/_workspace/ml_boundary_attrition.json \
-  --split-manifest-csv DAY/_workspace/ml_boundary_splits.csv \
-  --required-heldout-classes performance ceremony warmup \
-  --report-json DAY/_workspace/ml_boundary_validation_report.json
-```
-
-#### 3. Write the training scaffold artifacts
-
-The training scaffold is currently CSV-only. If you use `uv`, run it through the isolated `autogluon` group so it does not conflict with the default GPU torch stack.
+3. Train with AutoGluon (isolated dependency group):
 
 ```bash
 uv run --no-default-groups --group autogluon \
   python3 scripts/pipeline/train_ml_boundary_verifier.py \
-  DAY/_workspace/ml_boundary_candidates.csv \
+  CORPUS/ml_boundary_candidates.corpus.csv \
+  --split-manifest-csv CORPUS/ml_boundary_splits.csv \
   --mode tabular_only \
-  --output-dir DAY/_workspace/ml_boundary_models/run-001
+  --output-dir CORPUS/ml_boundary_models/run-001
 ```
 
-Ordered thumbnail experiment:
-
-```bash
-uv run --no-default-groups --group autogluon \
-  python3 scripts/pipeline/train_ml_boundary_verifier.py \
-  DAY/_workspace/ml_boundary_candidates.csv \
-  --mode tabular_plus_thumbnail \
-  --output-dir DAY/_workspace/ml_boundary_models/run-002
-```
-
-This creates scaffold model artifacts:
-
-- `training_plan.json`
-- `training_metadata.json`
-
-#### 4. Write scaffold evaluation metrics
+4. Evaluate trained predictors on the `test` split:
 
 ```bash
 uv run --no-default-groups --group autogluon \
   python3 scripts/pipeline/evaluate_ml_boundary_verifier.py \
-  DAY/_workspace/ml_boundary_candidates.csv \
-  --model-dir DAY/_workspace/ml_boundary_models/run-001 \
-  --output-dir DAY/_workspace/ml_boundary_eval/run-001
+  CORPUS/ml_boundary_candidates.corpus.csv \
+  --model-dir CORPUS/ml_boundary_models/run-001 \
+  --split-manifest-csv CORPUS/ml_boundary_splits.csv \
+  --output-dir CORPUS/ml_boundary_eval/run-001
 ```
 
-This creates:
+Notes:
 
-- `metrics.json`
-
-Current scaffold behavior:
-
-- train/eval are CSV-only
-- train writes the contract for two independent predictors:
-  - `segment_type`
-  - `boundary`
 - `tabular_plus_thumbnail` preserves ordered image inputs through:
   - `frame_01_thumb_path` ... `frame_05_thumb_path`
-- eval records threshold policy and a scaffold metrics report from the dataset truth replay path
+- evaluation is real model inference on the explicit `test` split (not truth replay)
 
 ## Export Profiles
 

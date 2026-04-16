@@ -120,9 +120,11 @@ def test_load_training_data_bundle_joins_split_manifest_and_selects_train_valida
 
     assert bundle.train_rows["day_id"].tolist() == ["20250324"]
     assert bundle.validation_rows["day_id"].tolist() == ["20250325"]
+    assert bundle.test_rows["day_id"].tolist() == ["20250326"]
     assert bundle.split_counts_by_name == {"train": 1, "validation": 1, "test": 1}
     assert bundle.segment_type.train_data["segment_type"].tolist() == ["performance"]
     assert bundle.boundary.validation_data["boundary"].tolist() == [1]
+    assert bundle.boundary.test_data["boundary"].tolist() == [0]
     assert bundle.image_feature_columns == [
         "frame_01_thumb_path",
         "frame_02_thumb_path",

@@ -236,7 +236,10 @@ def _validate_distinct_paths(
 
 def _read_reviewed_truth_csv(path: Path) -> list[dict[str, str]]:
     if not path.is_file():
-        raise FileNotFoundError(f"Truth CSV does not exist: {path}")
+        raise FileNotFoundError(
+            f"Truth CSV does not exist: {path}. "
+            "Run export_ml_boundary_reviewed_truth.py DAY first."
+        )
 
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
