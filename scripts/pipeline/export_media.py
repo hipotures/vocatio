@@ -1045,6 +1045,32 @@ def selected_streams(
     return [streams[target] for target in ordered_unique_targets]
 
 
+def build_export_context_lines(
+    day_dir: Path,
+    workspace_dir: Path,
+    output_path: Path,
+    streams_to_process: Sequence[Mapping[str, str]],
+) -> List[str]:
+    lines = [
+        f"Day directory: {day_dir}",
+        f"Workspace directory: {workspace_dir}",
+        f"Output manifest: {output_path}",
+    ]
+    for media_type, label in (("photo", "Photo source directories"), ("video", "Video source directories")):
+        source_dirs = sorted(
+            {
+                str(Path(str(info["source_dir"])).resolve())
+                for info in streams_to_process
+                if str(info.get("media_type") or "") == media_type
+            }
+        )
+        if not source_dirs:
+            continue
+        lines.append(f"{label}:")
+        lines.extend(f"  - {source_dir}" for source_dir in source_dirs)
+    return lines
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     day_dir = Path(args.day_dir).resolve()
@@ -1088,6 +1114,9 @@ def main(argv: list[str] | None = None) -> int:
         for info in streams_to_process:
             console.print(f"{info['stream_id']}  {info['media_type']}  {info['source_dir']}")
         return 0
+
+    for line in build_export_context_lines(day_dir, workspace_dir, output_path, streams_to_process):
+        console.print(line)
 
     resume_rows = initialize_resume_rows(output_path, args.restart)
     if resume_rows is None:

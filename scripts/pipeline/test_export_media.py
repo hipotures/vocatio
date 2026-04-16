@@ -87,6 +87,48 @@ class ExportMediaCliTests(unittest.TestCase):
         self.assertEqual(sorted(export_media.filter_streams_by_media_types(streams, "photo")), ["p-a7r5"])
         self.assertEqual(sorted(export_media.filter_streams_by_media_types(streams, "video")), ["v-gh7"])
 
+    def test_build_export_context_lines_lists_full_paths_for_workspace_and_sources(self) -> None:
+        day_dir = Path("/arch03/V/DWC2026/20260323")
+        workspace_dir = Path("/fast/workspaces/dwc20260323")
+        output_path = workspace_dir / "media_manifest.csv"
+
+        lines = export_media.build_export_context_lines(
+            day_dir=day_dir,
+            workspace_dir=workspace_dir,
+            output_path=output_path,
+            streams_to_process=[
+                {
+                    "stream_id": "p-a7r5",
+                    "media_type": "photo",
+                    "source_dir": str(day_dir / "p-a7r5"),
+                },
+                {
+                    "stream_id": "p-z9",
+                    "media_type": "photo",
+                    "source_dir": str(day_dir / "p-z9"),
+                },
+                {
+                    "stream_id": "v-gh7",
+                    "media_type": "video",
+                    "source_dir": str(day_dir / "v-gh7"),
+                },
+            ],
+        )
+
+        self.assertEqual(
+            lines,
+            [
+                f"Day directory: {day_dir}",
+                f"Workspace directory: {workspace_dir}",
+                f"Output manifest: {output_path}",
+                "Photo source directories:",
+                f"  - {day_dir / 'p-a7r5'}",
+                f"  - {day_dir / 'p-z9'}",
+                "Video source directories:",
+                f"  - {day_dir / 'v-gh7'}",
+            ],
+        )
+
     def test_collect_files_reports_discovery_progress_in_batched_updates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             stream_dir = Path(tmp) / "p-a7r5"
