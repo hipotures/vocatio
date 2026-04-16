@@ -484,22 +484,90 @@ def _reserve_required_heldout_assignments(
     *,
     required_heldout_classes: Sequence[str],
 ) -> dict[str, str]:
-    assignments: dict[str, str] = {}
     ordered_classes = list(dict.fromkeys(required_heldout_classes))
-    for segment_type in ordered_classes:
-        for split_name in HELDOUT_SPLIT_NAMES:
-            eligible_strata = [
-                stratum_key
-                for stratum_key in sorted(strata)
-                if stratum_key[1] == segment_type and strata[stratum_key]
-            ]
-            if not eligible_strata:
-                raise ValueError(
-                    f"Unable to reserve held-out coverage for segment_type {segment_type!r}"
-                )
-            eligible_strata.sort(key=lambda stratum_key: (-len(strata[stratum_key]), stratum_key))
-            candidate_id = strata[eligible_strata[0]].pop(0)
-            assignments[candidate_id] = split_name
+    if not ordered_classes:
+        return {}
+
+    requirements = [
+        (split_name, segment_type)
+        for split_name in HELDOUT_SPLIT_NAMES
+        for segment_type in ordered_classes
+    ]
+    original_sizes = {
+        stratum_key: len(candidate_ids)
+        for stratum_key, candidate_ids in strata.items()
+    }
+    remaining_counts = dict(original_sizes)
+    chosen_strata: dict[tuple[str, str], tuple[str, str]] = {}
+    best_plan: dict[tuple[str, str], tuple[str, str]] | None = None
+    best_score: tuple[int, int, int, int] | None = None
+
+    def _search(requirement_index: int) -> None:
+        nonlocal best_plan, best_score
+        if requirement_index >= len(requirements):
+            boundaries_by_split = {split_name: set() for split_name in HELDOUT_SPLIT_NAMES}
+            used_strata = set()
+            selected_size_total = 0
+            for split_name, segment_type in requirements:
+                stratum_key = chosen_strata[(split_name, segment_type)]
+                boundaries_by_split[split_name].add(stratum_key[0])
+                used_strata.add(stratum_key)
+                selected_size_total += original_sizes[stratum_key]
+            coverage_counts = tuple(
+                len(boundaries_by_split[split_name])
+                for split_name in HELDOUT_SPLIT_NAMES
+            )
+            score = (
+                min(coverage_counts),
+                sum(coverage_counts),
+                len(used_strata),
+                selected_size_total,
+            )
+            if best_score is None or score > best_score:
+                best_score = score
+                best_plan = dict(chosen_strata)
+            return
+
+        split_name, segment_type = requirements[requirement_index]
+        reserved_boundaries = {
+            stratum_key[0]
+            for (reserved_split_name, _), stratum_key in chosen_strata.items()
+            if reserved_split_name == split_name
+        }
+        eligible_strata = [
+            stratum_key
+            for stratum_key in sorted(strata)
+            if stratum_key[1] == segment_type and remaining_counts[stratum_key] > 0
+        ]
+        if not eligible_strata:
+            return
+        eligible_strata.sort(
+            key=lambda stratum_key: (
+                stratum_key[0] not in reserved_boundaries,
+                remaining_counts[stratum_key],
+                stratum_key,
+            ),
+            reverse=True,
+        )
+        for stratum_key in eligible_strata:
+            remaining_counts[stratum_key] -= 1
+            chosen_strata[(split_name, segment_type)] = stratum_key
+            _search(requirement_index + 1)
+            del chosen_strata[(split_name, segment_type)]
+            remaining_counts[stratum_key] += 1
+
+    _search(0)
+    if best_plan is None:
+        missing_classes = ", ".join(repr(value) for value in ordered_classes)
+        raise ValueError(
+            f"Unable to reserve held-out coverage for required segment types: {missing_classes}"
+        )
+
+    assignments: dict[str, str] = {}
+    for split_name, segment_type in requirements:
+        stratum_key = best_plan[(split_name, segment_type)]
+        candidate_id = strata[stratum_key].pop(0)
+        assignments[candidate_id] = split_name
     return assignments
 
 
