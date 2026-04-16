@@ -450,6 +450,55 @@ def test_train_cli_rejects_existing_artifacts_without_overwrite(tmp_path: Path) 
         raise AssertionError("expected FileExistsError")
 
 
+def test_train_cli_allows_empty_existing_output_dir_without_overwrite(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    FakeTabularPredictor.instances.clear()
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    output_dir = tmp_path / "models" / "run-empty"
+    _write_candidate_csv(
+        dataset_path,
+        [
+            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+        ],
+    )
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"day_id": "20250324", "split_name": "train"},
+            {"day_id": "20250325", "split_name": "validation"},
+        ],
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_tabular_predictor_class",
+        lambda: FakeTabularPredictor,
+    )
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_multimodal_predictor_class",
+        lambda: FakeMultiModalPredictor,
+    )
+
+    exit_code = main(
+        [
+            str(dataset_path),
+            "--split-manifest-csv",
+            str(split_manifest_path),
+            "--mode",
+            "tabular_only",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    assert (output_dir / TRAINING_PLAN_FILENAME).is_file()
+    assert (output_dir / TRAINING_METADATA_FILENAME).is_file()
+
+
 def test_train_cli_overwrite_replaces_existing_artifacts(monkeypatch, tmp_path: Path) -> None:
     FakeTabularPredictor.instances.clear()
     dataset_path = tmp_path / "ml_boundary_candidates.csv"

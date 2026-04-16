@@ -213,13 +213,27 @@ def _prepare_staging_output_dir(output_dir: Path) -> Path:
 def _publish_staged_output(staging_dir: Path, output_dir: Path, *, overwrite: bool) -> None:
     if output_dir.exists():
         if not overwrite:
-            raise FileExistsError(
-                f"Output artifacts already exist in {output_dir}. Use --overwrite to replace them."
-            )
-        if output_dir.is_dir():
-            shutil.rmtree(output_dir)
+            if output_dir.is_dir() and not any(output_dir.iterdir()):
+                output_dir.rmdir()
+            else:
+                raise FileExistsError(
+                    f"Output artifacts already exist in {output_dir}. Use --overwrite to replace them."
+                )
         else:
-            output_dir.unlink()
+            if output_dir.is_dir():
+                for artifact_path in _artifact_paths(output_dir).values():
+                    if artifact_path.exists():
+                        if artifact_path.is_dir():
+                            shutil.rmtree(artifact_path)
+                        else:
+                            artifact_path.unlink()
+            else:
+                output_dir.unlink()
+    if output_dir.exists():
+        for child in staging_dir.iterdir():
+            child.rename(output_dir / child.name)
+        staging_dir.rmdir()
+        return
     staging_dir.rename(output_dir)
 
 
