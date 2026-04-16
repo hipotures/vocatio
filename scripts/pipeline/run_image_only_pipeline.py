@@ -98,13 +98,6 @@ def build_steps() -> List[PipelineStep]:
             restart_flag="--restart",
         ),
         PipelineStep(
-            label="Extract embedded JPG",
-            script_name="extract_embedded_photo_jpg.py",
-            output_checker=file_exists("photo_embedded_manifest.csv"),
-            supports_jobs=True,
-            restart_flag="--overwrite",
-        ),
-        PipelineStep(
             label="Build quality",
             script_name="build_photo_quality_annotations.py",
             output_checker=file_exists("photo_quality.csv"),

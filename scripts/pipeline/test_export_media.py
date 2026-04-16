@@ -53,6 +53,35 @@ class DummyProgress:
         return None
 
 
+def build_photo_embedded_manifest_row(relative_path: str, photo_order_index: str = "0") -> dict[str, str]:
+    row = {header: "" for header in export_media.embedded_photo_jpg.MANIFEST_HEADERS}
+    row.update(
+        {
+            "relative_path": relative_path,
+            "photo_order_index": photo_order_index,
+            "path": relative_path,
+            "source_path": relative_path,
+            "photo_id": relative_path,
+            "filename": Path(relative_path).name,
+            "extension": Path(relative_path).suffix.lower(),
+            "thumb_path": f"embedded_jpg/thumb/{Path(relative_path).with_suffix('.jpg').as_posix()}",
+            "preview_path": f"embedded_jpg/preview/{Path(relative_path).with_suffix('.jpg').as_posix()}",
+            "thumb_exists": "1",
+            "preview_exists": "1",
+            "thumb_width": "1",
+            "thumb_height": "1",
+            "preview_width": "1",
+            "preview_height": "1",
+            "preview_source": "existing_preview",
+        }
+    )
+    return row
+
+
+def write_photo_embedded_manifest(path: Path, rows: list[dict[str, str]]) -> None:
+    export_media.write_csv_rows(path, export_media.embedded_photo_jpg.MANIFEST_HEADERS, rows)
+
+
 class ExportMediaCliTests(unittest.TestCase):
     def test_parse_args_defaults(self) -> None:
         args = export_media.parse_args(["/data/20260323"])
@@ -197,14 +226,29 @@ class ExportMediaCliTests(unittest.TestCase):
 
             with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
                 with mock.patch.object(export_media, "run_exiftool", side_effect=fake_run_exiftool):
-                    with mock.patch.object(export_media.console, "print"):
-                        exit_code = export_media.main([str(day_dir)])
+                    with mock.patch.object(
+                        export_media,
+                        "build_photo_embedded_manifest_entry",
+                        side_effect=lambda workspace_dir_value, row, overwrite: build_photo_embedded_manifest_row(
+                            str(row["relative_path"])
+                        ),
+                    ):
+                        with mock.patch.object(export_media.console, "print"):
+                            exit_code = export_media.main([str(day_dir)])
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(seen_path_sets, [["p-a7r5/todo.hif"]])
             rows = media_manifest.read_media_manifest(workspace_dir / "media_manifest.csv")
             self.assertEqual(
                 [row["relative_path"] for row in media_manifest.select_photo_rows(rows)],
+                ["p-a7r5/done.hif", "p-a7r5/todo.hif"],
+            )
+            photo_embedded_rows = export_media.load_existing_csv(
+                workspace_dir / export_media.PHOTO_EMBEDDED_MANIFEST_NAME,
+                "photo embedded manifest",
+            )
+            self.assertEqual(
+                [row["relative_path"] for row in photo_embedded_rows or []],
                 ["p-a7r5/done.hif", "p-a7r5/todo.hif"],
             )
             self.assertFalse(
@@ -261,8 +305,15 @@ class ExportMediaCliTests(unittest.TestCase):
 
             with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
                 with mock.patch.object(export_media, "run_exiftool", side_effect=fake_run_exiftool):
-                    with mock.patch.object(export_media.console, "print"):
-                        exit_code = export_media.main([str(day_dir), "--restart"])
+                    with mock.patch.object(
+                        export_media,
+                        "build_photo_embedded_manifest_entry",
+                        side_effect=lambda workspace_dir_value, row, overwrite: build_photo_embedded_manifest_row(
+                            str(row["relative_path"])
+                        ),
+                    ):
+                        with mock.patch.object(export_media.console, "print"):
+                            exit_code = export_media.main([str(day_dir), "--restart"])
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(seen_path_sets, [["p-a7r5/done.hif", "p-a7r5/todo.hif"]])
@@ -297,6 +348,10 @@ class ExportMediaCliTests(unittest.TestCase):
             )
             export_media.assign_photo_order_indexes([done_row])
             export_media.write_media_manifest_csv(workspace_dir / "media_manifest.csv", [done_row])
+            write_photo_embedded_manifest(
+                workspace_dir / export_media.PHOTO_EMBEDDED_MANIFEST_NAME,
+                [build_photo_embedded_manifest_row("p-a7r5/done.hif")],
+            )
 
             with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
                 with mock.patch.object(export_media.console, "print") as console_print:
@@ -328,11 +383,19 @@ class ExportMediaCliTests(unittest.TestCase):
 
             fake_state = FakeInterruptState()
 
-            def fake_build_rows_for_batch(day_dir_arg, info, batch, on_batch_processed=None):
+            def fake_build_rows_for_batch(
+                day_dir_arg,
+                workspace_dir_arg,
+                info,
+                batch,
+                embedded_overwrite,
+                on_file_processed=None,
+            ):
                 rows = []
+                photo_embedded_rows = {}
                 for path in batch:
-                    if on_batch_processed is not None:
-                        on_batch_processed(1)
+                    if on_file_processed is not None:
+                        on_file_processed(1)
                     _sort_key, row = export_media.build_photo_manifest_entry(
                         day_dir=day_dir_arg,
                         stream_id=str(info["stream_id"]),
@@ -341,9 +404,12 @@ class ExportMediaCliTests(unittest.TestCase):
                         metadata=None,
                     )
                     rows.append(row)
+                    photo_embedded_rows[str(row["relative_path"])] = build_photo_embedded_manifest_row(
+                        str(row["relative_path"])
+                    )
                 if batch[0].name == "01.hif":
                     fake_state.stop_requested = True
-                return rows
+                return rows, photo_embedded_rows
 
             with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
                 with mock.patch.object(export_media, "EXIFTOOL_BATCH_SIZE", 1):
@@ -1026,8 +1092,15 @@ class ExportMediaCliTests(unittest.TestCase):
 
             with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
                 with mock.patch.object(export_media, "run_exiftool", side_effect=fake_run_exiftool, create=True):
-                    with mock.patch.object(export_media.console, "print") as console_print:
-                        exit_code = export_media.main([str(day_dir)])
+                    with mock.patch.object(
+                        export_media,
+                        "build_photo_embedded_manifest_entry",
+                        side_effect=lambda workspace_dir_value, row, overwrite: build_photo_embedded_manifest_row(
+                            str(row["relative_path"])
+                        ),
+                    ):
+                        with mock.patch.object(export_media.console, "print") as console_print:
+                            exit_code = export_media.main([str(day_dir)])
 
             self.assertEqual(exit_code, 0)
             output_path = workspace_dir / "media_manifest.csv"
@@ -1110,8 +1183,15 @@ class ExportMediaCliTests(unittest.TestCase):
 
             with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
                 with mock.patch.object(export_media, "run_exiftool", side_effect=fake_run_exiftool):
-                    with mock.patch.object(export_media.console, "print"):
-                        exit_code = export_media.main([str(day_dir)])
+                    with mock.patch.object(
+                        export_media,
+                        "build_photo_embedded_manifest_entry",
+                        side_effect=lambda workspace_dir_value, row, overwrite: build_photo_embedded_manifest_row(
+                            str(row["relative_path"])
+                        ),
+                    ):
+                        with mock.patch.object(export_media.console, "print"):
+                            exit_code = export_media.main([str(day_dir)])
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(call_paths[0], ["bad.hif", "good.hif"])
@@ -1167,8 +1247,15 @@ class ExportMediaCliTests(unittest.TestCase):
 
             with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
                 with mock.patch.object(export_media, "run_exiftool", side_effect=fake_run_exiftool):
-                    with mock.patch.object(export_media.console, "print"):
-                        exit_code = export_media.main([str(day_dir), "--media-types", "photo"])
+                    with mock.patch.object(
+                        export_media,
+                        "build_photo_embedded_manifest_entry",
+                        side_effect=lambda workspace_dir_value, row, overwrite: build_photo_embedded_manifest_row(
+                            str(row["relative_path"])
+                        ),
+                    ):
+                        with mock.patch.object(export_media.console, "print"):
+                            exit_code = export_media.main([str(day_dir), "--media-types", "photo"])
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(seen_path_sets, [["p-a7r5/raw/nested.hif"]])
@@ -1233,8 +1320,15 @@ class ExportMediaCliTests(unittest.TestCase):
 
             with mock.patch.object(export_media, "Progress", DummyProgress, create=True):
                 with mock.patch.object(export_media, "run_exiftool", side_effect=fake_run_exiftool):
-                    with mock.patch.object(export_media.console, "print"):
-                        exit_code = export_media.main([str(day_dir)])
+                    with mock.patch.object(
+                        export_media,
+                        "build_photo_embedded_manifest_entry",
+                        side_effect=lambda workspace_dir_value, row, overwrite: build_photo_embedded_manifest_row(
+                            str(row["relative_path"])
+                        ),
+                    ):
+                        with mock.patch.object(export_media.console, "print"):
+                            exit_code = export_media.main([str(day_dir)])
 
             self.assertEqual(exit_code, 0)
             rows = media_manifest.read_media_manifest(workspace_dir / "media_manifest.csv")

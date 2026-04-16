@@ -29,6 +29,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+import extract_embedded_photo_jpg as embedded_photo_jpg
 from lib.image_pipeline_contracts import MEDIA_MANIFEST_HEADERS
 from lib.media_manifest import read_media_manifest
 from lib.photo_time_order import (
@@ -76,6 +77,7 @@ VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mts"}
 EXIFTOOL_BATCH_SIZE = 1000
 PROCESS_PROGRESS_BATCH_SIZE = 100
 DISCOVERY_PROGRESS_BATCH_SIZE = 1000
+PHOTO_EMBEDDED_MANIFEST_NAME = "photo_embedded_manifest.csv"
 
 
 class GracefulInterruptState:
@@ -581,13 +583,17 @@ def build_video_manifest_entry(
 
 
 def write_media_manifest_csv(path: Path, rows: Sequence[Mapping[str, str]]) -> None:
+    write_csv_rows(path, MEDIA_MANIFEST_HEADERS, rows)
+
+
+def write_csv_rows(path: Path, fieldnames: Sequence[str], rows: Sequence[Mapping[str, str]]) -> None:
     row_list = [dict(row) for row in rows]
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(row_list)
             handle.flush()
@@ -600,6 +606,10 @@ def write_media_manifest_csv(path: Path, rows: Sequence[Mapping[str, str]]) -> N
 
 def partial_output_path(output_path: Path) -> Path:
     return Path(f"{output_path}.partial")
+
+
+def photo_embedded_output_path(workspace_dir: Path) -> Path:
+    return (workspace_dir / PHOTO_EMBEDDED_MANIFEST_NAME).resolve()
 
 
 def assign_photo_order_indexes(rows: Sequence[Dict[str, str]]) -> None:
@@ -638,6 +648,24 @@ def build_manifest_snapshot(rows: Iterable[Mapping[str, str]]) -> List[Dict[str,
     return snapshot_rows
 
 
+def build_photo_embedded_snapshot(
+    media_snapshot_rows: Sequence[Mapping[str, str]],
+    photo_embedded_rows_by_relative_path: Mapping[str, Mapping[str, str]],
+) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    for row in media_snapshot_rows:
+        if str(row.get("media_type") or "").strip() != "photo":
+            continue
+        relative_path = str(row.get("relative_path") or "").strip()
+        photo_embedded_row = photo_embedded_rows_by_relative_path.get(relative_path)
+        if photo_embedded_row is None:
+            continue
+        output_row = dict(photo_embedded_row)
+        output_row["photo_order_index"] = str(row.get("photo_order_index") or "")
+        rows.append(output_row)
+    return rows
+
+
 def persist_manifest_snapshot(
     output_path: Path,
     rows_by_relative_path: Mapping[str, Mapping[str, str]],
@@ -649,8 +677,43 @@ def persist_manifest_snapshot(
     return snapshot_rows
 
 
+def persist_export_snapshots(
+    output_path: Path,
+    rows_by_relative_path: Mapping[str, Mapping[str, str]],
+    photo_embedded_output: Optional[Path],
+    photo_embedded_rows_by_relative_path: Optional[Mapping[str, Mapping[str, str]]],
+) -> List[Dict[str, str]]:
+    snapshot_rows = build_manifest_snapshot(rows_by_relative_path.values())
+    write_media_manifest_csv(partial_output_path(output_path), snapshot_rows)
+    write_media_manifest_csv(output_path, snapshot_rows)
+    if photo_embedded_output is not None and photo_embedded_rows_by_relative_path is not None:
+        photo_embedded_snapshot = build_photo_embedded_snapshot(snapshot_rows, photo_embedded_rows_by_relative_path)
+        if photo_embedded_snapshot:
+            write_csv_rows(
+                partial_output_path(photo_embedded_output),
+                embedded_photo_jpg.MANIFEST_HEADERS,
+                photo_embedded_snapshot,
+            )
+            write_csv_rows(
+                photo_embedded_output,
+                embedded_photo_jpg.MANIFEST_HEADERS,
+                photo_embedded_snapshot,
+            )
+        else:
+            partial_output_path(photo_embedded_output).unlink(missing_ok=True)
+            photo_embedded_output.unlink(missing_ok=True)
+    return snapshot_rows
+
+
 def finalize_successful_export(output_path: Path) -> None:
     partial_output_path(output_path).unlink(missing_ok=True)
+
+
+def finalize_successful_exports(*output_paths: Optional[Path]) -> None:
+    for output_path in output_paths:
+        if output_path is None:
+            continue
+        partial_output_path(output_path).unlink(missing_ok=True)
 
 
 def load_existing_manifest(path: Path, label: str) -> List[Dict[str, str]] | None:
@@ -666,6 +729,28 @@ def load_existing_manifest(path: Path, label: str) -> List[Dict[str, str]] | Non
         return None
     try:
         return read_media_manifest(path)
+    except Exception as error:
+        console.print(
+            f"[red]Error: failed to read {label} {path}: {error}. "
+            "Use --restart to rebuild from scratch.[/red]"
+        )
+        return None
+
+
+def load_existing_csv(path: Path, label: str) -> List[Dict[str, str]] | None:
+    if not path.exists():
+        return []
+    if path.is_dir():
+        console.print(f"[red]Error: {label} path is a directory: {path}[/red]")
+        return None
+    if path.stat().st_size == 0:
+        console.print(
+            f"[red]Error: {label} is empty: {path}. Use --restart to rebuild from scratch.[/red]"
+        )
+        return None
+    try:
+        with path.open(newline="", encoding="utf-8") as handle:
+            return [dict(row) for row in csv.DictReader(handle)]
     except Exception as error:
         console.print(
             f"[red]Error: failed to read {label} {path}: {error}. "
@@ -696,6 +781,33 @@ def initialize_resume_rows(output_path: Path, restart: bool) -> List[Dict[str, s
     return []
 
 
+def initialize_resume_csv_rows(
+    output_path: Path,
+    restart: bool,
+    fieldnames: Sequence[str],
+    label: str,
+) -> List[Dict[str, str]] | None:
+    partial_path = partial_output_path(output_path)
+    if restart:
+        partial_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
+        return []
+
+    partial_rows = load_existing_csv(partial_path, f"partial {label}")
+    if partial_rows is None:
+        return None
+    if partial_rows:
+        return partial_rows
+
+    final_rows = load_existing_csv(output_path, label)
+    if final_rows is None:
+        return None
+    if final_rows:
+        write_csv_rows(partial_path, fieldnames, final_rows)
+        return final_rows
+    return []
+
+
 def build_batch_specs(
     stream_files: Sequence[tuple[Dict[str, str], Sequence[Path]]],
     processed_relative_paths: set[str],
@@ -715,16 +827,15 @@ def build_batch_specs(
 
 def build_rows_for_batch(
     day_dir: Path,
+    workspace_dir: Path,
     info: Mapping[str, str],
     batch: Sequence[Path],
-    on_batch_processed: Optional[Callable[[int], None]] = None,
-) -> List[Dict[str, str]]:
-    metadata_by_path = extract_metadata_batch_fail_open(
-        str(info["stream_id"]),
-        batch,
-        on_batch_processed=on_batch_processed,
-    )
+    embedded_overwrite: bool,
+    on_file_processed: Optional[Callable[[int], None]] = None,
+) -> tuple[List[Dict[str, str]], Dict[str, Dict[str, str]]]:
+    metadata_by_path = extract_metadata_batch_fail_open(str(info["stream_id"]), batch)
     rows: List[Dict[str, str]] = []
+    photo_embedded_rows_by_relative_path: Dict[str, Dict[str, str]] = {}
     for path in batch:
         metadata = metadata_by_path.get(str(path))
         if info["media_type"] == "photo":
@@ -735,6 +846,12 @@ def build_rows_for_batch(
                 path,
                 metadata,
             )
+            photo_embedded_row = build_photo_embedded_manifest_entry(
+                workspace_dir,
+                row,
+                overwrite=embedded_overwrite,
+            )
+            photo_embedded_rows_by_relative_path[str(row["relative_path"])] = photo_embedded_row
         else:
             row = build_video_manifest_entry(
                 day_dir,
@@ -744,7 +861,41 @@ def build_rows_for_batch(
                 metadata,
             )
         rows.append(row)
-    return rows
+        if on_file_processed is not None:
+            on_file_processed(1)
+    return rows, photo_embedded_rows_by_relative_path
+
+
+def build_photo_embedded_manifest_entry(
+    workspace_dir: Path,
+    media_row: Mapping[str, str],
+    overwrite: bool,
+) -> Dict[str, str]:
+    source_path = Path(str(media_row["path"]))
+    relative_path = str(media_row["relative_path"])
+    output_paths = embedded_photo_jpg.build_output_paths(workspace_dir, relative_path)
+    preview_source, preview_dimensions = embedded_photo_jpg.ensure_preview_jpg(
+        source_path,
+        output_paths["preview_path"],
+        overwrite,
+    )
+    thumb_dimensions = embedded_photo_jpg.ensure_thumb_jpg(
+        source_path,
+        output_paths["thumb_path"],
+        output_paths["preview_path"],
+        overwrite,
+    )
+    return embedded_photo_jpg.build_manifest_row(
+        workspace_dir=workspace_dir,
+        source_path=source_path,
+        relative_path=relative_path,
+        photo_order_index=str(media_row.get("photo_order_index") or ""),
+        thumb_path=output_paths["thumb_path"],
+        preview_path=output_paths["preview_path"],
+        preview_source=preview_source,
+        thumb_dimensions=thumb_dimensions,
+        preview_dimensions=preview_dimensions,
+    )
 
 
 def detect_streams(day_dir: Path) -> Dict[str, Dict[str, str]]:
@@ -1123,28 +1274,48 @@ def main(argv: list[str] | None = None) -> int:
     resume_rows = initialize_resume_rows(output_path, args.restart)
     if resume_rows is None:
         return 1
+    manage_photo_embedded_manifest = any(info["media_type"] == "photo" for info in streams_to_process)
+    photo_embedded_path = photo_embedded_output_path(workspace_dir) if manage_photo_embedded_manifest else None
+    photo_embedded_resume_rows: List[Dict[str, str]] = []
+    if photo_embedded_path is not None:
+        initialized_photo_embedded_rows = initialize_resume_csv_rows(
+            photo_embedded_path,
+            args.restart,
+            embedded_photo_jpg.MANIFEST_HEADERS,
+            "photo embedded manifest",
+        )
+        if initialized_photo_embedded_rows is None:
+            return 1
+        photo_embedded_resume_rows = initialized_photo_embedded_rows
 
     with Progress(*build_progress_columns(), expand=False, console=console) as progress:
-        discover_task = progress.add_task("Discover files".ljust(25), total=None)
         stream_files = [
             (
                 info,
                 collect_files(
                     Path(info["source_dir"]),
                     info["media_type"],
-                    on_files_discovered=lambda batch_size, task_id=discover_task: progress.advance(task_id, batch_size),
                 ),
             )
             for info in streams_to_process
         ]
         total_files = sum(len(files) for _info, files in stream_files)
-        progress.update(discover_task, total=total_files, completed=total_files)
         if total_files == 0:
             console.print(
                 "[red]Error: no supported media files found in selected streams under "
                 f"{day_dir}.[/red]"
             )
             return 1
+        if manage_photo_embedded_manifest:
+            embedded_photo_jpg.validate_unique_output_paths(
+                workspace_dir,
+                [
+                    {"relative_path": path.relative_to(day_dir).as_posix()}
+                    for info, files in stream_files
+                    if info["media_type"] == "photo"
+                    for path in files
+                ],
+            )
         discovered_relative_paths = {
             path.relative_to(day_dir).as_posix()
             for _info, files in stream_files
@@ -1155,17 +1326,37 @@ def main(argv: list[str] | None = None) -> int:
             for row in resume_rows
             if str(row.get("relative_path") or "") in discovered_relative_paths
         }
+        photo_embedded_rows_by_relative_path: Dict[str, Dict[str, str]] = {
+            str(row["relative_path"]): dict(row)
+            for row in photo_embedded_resume_rows
+            if str(row.get("relative_path") or "") in discovered_relative_paths
+        }
         batch_specs = build_batch_specs(
             stream_files,
             set(rows_by_relative_path),
             day_dir,
         )
-        remaining_files = sum(len(batch) for _info, batch in batch_specs)
+        pending_embedded_relative_paths = {
+            relative_path
+            for relative_path, row in rows_by_relative_path.items()
+            if str(row.get("media_type") or "").strip() == "photo"
+            and relative_path not in photo_embedded_rows_by_relative_path
+        }
+        pending_embedded_rows = [
+            rows_by_relative_path[relative_path]
+            for relative_path in sorted(pending_embedded_relative_paths)
+        ]
+        remaining_files = sum(len(batch) for _info, batch in batch_specs) + len(pending_embedded_rows)
 
-        if not batch_specs:
+        if remaining_files == 0:
             if rows_by_relative_path:
-                snapshot_rows = persist_manifest_snapshot(output_path, rows_by_relative_path)
-                finalize_successful_export(output_path)
+                snapshot_rows = persist_export_snapshots(
+                    output_path,
+                    rows_by_relative_path,
+                    photo_embedded_path,
+                    photo_embedded_rows_by_relative_path if manage_photo_embedded_manifest else None,
+                )
+                finalize_successful_exports(output_path, photo_embedded_path)
                 console.print(
                     f"[green]Manifest already up to date with {len(snapshot_rows)} rows at {output_path}[/green]"
                 )
@@ -1180,24 +1371,52 @@ def main(argv: list[str] | None = None) -> int:
 
         interrupt_state, previous_handler = install_interrupt_handler()
         try:
+            for row in pending_embedded_rows:
+                photo_embedded_rows_by_relative_path[str(row["relative_path"])] = build_photo_embedded_manifest_entry(
+                    workspace_dir,
+                    row,
+                    overwrite=args.restart,
+                )
+                progress.advance(process_task, 1)
+                persist_export_snapshots(
+                    output_path,
+                    rows_by_relative_path,
+                    photo_embedded_path,
+                    photo_embedded_rows_by_relative_path if manage_photo_embedded_manifest else None,
+                )
+                if interrupt_state.stop_requested:
+                    break
             if args.jobs <= 1 or len(batch_specs) <= 1:
                 for info, batch in batch_specs:
-                    batch_rows = build_rows_for_batch(
+                    if interrupt_state.stop_requested:
+                        break
+                    batch_rows, batch_photo_embedded_rows = build_rows_for_batch(
                         day_dir,
+                        workspace_dir,
                         info,
                         batch,
-                        on_batch_processed=lambda count, task_id=process_task: progress.advance(task_id, count),
+                        args.restart,
+                        on_file_processed=lambda count, task_id=process_task: progress.advance(task_id, count),
                     )
                     for row in batch_rows:
                         rows_by_relative_path[str(row["relative_path"])] = row
-                    persist_manifest_snapshot(output_path, rows_by_relative_path)
+                    photo_embedded_rows_by_relative_path.update(batch_photo_embedded_rows)
+                    persist_export_snapshots(
+                        output_path,
+                        rows_by_relative_path,
+                        photo_embedded_path,
+                        photo_embedded_rows_by_relative_path if manage_photo_embedded_manifest else None,
+                    )
                     if interrupt_state.stop_requested:
                         break
             else:
                 max_workers = min(args.jobs, len(batch_specs))
                 batch_iter = iter(batch_specs)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_to_batch: Dict[concurrent.futures.Future[List[Dict[str, str]]], tuple[Dict[str, str], List[Path]]] = {}
+                    future_to_batch: Dict[
+                        concurrent.futures.Future[tuple[List[Dict[str, str]], Dict[str, Dict[str, str]]]],
+                        tuple[Dict[str, str], List[Path]],
+                    ] = {}
                     while len(future_to_batch) < max_workers:
                         try:
                             info, batch = next(batch_iter)
@@ -1206,8 +1425,10 @@ def main(argv: list[str] | None = None) -> int:
                         future = executor.submit(
                             build_rows_for_batch,
                             day_dir,
+                            workspace_dir,
                             info,
                             batch,
+                            args.restart,
                             lambda count, task_id=process_task: progress.advance(task_id, count),
                         )
                         future_to_batch[future] = (info, batch)
@@ -1219,10 +1440,16 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         for future in done:
                             _info, batch = future_to_batch.pop(future)
-                            batch_rows = future.result()
+                            batch_rows, batch_photo_embedded_rows = future.result()
                             for row in batch_rows:
                                 rows_by_relative_path[str(row["relative_path"])] = row
-                            persist_manifest_snapshot(output_path, rows_by_relative_path)
+                            photo_embedded_rows_by_relative_path.update(batch_photo_embedded_rows)
+                            persist_export_snapshots(
+                                output_path,
+                                rows_by_relative_path,
+                                photo_embedded_path,
+                                photo_embedded_rows_by_relative_path if manage_photo_embedded_manifest else None,
+                            )
 
                         if interrupt_state.stop_requested:
                             continue
@@ -1235,8 +1462,10 @@ def main(argv: list[str] | None = None) -> int:
                             future = executor.submit(
                                 build_rows_for_batch,
                                 day_dir,
+                                workspace_dir,
                                 info,
                                 batch,
+                                args.restart,
                                 lambda count, task_id=process_task: progress.advance(task_id, count),
                             )
                             future_to_batch[future] = (info, batch)
@@ -1251,7 +1480,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 130
 
-    finalize_successful_export(output_path)
+    finalize_successful_exports(output_path, photo_embedded_path)
     console.print(f"[green]Wrote {len(snapshot_rows)} rows to {output_path}[/green]")
     return 0
 

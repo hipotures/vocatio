@@ -82,10 +82,6 @@ class RunImageOnlyPipelineTests(unittest.TestCase):
                     check=True,
                 ),
                 mock.call(
-                    [sys.executable, str(REPO_ROOT / "scripts/pipeline/extract_embedded_photo_jpg.py"), str(day_dir), "--jobs", "3", "--overwrite"],
-                    check=True,
-                ),
-                mock.call(
                     [sys.executable, str(REPO_ROOT / "scripts/pipeline/build_photo_quality_annotations.py"), str(day_dir), "--jobs", "3", "--overwrite"],
                     check=True,
                 ),
