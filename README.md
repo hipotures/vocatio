@@ -493,8 +493,9 @@ The ML verifier flow starts from reviewed image-only segmentation truth and trai
 #### One-command end-to-end pipeline (recommended)
 
 ```bash
-python3 scripts/pipeline/run_ml_boundary_pipeline.py DAY_A DAY_B DAY_C \
+python3 scripts/pipeline/run_ml_boundary_pipeline.py DAY_A [DAY_B ...] \
   --mode tabular_only \
+  --split-strategy global_stratified \
   --model-run-id run-001
 ```
 
@@ -503,7 +504,7 @@ By default this uses each day's `.vocatio` `WORKSPACE_DIR` (or `DAY/_workspace`)
 1. exports reviewed truth (`ml_boundary_reviewed_truth.csv`) from GUI index + state
 2. builds and validates per-day candidate datasets
 3. merges day candidates into a corpus dataset
-4. builds day metadata and split manifest
+4. builds day metadata and a merged-corpus split manifest
 5. validates corpus + split policy
 6. trains model artifacts under `ml_boundary_models/RUN_ID`
 7. evaluates on the `test` split under `ml_boundary_eval/RUN_ID`
@@ -513,6 +514,29 @@ Main corpus outputs are written to:
 - `FIRST_DAY_WORKSPACE/ml_boundary_corpus/` (or `--corpus-workspace`)
 
 Use `--prepare-only` to stop before train/evaluate.
+
+Split contract:
+
+- the split happens after merging all candidate rows from all provided day directories
+- one day is enough as long as the merged corpus contains at least 3 candidate rows
+- if `--split-strategy` is omitted, `run_ml_boundary_pipeline.py` resolves it to `global_stratified`
+- supported strategies are `global_random` and `global_stratified`
+- the corpus split surface is:
+  - `--split-strategy`
+  - `--train-fraction`
+  - `--validation-fraction`
+  - `--test-fraction`
+  - `--split-seed`
+
+You can set the same defaults in `DAY/.vocatio` on the first day directory:
+
+```bash
+ML_SPLIT_STRATEGY=global_stratified
+ML_SPLIT_TRAIN_FRACTION=0.70
+ML_SPLIT_VALIDATION_FRACTION=0.15
+ML_SPLIT_TEST_FRACTION=0.15
+ML_SPLIT_SEED=42
+```
 
 #### Manual flow (step-by-step)
 
@@ -555,6 +579,7 @@ Notes:
 
 - `tabular_plus_thumbnail` preserves ordered image inputs through:
   - `frame_01_thumb_path` ... `frame_05_thumb_path`
+- the merged corpus split requires at least 3 candidate rows total
 - evaluation is real model inference on the explicit `test` split (not truth replay)
 
 ## Export Profiles

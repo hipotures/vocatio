@@ -10,7 +10,12 @@ sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 from build_ml_boundary_candidate_dataset import CANDIDATE_ROW_HEADERS
 from lib.ml_boundary_dataset import canonical_candidate_id
 from lib.workspace_dir import resolve_workspace_dir
-from run_ml_boundary_pipeline import CORPUS_CANDIDATES_FILENAME, main
+from run_ml_boundary_pipeline import (
+    CORPUS_CANDIDATES_FILENAME,
+    main,
+    parse_args,
+    resolve_split_config,
+)
 
 
 def _candidate_row(*, day_id: str, segment_type: str, boundary: str, offset: int) -> dict[str, str]:
@@ -111,7 +116,9 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
     assert split_manifest_path.is_file()
     with split_manifest_path.open(newline="", encoding="utf-8") as handle:
         split_rows = list(csv.DictReader(handle))
-    assert sorted(row["split_name"] for row in split_rows) == ["test", "train", "validation"]
+    assert len(split_rows) == 9
+    assert {row["split_name"] for row in split_rows} == {"train", "validation", "test"}
+    assert {row["candidate_id"] for row in split_rows} == {row["candidate_id"] for row in merged_rows}
 
     summary_payload = json.loads(
         (corpus_workspace / "ml_boundary_pipeline_summary.json").read_text(encoding="utf-8")
@@ -171,3 +178,98 @@ def test_main_prepare_only_skips_train_and_eval(tmp_path: Path, monkeypatch) -> 
     assert "eval_dir" not in summary_payload
     assert not any("train_ml_boundary_verifier.py" in " ".join(command) for command in recorded_commands)
     assert not any("evaluate_ml_boundary_verifier.py" in " ".join(command) for command in recorded_commands)
+
+
+def test_main_single_day_global_random_is_allowed(tmp_path: Path, monkeypatch) -> None:
+    day_dir = tmp_path / "20250325"
+    workspace_dir = tmp_path / "20250325DWC"
+    day_dir.mkdir(parents=True)
+    workspace_dir.mkdir(parents=True)
+    (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            rows = []
+            for index in range(20):
+                row = _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=index + 1)
+                row["candidate_id"] = f"c{index:02d}"
+                rows.append(row)
+            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+
+    exit_code = main([str(day_dir), "--split-strategy", "global_random"])
+    assert exit_code == 0
+
+
+def test_resolve_split_config_defaults_to_global_stratified(tmp_path: Path) -> None:
+    day_dir = tmp_path / "20250325"
+    day_dir.mkdir(parents=True)
+
+    args = parse_args([str(day_dir)])
+
+    split_config = resolve_split_config(args, [day_dir])
+
+    assert split_config.strategy == "global_stratified"
+    assert split_config.train_fraction == 0.70
+    assert split_config.validation_fraction == 0.15
+    assert split_config.test_fraction == 0.15
+    assert split_config.seed == 42
+
+
+def test_resolve_split_config_reads_vocatio_values(tmp_path: Path) -> None:
+    day_dir = tmp_path / "20250325"
+    day_dir.mkdir(parents=True)
+    (day_dir / ".vocatio").write_text(
+        "\n".join(
+            [
+                "ML_SPLIT_STRATEGY=global_random",
+                "ML_SPLIT_TRAIN_FRACTION=0.60",
+                "ML_SPLIT_VALIDATION_FRACTION=0.20",
+                "ML_SPLIT_TEST_FRACTION=0.20",
+                "ML_SPLIT_SEED=99",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    args = parse_args([str(day_dir)])
+
+    split_config = resolve_split_config(args, [day_dir])
+
+    assert split_config.strategy == "global_random"
+    assert split_config.train_fraction == 0.60
+    assert split_config.validation_fraction == 0.20
+    assert split_config.test_fraction == 0.20
+    assert split_config.seed == 99
+
+
+def test_main_rejects_corpus_with_fewer_than_three_rows(tmp_path: Path, monkeypatch) -> None:
+    day_dir = tmp_path / "20250325"
+    workspace_dir = tmp_path / "20250325DWC"
+    day_dir.mkdir(parents=True)
+    workspace_dir.mkdir(parents=True)
+    (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            rows = [
+                _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=1),
+                _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=2),
+            ]
+            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+
+    try:
+        main([str(day_dir), "--split-strategy", "global_random"])
+    except ValueError as exc:
+        assert (
+            str(exc)
+            == "ML boundary corpus split requires at least three candidate rows to produce train, validation, and test splits"
+        )
+    else:
+        raise AssertionError("Expected main() to reject a corpus smaller than three candidate rows")

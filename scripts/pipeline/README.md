@@ -83,7 +83,7 @@ ML boundary verifier:
 - `export_ml_boundary_reviewed_truth.py` -> `_workspace/ml_boundary_reviewed_truth.csv` from `performance_proxy_index.json` + `review_state.json`
 - `build_ml_boundary_candidate_dataset.py` -> `_workspace/ml_boundary_candidates.csv`, `_workspace/ml_boundary_attrition.json`, `_workspace/ml_boundary_dataset_report.json`
 - `validate_ml_boundary_dataset.py` -> validates candidate CSV + attrition JSON and can write `_workspace/ml_boundary_validation_report.json`
-- `run_ml_boundary_pipeline.py` -> end-to-end orchestrator (per-day export/build/validate, corpus merge/splits, train, evaluate)
+- `run_ml_boundary_pipeline.py` -> end-to-end orchestrator (per-day export/build/validate, merged-corpus split, train, evaluate)
 - `train_ml_boundary_verifier.py` -> writes training artifacts:
   - `.../ml_boundary_models/RUN/training_plan.json`
   - `.../ml_boundary_models/RUN/training_metadata.json`
@@ -91,6 +91,24 @@ ML boundary verifier:
   - `.../ml_boundary_models/RUN/training_summary.json`
 - `evaluate_ml_boundary_verifier.py` -> writes evaluation metrics from model inference on test split:
   - `.../ml_boundary_eval/RUN/metrics.json`
+
+ML boundary corpus split surface:
+
+- split happens after merging candidate rows across all provided day directories
+- one-day runs are allowed when the merged corpus has at least 3 candidate rows
+- `--split-strategy` accepts `global_random` or `global_stratified`
+- default strategy resolution is `global_stratified`
+- fraction and seed controls:
+  - `--train-fraction`
+  - `--validation-fraction`
+  - `--test-fraction`
+  - `--split-seed`
+- `.vocatio` keys on the first day directory:
+  - `ML_SPLIT_STRATEGY`
+  - `ML_SPLIT_TRAIN_FRACTION`
+  - `ML_SPLIT_VALIDATION_FRACTION`
+  - `ML_SPLIT_TEST_FRACTION`
+  - `ML_SPLIT_SEED`
 
 Important for `uv` users:
 
@@ -116,5 +134,6 @@ python3 scripts/pipeline/review_performance_proxy_gui.py /data/20260323 --index 
 ML boundary verifier checklist:
 
 ```bash
+python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 --mode tabular_only --split-strategy global_random --model-run-id run-001
 python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 /data/20260324 /data/20260325 --mode tabular_only --model-run-id run-001
 ```

@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+import random
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -22,11 +25,9 @@ from rich.progress import (
 )
 
 from build_ml_boundary_candidate_dataset import CANDIDATE_ROW_HEADERS
-from build_ml_boundary_split_manifest import OUTPUT_HEADERS as SPLIT_MANIFEST_HEADERS
-from build_ml_boundary_split_manifest import build_split_manifest_rows
 from lib.ml_boundary_truth import VALID_SEGMENT_TYPES
 from lib.pipeline_io import atomic_write_csv, atomic_write_json
-from lib.workspace_dir import resolve_workspace_dir
+from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
 
 
 console = Console()
@@ -36,6 +37,21 @@ DAY_METADATA_FILENAME = "ml_boundary_day_metadata.csv"
 SPLIT_MANIFEST_FILENAME = "ml_boundary_splits.csv"
 VALIDATION_REPORT_FILENAME = "ml_boundary_validation_report.json"
 PIPELINE_SUMMARY_FILENAME = "ml_boundary_pipeline_summary.json"
+SPLIT_MANIFEST_HEADERS = ["candidate_id", "split_name"]
+DEFAULT_SPLIT_STRATEGY = "global_stratified"
+DEFAULT_TRAIN_FRACTION = 0.70
+DEFAULT_VALIDATION_FRACTION = 0.15
+DEFAULT_TEST_FRACTION = 0.15
+DEFAULT_SPLIT_SEED = 42
+
+
+@dataclass(frozen=True)
+class SplitConfig:
+    strategy: str
+    train_fraction: float
+    validation_fraction: float
+    test_fraction: float
+    seed: int
 
 
 def _progress() -> Progress:
@@ -77,6 +93,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--model-run-id",
         default="run-001",
         help="Run directory name under ml_boundary_models/ and ml_boundary_eval/. Default: run-001",
+    )
+    parser.add_argument(
+        "--split-strategy",
+        choices=("global_random", "global_stratified"),
+        default=None,
+        help="Corpus split strategy after merging candidate rows. Default: global_stratified.",
+    )
+    parser.add_argument(
+        "--train-fraction",
+        type=float,
+        help="Fraction of merged candidate rows assigned to train. Default: 0.70",
+    )
+    parser.add_argument(
+        "--validation-fraction",
+        type=float,
+        help="Fraction of merged candidate rows assigned to validation. Default: 0.15",
+    )
+    parser.add_argument(
+        "--test-fraction",
+        type=float,
+        help="Fraction of merged candidate rows assigned to test. Default: 0.15",
+    )
+    parser.add_argument(
+        "--split-seed",
+        type=int,
+        help="Deterministic seed for corpus split shuffling. Default: 42",
     )
     parser.add_argument(
         "--required-heldout-classes",
@@ -147,6 +189,95 @@ def _prepare_single_day(day_dir: Path, *, restart: bool) -> Path:
     return resolve_workspace_dir(day_dir, None)
 
 
+def _resolve_optional_float(
+    *,
+    cli_value: float | None,
+    config: dict[str, str],
+    config_key: str,
+    default_value: float,
+) -> float:
+    if cli_value is not None:
+        return cli_value
+    configured_value = str(config.get(config_key, "") or "").strip()
+    if configured_value == "":
+        return default_value
+    try:
+        return float(configured_value)
+    except ValueError as exc:
+        raise ValueError(f"{config_key} must be a float, got {configured_value!r}") from exc
+
+
+def _resolve_optional_int(
+    *,
+    cli_value: int | None,
+    config: dict[str, str],
+    config_key: str,
+    default_value: int,
+) -> int:
+    if cli_value is not None:
+        return cli_value
+    configured_value = str(config.get(config_key, "") or "").strip()
+    if configured_value == "":
+        return default_value
+    try:
+        return int(configured_value)
+    except ValueError as exc:
+        raise ValueError(f"{config_key} must be an integer, got {configured_value!r}") from exc
+
+
+def resolve_split_config(args: argparse.Namespace, day_dirs: Sequence[Path]) -> SplitConfig:
+    config = load_vocatio_config(day_dirs[0]) if day_dirs else {}
+    strategy = args.split_strategy
+    if strategy is None:
+        configured_strategy = str(config.get("ML_SPLIT_STRATEGY", "") or "").strip()
+        strategy = configured_strategy or DEFAULT_SPLIT_STRATEGY
+    if strategy not in {"global_random", "global_stratified"}:
+        raise ValueError("split strategy must be one of: global_random, global_stratified")
+
+    train_fraction = _resolve_optional_float(
+        cli_value=args.train_fraction,
+        config=config,
+        config_key="ML_SPLIT_TRAIN_FRACTION",
+        default_value=DEFAULT_TRAIN_FRACTION,
+    )
+    validation_fraction = _resolve_optional_float(
+        cli_value=args.validation_fraction,
+        config=config,
+        config_key="ML_SPLIT_VALIDATION_FRACTION",
+        default_value=DEFAULT_VALIDATION_FRACTION,
+    )
+    test_fraction = _resolve_optional_float(
+        cli_value=args.test_fraction,
+        config=config,
+        config_key="ML_SPLIT_TEST_FRACTION",
+        default_value=DEFAULT_TEST_FRACTION,
+    )
+    for name, value in (
+        ("train_fraction", train_fraction),
+        ("validation_fraction", validation_fraction),
+        ("test_fraction", test_fraction),
+    ):
+        if value <= 0:
+            raise ValueError(f"{name} must be greater than zero")
+    fraction_total = train_fraction + validation_fraction + test_fraction
+    if not math.isclose(fraction_total, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("train/validation/test fractions must sum to 1.0")
+
+    seed = _resolve_optional_int(
+        cli_value=args.split_seed,
+        config=config,
+        config_key="ML_SPLIT_SEED",
+        default_value=DEFAULT_SPLIT_SEED,
+    )
+    return SplitConfig(
+        strategy=strategy,
+        train_fraction=train_fraction,
+        validation_fraction=validation_fraction,
+        test_fraction=test_fraction,
+        seed=seed,
+    )
+
+
 def _read_candidate_rows(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -206,6 +337,97 @@ def _build_day_metadata_rows(merged_rows: Sequence[dict[str, str]]) -> list[dict
             }
         )
     return metadata_rows
+
+
+def _validate_corpus_size(merged_rows: Sequence[dict[str, str]]) -> None:
+    if len(merged_rows) < 3:
+        raise ValueError(
+            "ML boundary corpus split requires at least three candidate rows to produce train, validation, and test splits"
+        )
+
+
+def _split_target_counts(total_rows: int, split_config: SplitConfig) -> dict[str, int]:
+    split_names = ("train", "validation", "test")
+    fractions = (
+        split_config.train_fraction,
+        split_config.validation_fraction,
+        split_config.test_fraction,
+    )
+    counts = {split_name: 1 for split_name in split_names}
+    remainder = total_rows - len(split_names)
+    if remainder <= 0:
+        return counts
+
+    scaled = [fraction * remainder for fraction in fractions]
+    extra_counts = [int(math.floor(value)) for value in scaled]
+    for index, split_name in enumerate(split_names):
+        counts[split_name] += extra_counts[index]
+
+    assigned = sum(extra_counts)
+    leftovers = remainder - assigned
+    ranked_remainders = sorted(
+        enumerate(scaled),
+        key=lambda item: (item[1] - math.floor(item[1]), -item[0]),
+        reverse=True,
+    )
+    for index in range(leftovers):
+        split_position = ranked_remainders[index][0]
+        counts[split_names[split_position]] += 1
+    return counts
+
+
+def _ordered_rows_for_split(
+    merged_rows: Sequence[dict[str, str]],
+    split_config: SplitConfig,
+) -> list[dict[str, str]]:
+    random_generator = random.Random(split_config.seed)
+    rows = [dict(row) for row in merged_rows]
+    if split_config.strategy == "global_random":
+        random_generator.shuffle(rows)
+        return rows
+
+    grouped_rows: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        grouped_rows.setdefault(str(row.get("segment_type", "")), []).append(row)
+    for bucket in grouped_rows.values():
+        random_generator.shuffle(bucket)
+
+    ordered_rows: list[dict[str, str]] = []
+    ordered_keys = sorted(grouped_rows)
+    while any(grouped_rows.values()):
+        for key in ordered_keys:
+            bucket = grouped_rows[key]
+            if bucket:
+                ordered_rows.append(bucket.pop())
+    return ordered_rows
+
+
+def _build_corpus_split_rows(
+    merged_rows: Sequence[dict[str, str]],
+    split_config: SplitConfig,
+) -> list[dict[str, str]]:
+    target_counts = _split_target_counts(len(merged_rows), split_config)
+    ordered_rows = _ordered_rows_for_split(merged_rows, split_config)
+
+    split_rows: list[dict[str, str]] = []
+    split_index = 0
+    split_names = ("train", "validation", "test")
+    remaining_in_split = target_counts[split_names[split_index]]
+    for row in ordered_rows:
+        while remaining_in_split == 0 and split_index < len(split_names) - 1:
+            split_index += 1
+            remaining_in_split = target_counts[split_names[split_index]]
+        candidate_id = str(row.get("candidate_id", "")).strip()
+        if candidate_id == "":
+            raise ValueError("merged candidate rows must include non-blank candidate_id values")
+        split_rows.append(
+            {
+                "candidate_id": candidate_id,
+                "split_name": split_names[split_index],
+            }
+        )
+        remaining_in_split -= 1
+    return split_rows
 
 
 def _required_classes(
@@ -326,16 +548,10 @@ def _write_pipeline_summary(
     atomic_write_json(summary_path, payload)
 
 
-def _minimum_day_count_note(day_count: int) -> str:
-    return (
-        "ML boundary training/evaluation requires at least three day_id values to build "
-        f"train/validation/test splits without leakage; got {day_count}."
-    )
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     day_dirs = _resolve_days(args.day_dirs)
+    split_config = resolve_split_config(args, day_dirs)
     day_workspaces: list[Path] = []
     for day_dir in day_dirs:
         workspace_dir = _prepare_single_day(day_dir, restart=args.restart)
@@ -349,6 +565,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     candidate_csv_paths = [workspace / "ml_boundary_candidates.csv" for workspace in day_workspaces]
     merged_rows = _merge_candidate_rows(candidate_csv_paths)
+    _validate_corpus_size(merged_rows)
     corpus_candidates_path = corpus_workspace / CORPUS_CANDIDATES_FILENAME
     atomic_write_csv(corpus_candidates_path, CANDIDATE_ROW_HEADERS, merged_rows)
     console.print(f"Wrote merged candidate dataset: {corpus_candidates_path}")
@@ -359,38 +576,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     atomic_write_csv(day_metadata_path, day_metadata_headers, day_metadata_rows)
     console.print(f"Wrote day metadata: {day_metadata_path}")
 
-    if len(day_metadata_rows) < 3:
-        note = _minimum_day_count_note(len(day_metadata_rows))
-        summary_path = corpus_workspace / PIPELINE_SUMMARY_FILENAME
-        if args.prepare_only:
-            _write_pipeline_summary(
-                summary_path=summary_path,
-                day_dirs=day_dirs,
-                day_workspaces=day_workspaces,
-                corpus_candidates_path=corpus_candidates_path,
-                day_metadata_path=day_metadata_path,
-                split_manifest_path=None,
-                validation_report_path=None,
-                model_dir=None,
-                eval_dir=None,
-                required_heldout_classes=[],
-                mode=args.mode,
-                prepare_only=True,
-                note=note,
-            )
-            console.print(f"Stop after corpus preparation: {note}")
-            console.print(f"Wrote pipeline summary: {summary_path}")
-            return 0
-        raise ValueError(f"{note} Pass at least three day directories or use --prepare-only.")
-
     required_heldout_classes = _required_classes(
         day_metadata_rows,
         explicit_required=args.required_heldout_classes,
     )
-    split_rows = build_split_manifest_rows(
-        day_metadata_rows,
-        required_heldout_classes=required_heldout_classes,
-    )
+    split_rows = _build_corpus_split_rows(merged_rows, split_config)
     split_manifest_path = corpus_workspace / SPLIT_MANIFEST_FILENAME
     atomic_write_csv(split_manifest_path, SPLIT_MANIFEST_HEADERS, split_rows)
     console.print(f"Wrote split manifest: {split_manifest_path}")
