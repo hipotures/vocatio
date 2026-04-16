@@ -260,6 +260,24 @@ def test_validate_split_manifest_requires_heldout_classes_when_requested() -> No
         raise AssertionError("expected ValueError")
 
 
+def test_validate_split_manifest_rejects_duplicate_candidate_ids_for_candidate_keyed_manifests() -> None:
+    first_row = _candidate_row(day_id="20250324", candidate_rule_version="gap-v1")
+    duplicate_row = _candidate_row(day_id="20250325", candidate_rule_version="gap-v2")
+    duplicate_row["candidate_id"] = first_row["candidate_id"]
+
+    try:
+        validate_split_manifest(
+            [{"candidate_id": first_row["candidate_id"], "split_name": "train"}],
+            [first_row, duplicate_row],
+            manifest_key="candidate_id",
+        )
+    except ValueError as exc:
+        assert "candidate rows contain duplicate candidate_id values" in str(exc)
+        assert first_row["candidate_id"] in str(exc)
+    else:
+        raise AssertionError("expected duplicate candidate_id values to be rejected")
+
+
 def test_validate_split_manifest_accepts_candidate_level_assignments() -> None:
     candidate_rows = [
         _candidate_row(day_id="20250325", candidate_rule_version="gap-v1"),

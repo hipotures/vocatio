@@ -392,6 +392,20 @@ def validate_split_manifest(
         manifest_key = _detect_split_manifest_key(
             [field_name for row in split_rows for field_name in row.keys()]
         )
+    if manifest_key == "candidate_id":
+        seen_candidate_ids: set[str] = set()
+        duplicate_candidate_ids: set[str] = set()
+        for row_index, row in enumerate(candidate_rows, start=1):
+            candidate_id = _require_non_blank_text(row, "candidate_id", row_number=row_index)
+            if candidate_id in seen_candidate_ids:
+                duplicate_candidate_ids.add(candidate_id)
+            else:
+                seen_candidate_ids.add(candidate_id)
+        if duplicate_candidate_ids:
+            raise ValueError(
+                "candidate rows contain duplicate candidate_id values: "
+                + ", ".join(sorted(duplicate_candidate_ids))
+            )
     manifest_by_id: dict[str, str] = {}
     for row_index, row in enumerate(split_rows, start=1):
         manifest_id = _require_non_blank_text(row, manifest_key, row_number=row_index)

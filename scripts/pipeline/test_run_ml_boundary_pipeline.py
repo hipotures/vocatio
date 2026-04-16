@@ -13,6 +13,7 @@ from lib.workspace_dir import resolve_workspace_dir
 from run_ml_boundary_pipeline import (
     CORPUS_CANDIDATES_FILENAME,
     SplitConfig,
+    _build_corpus_split_rows,
     _build_global_stratified_split_rows,
     main,
     parse_args,
@@ -327,6 +328,30 @@ def test_main_global_random_writes_deterministic_candidate_level_split_manifest(
     assert summary_payload["split_seed"] == 42
 
 
+def test_build_corpus_split_rows_rejects_duplicate_candidate_ids() -> None:
+    first_row = _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=1)
+    duplicate_row = _candidate_row(day_id="20250326", segment_type="ceremony", boundary="1", offset=2)
+    duplicate_row["candidate_id"] = first_row["candidate_id"]
+    third_row = _candidate_row(day_id="20250327", segment_type="warmup", boundary="0", offset=3)
+
+    try:
+        _build_corpus_split_rows(
+            [first_row, duplicate_row, third_row],
+            SplitConfig(
+                strategy="global_random",
+                train_fraction=0.70,
+                validation_fraction=0.15,
+                test_fraction=0.15,
+                seed=42,
+            ),
+        )
+    except ValueError as exc:
+        assert "merged candidate rows contain duplicate candidate_id values" in str(exc)
+        assert first_row["candidate_id"] in str(exc)
+    else:
+        raise AssertionError("expected duplicate candidate_id values to be rejected")
+
+
 def test_main_default_global_stratified_preserves_required_heldout_classes_when_supported(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -612,6 +637,35 @@ def test_global_stratified_is_deterministic_for_same_seed_and_inputs() -> None:
     assert first_strategy == "global_stratified"
     assert second_strategy == "global_stratified"
     assert first_rows == second_rows
+
+
+def test_global_stratified_raises_when_required_heldout_coverage_is_impossible() -> None:
+    candidate_rows = []
+    for offset in range(8):
+        row = _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=offset + 1)
+        row["candidate_id"] = f"performance-c{offset:02d}"
+        candidate_rows.append(row)
+    rare_row = _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1", offset=101)
+    rare_row["candidate_id"] = "ceremony-only"
+    candidate_rows.append(rare_row)
+
+    try:
+        _build_global_stratified_split_rows(
+            candidate_rows,
+            SplitConfig(
+                strategy="global_stratified",
+                train_fraction=0.70,
+                validation_fraction=0.15,
+                test_fraction=0.15,
+                seed=7,
+            ),
+            required_heldout_classes=["performance", "ceremony"],
+        )
+    except ValueError as exc:
+        assert "global_stratified cannot satisfy required held-out classes" in str(exc)
+        assert "ceremony" in str(exc)
+    else:
+        raise AssertionError("expected impossible held-out coverage to raise a ValueError")
 
 
 def test_resolve_split_config_defaults_to_global_stratified(tmp_path: Path) -> None:

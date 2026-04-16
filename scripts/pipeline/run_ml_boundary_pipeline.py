@@ -426,6 +426,23 @@ def _validate_candidate_row(row: dict[str, str]) -> tuple[str, str, str]:
     return candidate_id, boundary, segment_type
 
 
+def _validate_unique_candidate_ids(candidate_rows: Sequence[dict[str, str]]) -> None:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for row in candidate_rows:
+        candidate_id, _, _ = _validate_candidate_row(row)
+        if candidate_id in seen:
+            duplicates.add(candidate_id)
+        else:
+            seen.add(candidate_id)
+    if duplicates:
+        duplicate_values = ", ".join(sorted(duplicates))
+        raise ValueError(
+            "merged candidate rows contain duplicate candidate_id values: "
+            f"{duplicate_values}"
+        )
+
+
 def _build_split_rows_from_assignments(assignments: dict[str, str]) -> list[dict[str, str]]:
     return [
         {"candidate_id": candidate_id, "split_name": assignments[candidate_id]}
@@ -438,6 +455,7 @@ def _build_global_random_split_rows(
     split_config: SplitConfig,
 ) -> list[dict[str, str]]:
     _validate_corpus_size(candidate_rows)
+    _validate_unique_candidate_ids(candidate_rows)
     candidate_ids = [_validate_candidate_row(row)[0] for row in candidate_rows]
     random_generator = random.Random(split_config.seed)
     random_generator.shuffle(candidate_ids)
@@ -692,6 +710,21 @@ def _has_required_heldout_coverage(
     return True
 
 
+def _required_heldout_coverage_error(
+    required_heldout_classes: Sequence[str],
+    *,
+    reason: str | None = None,
+) -> ValueError:
+    required_values = ", ".join(sorted(dict.fromkeys(required_heldout_classes)))
+    message = (
+        "global_stratified cannot satisfy required held-out classes under the requested "
+        f"split configuration: {required_values}"
+    )
+    if reason:
+        message = f"{message} ({reason})"
+    return ValueError(message)
+
+
 def _build_global_stratified_split_rows(
     candidate_rows: Sequence[dict[str, str]],
     split_config: SplitConfig,
@@ -699,6 +732,7 @@ def _build_global_stratified_split_rows(
     required_heldout_classes: Sequence[str] = (),
 ) -> tuple[list[dict[str, str]], str]:
     _validate_corpus_size(candidate_rows)
+    _validate_unique_candidate_ids(candidate_rows)
     strata, segment_type_by_candidate_id = _shuffle_strata(
         candidate_rows,
         split_config=split_config,
@@ -730,7 +764,12 @@ def _build_global_stratified_split_rows(
             strata,
             target_counts=remaining_target_counts,
         )
-    except ValueError:
+    except ValueError as exc:
+        if required_heldout_classes:
+            raise _required_heldout_coverage_error(
+                required_heldout_classes,
+                reason=str(exc),
+            ) from exc
         return _build_global_random_split_rows(candidate_rows, split_config), "global_random"
 
     for stratum_key in sorted(strata):
@@ -747,6 +786,11 @@ def _build_global_stratified_split_rows(
         segment_type_by_candidate_id=segment_type_by_candidate_id,
         required_heldout_classes=required_heldout_classes,
     ):
+        if required_heldout_classes:
+            raise _required_heldout_coverage_error(
+                required_heldout_classes,
+                reason="coverage check failed after stratified allocation",
+            )
         return _build_global_random_split_rows(candidate_rows, split_config), "global_random"
 
     return _build_split_rows_from_assignments(assignments), "global_stratified"
