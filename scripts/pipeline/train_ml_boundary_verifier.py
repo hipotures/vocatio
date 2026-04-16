@@ -53,7 +53,7 @@ def image_feature_columns_for_mode(mode: str) -> list[str]:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train ML boundary verifier predictors from a CSV dataset and day-level split manifest.",
+        description="Train ML boundary verifier predictors from a CSV dataset and a train/validation/test split manifest.",
     )
     parser.add_argument(
         "dataset_path",
@@ -62,7 +62,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--split-manifest-csv",
         required=True,
-        help="Path to ml_boundary_splits CSV used for day-level train/validation/test assignment.",
+        help="Path to ml_boundary_splits CSV used for train/validation/test assignment.",
     )
     parser.add_argument(
         "--mode",
