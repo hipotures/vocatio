@@ -27,7 +27,7 @@ REQUIRED_DERIVED_FEATURE_SOURCE_COLUMNS = tuple(
     ]
 )
 NON_MODEL_FEATURE_COLUMNS = frozenset(REQUIRED_BASE_COLUMNS + ("split_name",))
-REQUIRED_SPLIT_MANIFEST_COLUMNS = ("day_id", "split_name")
+SPLIT_MANIFEST_VALUE_COLUMNS = ("split_name",)
 ALLOWED_SPLIT_NAMES = ("train", "validation", "test")
 
 
@@ -134,29 +134,30 @@ def load_split_manifest_frame(split_manifest_path: Path) -> TrainingTable:
         reader = csv.DictReader(handle)
         rows = [dict(row) for row in reader]
     frame = TrainingTable(rows, column_names=list(reader.fieldnames or []))
-    _require_columns(
-        frame.columns,
-        required_columns=REQUIRED_SPLIT_MANIFEST_COLUMNS,
-        resource_name=split_manifest_path.name,
-    )
+    manifest_key = _detect_split_manifest_key(frame.columns)
     if not frame.rows:
         raise ValueError("split manifest must contain at least one row")
     normalized_rows: list[dict[str, str]] = []
-    day_ids: list[str] = []
+    manifest_ids: list[str] = []
     split_names: list[str] = []
     for row in frame.rows:
         normalized_row = dict(row)
-        normalized_row["day_id"] = str(row.get("day_id", "")).strip()
+        normalized_row[manifest_key] = str(row.get(manifest_key, "")).strip()
         normalized_row["split_name"] = str(row.get("split_name", "")).strip()
         normalized_rows.append(normalized_row)
-        day_ids.append(normalized_row["day_id"])
+        manifest_ids.append(normalized_row[manifest_key])
         split_names.append(normalized_row["split_name"])
-    if any(day_id == "" for day_id in day_ids):
-        raise ValueError("split manifest day_id values must not be blank")
-    duplicates = sorted(day_id for day_id in set(day_ids) if day_ids.count(day_id) > 1)
+    if any(manifest_id == "" for manifest_id in manifest_ids):
+        raise ValueError(f"split manifest {manifest_key} values must not be blank")
+    duplicates = sorted(
+        manifest_id
+        for manifest_id in set(manifest_ids)
+        if manifest_ids.count(manifest_id) > 1
+    )
     if duplicates:
         raise ValueError(
-            f"split manifest must not contain duplicate day_id entries: {', '.join(duplicates)}"
+            f"split manifest must not contain duplicate {manifest_key} entries: "
+            + ", ".join(duplicates)
         )
     invalid_splits = sorted(
         split_name for split_name in set(split_names) if split_name not in ALLOWED_SPLIT_NAMES
@@ -167,6 +168,15 @@ def load_split_manifest_frame(split_manifest_path: Path) -> TrainingTable:
             + ", ".join(invalid_splits)
         )
     return TrainingTable(normalized_rows, column_names=frame.columns)
+
+
+def _detect_split_manifest_key(columns: list[str]) -> str:
+    available_columns = set(columns)
+    if {"candidate_id", *SPLIT_MANIFEST_VALUE_COLUMNS} <= available_columns:
+        return "candidate_id"
+    if {"day_id", *SPLIT_MANIFEST_VALUE_COLUMNS} <= available_columns:
+        return "day_id"
+    raise ValueError("split manifest must contain either day_id/split_name or candidate_id/split_name")
 
 
 def feature_columns_for_mode(dataset_columns: list[str], mode: str) -> dict[str, list[str]]:
@@ -288,30 +298,36 @@ def _join_split_manifest(
     *,
     split_manifest_frame: TrainingTable,
 ) -> TrainingTable:
+    manifest_key = _detect_split_manifest_key(split_manifest_frame.columns)
     candidate_rows: list[dict[str, object]] = []
-    candidate_day_ids: set[str] = set()
+    candidate_manifest_ids: set[str] = set()
     for row in candidate_frame.rows:
         normalized_row = dict(row)
         normalized_row["day_id"] = str(row.get("day_id", "")).strip()
         if normalized_row["day_id"] == "":
             raise ValueError("candidate dataset day_id values must not be blank")
+        if manifest_key == "candidate_id":
+            normalized_row["candidate_id"] = str(row.get("candidate_id", "")).strip()
+            if normalized_row["candidate_id"] == "":
+                raise ValueError("candidate dataset candidate_id values must not be blank")
         candidate_rows.append(normalized_row)
-        candidate_day_ids.add(normalized_row["day_id"])
+        candidate_manifest_ids.add(str(normalized_row[manifest_key]))
 
-    split_by_day = {
-        str(row["day_id"]).strip(): str(row["split_name"]).strip()
+    split_by_manifest_id = {
+        str(row[manifest_key]).strip(): str(row["split_name"]).strip()
         for row in split_manifest_frame.rows
     }
-    missing_day_ids = sorted(candidate_day_ids - set(split_by_day))
-    if missing_day_ids:
+    missing_manifest_ids = sorted(candidate_manifest_ids - set(split_by_manifest_id))
+    if missing_manifest_ids:
         raise ValueError(
-            "split manifest is missing day_id entries: " + ", ".join(missing_day_ids)
+            f"split manifest is missing {manifest_key} entries: "
+            + ", ".join(missing_manifest_ids)
         )
 
     joined_rows: list[dict[str, object]] = []
     for row in candidate_rows:
         joined_row = {key: value for key, value in row.items() if key != "split_name"}
-        joined_row["split_name"] = split_by_day[row["day_id"]]
+        joined_row["split_name"] = split_by_manifest_id[str(row[manifest_key])]
         joined_rows.append(joined_row)
     return TrainingTable(joined_rows, column_names=list(joined_rows[0].keys()) if joined_rows else candidate_frame.columns)
 

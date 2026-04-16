@@ -39,7 +39,6 @@ FRAME_PHOTO_ID_FIELDS = [f"frame_0{index}_photo_id" for index in range(1, 6)]
 FRAME_RELPATH_FIELDS = [f"frame_0{index}_relpath" for index in range(1, 6)]
 FRAME_THUMB_FIELDS = [f"frame_0{index}_thumb_path" for index in range(1, 6)]
 FRAME_PREVIEW_FIELDS = [f"frame_0{index}_preview_path" for index in range(1, 6)]
-REQUIRED_SPLIT_MANIFEST_HEADERS = ["day_id", "split_name"]
 HELDOUT_SPLIT_NAMES = ("validation", "test")
 VALID_SPLIT_NAMES = {"train", "validation", "test"}
 
@@ -71,6 +70,24 @@ def _read_csv_rows(path: Path, *, required_headers: Sequence[str]) -> list[dict[
         reader = csv.DictReader(handle)
         _require_fieldnames(path, reader.fieldnames or (), required_headers)
         return [dict(row) for row in reader]
+
+
+def _detect_split_manifest_key(fieldnames: Sequence[str]) -> str:
+    available = set(fieldnames)
+    if {"candidate_id", "split_name"} <= available:
+        return "candidate_id"
+    if {"day_id", "split_name"} <= available:
+        return "day_id"
+    raise ValueError("split manifest must contain either day_id/split_name or candidate_id/split_name")
+
+
+def _read_split_manifest_rows(path: Path) -> tuple[list[dict[str, str]], str]:
+    if not path.is_file():
+        raise FileNotFoundError(f"CSV does not exist: {path}")
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        manifest_key = _detect_split_manifest_key(reader.fieldnames or ())
+        return [dict(row) for row in reader], manifest_key
 
 
 def _read_json_object(path: Path) -> dict[str, object]:
@@ -362,35 +379,41 @@ def validate_split_manifest(
     split_rows: Sequence[Mapping[str, object]],
     candidate_rows: Sequence[Mapping[str, object]],
     *,
+    manifest_key: Optional[str] = None,
     required_classes: Optional[Sequence[str]] = None,
 ) -> None:
-    manifest_by_day: dict[str, str] = {}
+    if manifest_key is None:
+        manifest_key = _detect_split_manifest_key(
+            [field_name for row in split_rows for field_name in row.keys()]
+        )
+    manifest_by_id: dict[str, str] = {}
     for row_index, row in enumerate(split_rows, start=1):
-        day_id = _require_non_blank_text(row, "day_id", row_number=row_index)
+        manifest_id = _require_non_blank_text(row, manifest_key, row_number=row_index)
         split_name = _require_non_blank_text(row, "split_name", row_number=row_index)
         if split_name not in VALID_SPLIT_NAMES:
             raise ValueError(
                 "split manifest split_name must be one of: train, validation, test"
             )
-        previous_split_name = manifest_by_day.get(day_id)
+        previous_split_name = manifest_by_id.get(manifest_id)
         if previous_split_name is not None and previous_split_name != split_name:
             raise ValueError(
-                f"split manifest assigns day_id {day_id} to multiple splits: "
+                f"split manifest assigns {manifest_key} {manifest_id} to multiple splits: "
                 f"{previous_split_name}, {split_name}"
             )
-        manifest_by_day[day_id] = split_name
+        manifest_by_id[manifest_id] = split_name
 
-    missing_days = sorted(
+    missing_ids = sorted(
         {
-            _require_non_blank_text(row, "day_id", row_number=index)
+            _require_non_blank_text(row, manifest_key, row_number=index)
             for index, row in enumerate(candidate_rows, start=1)
-            if _require_non_blank_text(row, "day_id", row_number=index) not in manifest_by_day
+            if _require_non_blank_text(row, manifest_key, row_number=index) not in manifest_by_id
         }
     )
-    if missing_days:
+    if missing_ids:
+        missing_label = "candidate day_ids" if manifest_key == "day_id" else "candidate_ids"
         raise ValueError(
-            "split manifest is missing assignments for candidate day_ids: "
-            + ", ".join(missing_days)
+            f"split manifest is missing assignments for {missing_label}: "
+            + ", ".join(missing_ids)
         )
 
     if not required_classes:
@@ -405,8 +428,8 @@ def validate_split_manifest(
 
     classes_by_split: dict[str, set[str]] = {}
     for row_index, row in enumerate(candidate_rows, start=1):
-        day_id = _require_non_blank_text(row, "day_id", row_number=row_index)
-        split_name = manifest_by_day[day_id]
+        manifest_id = _require_non_blank_text(row, manifest_key, row_number=row_index)
+        split_name = manifest_by_id[manifest_id]
         segment_type = _require_non_blank_text(row, "segment_type", row_number=row_index)
         classes_by_split.setdefault(split_name, set()).add(segment_type)
 
@@ -440,7 +463,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--split-manifest-csv",
         help=(
-            "Optional split manifest CSV with day_id and split_name columns. "
+            "Optional split manifest CSV with candidate_id and split_name columns, "
+            "or day_id and split_name columns. "
             "Relative paths resolve from WORKSPACE when candidate_csv is DAY."
         ),
     )
@@ -610,13 +634,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 progress.advance(validate_task)
 
         if split_manifest_path is not None:
-            split_rows = _read_csv_rows(
-                split_manifest_path,
-                required_headers=REQUIRED_SPLIT_MANIFEST_HEADERS,
-            )
+            split_rows, manifest_key = _read_split_manifest_rows(split_manifest_path)
             validate_split_manifest(
                 split_rows,
                 candidate_rows,
+                manifest_key=manifest_key,
                 required_classes=args.required_heldout_classes,
             )
 

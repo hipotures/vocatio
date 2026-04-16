@@ -20,6 +20,7 @@ def _candidate_row(
     day_id: str,
     segment_type: str = "ceremony",
     boundary: str = "1",
+    candidate_rule_version: str = "gap-v1",
 ) -> dict[str, str]:
     row = {header: "" for header in CANDIDATE_ROW_HEADERS}
     row.update(
@@ -28,7 +29,7 @@ def _candidate_row(
                 day_id=day_id,
                 center_left_photo_id=f"{day_id}-p3",
                 center_right_photo_id=f"{day_id}-p4",
-                candidate_rule_version="gap-v1",
+                candidate_rule_version=candidate_rule_version,
             ),
             "day_id": day_id,
             "window_size": "5",
@@ -41,7 +42,7 @@ def _candidate_row(
             "segment_type": segment_type,
             "boundary": boundary,
             "candidate_rule_name": "gap_threshold",
-            "candidate_rule_version": "gap-v1",
+            "candidate_rule_version": candidate_rule_version,
             "candidate_rule_params_json": "{\"gap_threshold_seconds\":20.0}",
             "descriptor_schema_version": "not_included_v1",
             "split_name": "",
@@ -67,8 +68,9 @@ def _write_candidate_csv(path: Path, rows: list[dict[str, str]]) -> None:
 
 
 def _write_split_manifest(path: Path, rows: list[dict[str, str]]) -> None:
+    fieldnames = list(rows[0].keys()) if rows else ["day_id", "split_name"]
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["day_id", "split_name"])
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -138,6 +140,53 @@ def test_load_training_data_bundle_joins_split_manifest_and_selects_train_valida
     assert "frame_01_relpath" not in bundle.shared_feature_columns
     assert "frame_01_timestamp" not in bundle.shared_feature_columns
     assert "frame_01_preview_path" not in bundle.shared_feature_columns
+
+
+def test_load_training_data_bundle_accepts_candidate_level_split_manifest(
+    tmp_path: Path,
+) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    candidate_rows = [
+        _candidate_row(
+            day_id="20250325",
+            segment_type="performance",
+            boundary="0",
+            candidate_rule_version="gap-v1",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            segment_type="ceremony",
+            boundary="1",
+            candidate_rule_version="gap-v2",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            segment_type="warmup",
+            boundary="0",
+            candidate_rule_version="gap-v3",
+        ),
+    ]
+    _write_candidate_csv(dataset_path, candidate_rows)
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"candidate_id": candidate_rows[0]["candidate_id"], "split_name": "train"},
+            {"candidate_id": candidate_rows[1]["candidate_id"], "split_name": "validation"},
+            {"candidate_id": candidate_rows[2]["candidate_id"], "split_name": "test"},
+        ],
+    )
+
+    bundle = load_training_data_bundle(
+        dataset_path,
+        split_manifest_path=split_manifest_path,
+        mode="tabular_only",
+    )
+
+    assert bundle.train_rows["segment_type"].tolist() == ["performance"]
+    assert bundle.validation_rows["segment_type"].tolist() == ["ceremony"]
+    assert bundle.test_rows["segment_type"].tolist() == ["warmup"]
+    assert bundle.split_counts_by_name == {"train": 1, "validation": 1, "test": 1}
 
 
 def test_load_training_data_bundle_requires_base_columns_for_tabular_mode(

@@ -96,8 +96,9 @@ def _write_candidate_csv(path: Path, rows: list[dict[str, str]]) -> None:
 
 
 def _write_split_manifest(path: Path, rows: list[dict[str, str]]) -> None:
+    fieldnames = list(rows[0].keys()) if rows else ["day_id", "split_name"]
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["day_id", "split_name"])
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -257,6 +258,51 @@ def test_validate_split_manifest_requires_heldout_classes_when_requested() -> No
         assert "split validation is missing required classes" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_validate_split_manifest_accepts_candidate_level_assignments() -> None:
+    candidate_rows = [
+        _candidate_row(day_id="20250325", candidate_rule_version="gap-v1"),
+        _candidate_row(day_id="20250325", candidate_rule_version="gap-v2"),
+    ]
+    split_rows = [
+        {"candidate_id": candidate_rows[0]["candidate_id"], "split_name": "train"},
+        {"candidate_id": candidate_rows[1]["candidate_id"], "split_name": "validation"},
+    ]
+
+    validate_split_manifest(split_rows, candidate_rows)
+
+
+def test_validate_split_manifest_requires_heldout_classes_for_candidate_level_assignments() -> None:
+    candidate_rows = [
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v1",
+            right_segment_type="performance",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v2",
+            right_segment_type="performance",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v3",
+            right_segment_type="ceremony",
+        ),
+    ]
+    split_rows = [
+        {"candidate_id": candidate_rows[0]["candidate_id"], "split_name": "train"},
+        {"candidate_id": candidate_rows[1]["candidate_id"], "split_name": "validation"},
+        {"candidate_id": candidate_rows[2]["candidate_id"], "split_name": "test"},
+    ]
+
+    with pytest.raises(ValueError, match="split validation is missing required classes: ceremony"):
+        validate_split_manifest(
+            split_rows,
+            candidate_rows,
+            required_classes=["performance", "ceremony"],
+        )
 
 
 def test_validate_split_manifest_rejects_invalid_split_name() -> None:
@@ -428,6 +474,127 @@ def test_cli_main_validates_candidate_csv_attrition_and_split_manifest(tmp_path:
         "available": False,
         "reason": "candidate CSV does not include is_hard_negative",
     }
+
+
+def test_cli_main_accepts_candidate_keyed_split_manifest(tmp_path: Path) -> None:
+    candidate_csv = tmp_path / "ml_boundary_candidates.csv"
+    attrition_json = tmp_path / "ml_boundary_attrition.json"
+    split_manifest_csv = tmp_path / "ml_boundary_splits.csv"
+    report_json = tmp_path / "ml_boundary_validation_report.json"
+
+    candidate_rows = [
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v1",
+            right_segment_type="performance",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v2",
+            left_segment_type="ceremony",
+            right_segment_type="ceremony",
+            left_segment_id="seg-c1",
+            right_segment_id="seg-c1",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v3",
+            left_segment_type="warmup",
+            right_segment_type="warmup",
+            left_segment_id="seg-w1",
+            right_segment_id="seg-w1",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v4",
+            right_segment_type="performance",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v5",
+            left_segment_type="ceremony",
+            right_segment_type="ceremony",
+            left_segment_id="seg-c2",
+            right_segment_id="seg-c2",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v6",
+            left_segment_type="warmup",
+            right_segment_type="warmup",
+            left_segment_id="seg-w2",
+            right_segment_id="seg-w2",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v7",
+            right_segment_type="performance",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v8",
+            left_segment_type="ceremony",
+            right_segment_type="ceremony",
+            left_segment_id="seg-c3",
+            right_segment_id="seg-c3",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v9",
+            left_segment_type="warmup",
+            right_segment_type="warmup",
+            left_segment_id="seg-w3",
+            right_segment_id="seg-w3",
+        ),
+    ]
+    _write_candidate_csv(candidate_csv, candidate_rows)
+    attrition_json.write_text(
+        json.dumps(
+            {
+                "candidate_count_generated": 9,
+                "candidate_count_excluded_missing_window": 0,
+                "candidate_count_excluded_missing_artifacts": 0,
+                "candidate_count_retained": 9,
+                "true_boundary_coverage_before_exclusions": 3,
+                "true_boundary_coverage_after_exclusions": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_split_manifest(
+        split_manifest_csv,
+        [
+            {"candidate_id": candidate_rows[0]["candidate_id"], "split_name": "train"},
+            {"candidate_id": candidate_rows[1]["candidate_id"], "split_name": "train"},
+            {"candidate_id": candidate_rows[2]["candidate_id"], "split_name": "train"},
+            {"candidate_id": candidate_rows[3]["candidate_id"], "split_name": "validation"},
+            {"candidate_id": candidate_rows[4]["candidate_id"], "split_name": "validation"},
+            {"candidate_id": candidate_rows[5]["candidate_id"], "split_name": "validation"},
+            {"candidate_id": candidate_rows[6]["candidate_id"], "split_name": "test"},
+            {"candidate_id": candidate_rows[7]["candidate_id"], "split_name": "test"},
+            {"candidate_id": candidate_rows[8]["candidate_id"], "split_name": "test"},
+        ],
+    )
+
+    result = main(
+        [
+            str(candidate_csv),
+            "--attrition-json",
+            str(attrition_json),
+            "--split-manifest-csv",
+            str(split_manifest_csv),
+            "--required-heldout-classes",
+            "performance",
+            "ceremony",
+            "warmup",
+            "--report-json",
+            str(report_json),
+        ]
+    )
+
+    assert result == 0
+    payload = json.loads(report_json.read_text(encoding="utf-8"))
+    assert payload["candidate_row_count"] == 9
 
 
 def test_cli_main_resolves_day_workspace_defaults_from_vocatio(tmp_path: Path) -> None:
