@@ -78,6 +78,23 @@ Image-only stage 1 pipeline:
 - `build_photo_segments.py` -> `_workspace/photo_segments.csv`
 - `build_photo_review_index.py` -> `_workspace/performance_proxy_index.json`
 
+ML boundary verifier scaffold:
+
+- `build_ml_boundary_candidate_dataset.py` -> `_workspace/ml_boundary_candidates.csv`, `_workspace/ml_boundary_attrition.json`, `_workspace/ml_boundary_dataset_report.json`
+- `validate_ml_boundary_dataset.py` -> validates candidate CSV + attrition JSON and can write `_workspace/ml_boundary_validation_report.json`
+- `train_ml_boundary_verifier.py` -> writes scaffold training artifacts:
+  - `_workspace/ml_boundary_models/RUN/training_plan.json`
+  - `_workspace/ml_boundary_models/RUN/training_metadata.json`
+- `evaluate_ml_boundary_verifier.py` -> writes scaffold evaluation metrics:
+  - `_workspace/ml_boundary_eval/RUN/metrics.json`
+
+Important for `uv` users:
+
+- the ML verifier train/eval scaffold should run under the isolated `autogluon` dependency group
+- use:
+  - `uv run --no-default-groups --group autogluon ...`
+- this avoids the intentional `torch` / `torchvision` conflict with the default `gpu` group
+
 Manual smoke checklist:
 
 ```bash
@@ -90,4 +107,13 @@ python3 scripts/pipeline/bootstrap_photo_boundaries.py /data/20260323
 python3 scripts/pipeline/build_photo_segments.py /data/20260323
 python3 scripts/pipeline/build_photo_review_index.py /data/20260323
 python3 scripts/pipeline/review_performance_proxy_gui.py /data/20260323 --index performance_proxy_index.json
+```
+
+ML boundary verifier scaffold checklist:
+
+```bash
+python3 scripts/pipeline/build_ml_boundary_candidate_dataset.py /data/20260323
+python3 scripts/pipeline/validate_ml_boundary_dataset.py /data/20260323/_workspace/ml_boundary_candidates.csv --attrition-json /data/20260323/_workspace/ml_boundary_attrition.json --report-json /data/20260323/_workspace/ml_boundary_validation_report.json
+uv run --no-default-groups --group autogluon python3 scripts/pipeline/train_ml_boundary_verifier.py /data/20260323/_workspace/ml_boundary_candidates.csv --mode tabular_only --output-dir /data/20260323/_workspace/ml_boundary_models/run-001
+uv run --no-default-groups --group autogluon python3 scripts/pipeline/evaluate_ml_boundary_verifier.py /data/20260323/_workspace/ml_boundary_candidates.csv --model-dir /data/20260323/_workspace/ml_boundary_models/run-001 --output-dir /data/20260323/_workspace/ml_boundary_eval/run-001
 ```

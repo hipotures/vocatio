@@ -486,6 +486,93 @@ python3 scripts/pipeline/review_performance_proxy_gui.py DAY \
 
 Use a dedicated VLM review-state file so you do not mix VLM review decisions with the heuristic image-only or audio-assisted states.
 
+### ML Boundary Verifier Scaffold
+
+The ML verifier flow starts from reviewed image-only segmentation truth and builds a fixed-window candidate dataset for a tabular verifier or an ordered thumbnail experiment.
+
+#### 1. Build candidate rows from reviewed truth
+
+```bash
+python3 scripts/pipeline/build_ml_boundary_candidate_dataset.py DAY
+```
+
+This creates:
+
+- `DAY/_workspace/ml_boundary_candidates.csv`
+- `DAY/_workspace/ml_boundary_attrition.json`
+- `DAY/_workspace/ml_boundary_dataset_report.json`
+
+#### 2. Validate the candidate dataset and write a validation report
+
+```bash
+python3 scripts/pipeline/validate_ml_boundary_dataset.py \
+  DAY/_workspace/ml_boundary_candidates.csv \
+  --attrition-json DAY/_workspace/ml_boundary_attrition.json \
+  --report-json DAY/_workspace/ml_boundary_validation_report.json
+```
+
+Optional split-manifest validation:
+
+```bash
+python3 scripts/pipeline/validate_ml_boundary_dataset.py \
+  DAY/_workspace/ml_boundary_candidates.csv \
+  --attrition-json DAY/_workspace/ml_boundary_attrition.json \
+  --split-manifest-csv DAY/_workspace/ml_boundary_splits.csv \
+  --required-heldout-classes performance ceremony warmup \
+  --report-json DAY/_workspace/ml_boundary_validation_report.json
+```
+
+#### 3. Write the training scaffold artifacts
+
+The training scaffold is currently CSV-only. If you use `uv`, run it through the isolated `autogluon` group so it does not conflict with the default GPU torch stack.
+
+```bash
+uv run --no-default-groups --group autogluon \
+  python3 scripts/pipeline/train_ml_boundary_verifier.py \
+  DAY/_workspace/ml_boundary_candidates.csv \
+  --mode tabular_only \
+  --output-dir DAY/_workspace/ml_boundary_models/run-001
+```
+
+Ordered thumbnail experiment:
+
+```bash
+uv run --no-default-groups --group autogluon \
+  python3 scripts/pipeline/train_ml_boundary_verifier.py \
+  DAY/_workspace/ml_boundary_candidates.csv \
+  --mode tabular_plus_thumbnail \
+  --output-dir DAY/_workspace/ml_boundary_models/run-002
+```
+
+This creates scaffold model artifacts:
+
+- `training_plan.json`
+- `training_metadata.json`
+
+#### 4. Write scaffold evaluation metrics
+
+```bash
+uv run --no-default-groups --group autogluon \
+  python3 scripts/pipeline/evaluate_ml_boundary_verifier.py \
+  DAY/_workspace/ml_boundary_candidates.csv \
+  --model-dir DAY/_workspace/ml_boundary_models/run-001 \
+  --output-dir DAY/_workspace/ml_boundary_eval/run-001
+```
+
+This creates:
+
+- `metrics.json`
+
+Current scaffold behavior:
+
+- train/eval are CSV-only
+- train writes the contract for two independent predictors:
+  - `segment_type`
+  - `boundary`
+- `tabular_plus_thumbnail` preserves ordered image inputs through:
+  - `frame_01_thumb_path` ... `frame_05_thumb_path`
+- eval records threshold policy and a scaffold metrics report from the dataset truth replay path
+
 ## Export Profiles
 
 Available profiles:
