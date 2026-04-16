@@ -107,6 +107,20 @@ def _boundaries_by_split(
     return grouped
 
 
+def _full_strata_by_split(
+    candidate_rows: list[dict[str, str]],
+    split_rows: list[dict[str, str]],
+) -> dict[str, set[tuple[str, str]]]:
+    stratum_by_candidate_id = {
+        row["candidate_id"]: (row["boundary"], row["segment_type"])
+        for row in candidate_rows
+    }
+    grouped: dict[str, set[tuple[str, str]]] = {}
+    for row in split_rows:
+        grouped.setdefault(row["split_name"], set()).add(stratum_by_candidate_id[row["candidate_id"]])
+    return grouped
+
+
 def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, monkeypatch) -> None:
     day_dirs = []
     for day_id in ("20250324", "20250325", "20250326"):
@@ -520,6 +534,84 @@ def test_global_stratified_preserves_boundary_classes_when_each_full_stratum_sup
     boundaries_by_split = _boundaries_by_split(candidate_rows, split_rows)
     assert boundaries_by_split["validation"] == {"0", "1"}
     assert boundaries_by_split["test"] == {"0", "1"}
+
+
+def test_global_stratified_preserves_full_strata_coverage_when_heldout_budgets_allow_it() -> None:
+    candidate_rows = []
+    for boundary in ("0", "1"):
+        for segment_type in ("performance", "ceremony"):
+            for offset in range(7):
+                row = _candidate_row(
+                    day_id="20250325",
+                    segment_type=segment_type,
+                    boundary=boundary,
+                    offset=len(candidate_rows) + 1,
+                )
+                row["candidate_id"] = f"{segment_type}-{boundary}-full-c{offset:02d}"
+                candidate_rows.append(row)
+
+    split_rows, effective_strategy = _build_global_stratified_split_rows(
+        candidate_rows,
+        SplitConfig(
+            strategy="global_stratified",
+            train_fraction=20 / 28,
+            validation_fraction=4 / 28,
+            test_fraction=4 / 28,
+            seed=19,
+        ),
+        required_heldout_classes=["performance", "ceremony"],
+    )
+
+    assert effective_strategy == "global_stratified"
+    split_counts = {split_name: len(candidate_ids) for split_name, candidate_ids in _split_rows_by_name(split_rows).items()}
+    assert split_counts == {"train": 20, "validation": 4, "test": 4}
+    expected_strata = {
+        ("0", "performance"),
+        ("1", "performance"),
+        ("0", "ceremony"),
+        ("1", "ceremony"),
+    }
+    full_strata_by_split = _full_strata_by_split(candidate_rows, split_rows)
+    assert full_strata_by_split["validation"] == expected_strata
+    assert full_strata_by_split["test"] == expected_strata
+
+
+def test_global_stratified_is_deterministic_for_same_seed_and_inputs() -> None:
+    candidate_rows = []
+    for boundary in ("0", "1"):
+        for segment_type in ("performance", "ceremony"):
+            for offset in range(7):
+                row = _candidate_row(
+                    day_id="20250325",
+                    segment_type=segment_type,
+                    boundary=boundary,
+                    offset=len(candidate_rows) + 1,
+                )
+                row["candidate_id"] = f"{segment_type}-{boundary}-stable-c{offset:02d}"
+                candidate_rows.append(row)
+
+    split_config = SplitConfig(
+        strategy="global_stratified",
+        train_fraction=20 / 28,
+        validation_fraction=4 / 28,
+        test_fraction=4 / 28,
+        seed=23,
+    )
+
+    first_rows, first_strategy = _build_global_stratified_split_rows(
+        candidate_rows,
+        split_config,
+        required_heldout_classes=["performance", "ceremony"],
+    )
+    second_rows, second_strategy = _build_global_stratified_split_rows(
+        candidate_rows,
+        split_config,
+        required_heldout_classes=["performance", "ceremony"],
+    )
+
+    assert first_strategy == "global_stratified"
+    assert second_strategy == "global_stratified"
+    assert first_rows == second_rows
 
 
 def test_resolve_split_config_defaults_to_global_stratified(tmp_path: Path) -> None:

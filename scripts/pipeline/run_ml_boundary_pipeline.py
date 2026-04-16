@@ -571,6 +571,36 @@ def _reserve_required_heldout_assignments(
     return assignments
 
 
+def _can_preserve_full_heldout_strata(
+    strata: dict[tuple[str, str], list[str]],
+    *,
+    target_counts: dict[str, int],
+) -> bool:
+    populated_strata = [
+        stratum_key
+        for stratum_key in sorted(strata)
+        if strata[stratum_key]
+    ]
+    if not populated_strata:
+        return True
+    if any(target_counts[split_name] < len(populated_strata) for split_name in HELDOUT_SPLIT_NAMES):
+        return False
+    return all(len(strata[stratum_key]) >= len(HELDOUT_SPLIT_NAMES) for stratum_key in populated_strata)
+
+
+def _reserve_full_heldout_strata_assignments(
+    strata: dict[tuple[str, str], list[str]],
+) -> dict[str, str]:
+    assignments: dict[str, str] = {}
+    for split_name in HELDOUT_SPLIT_NAMES:
+        for stratum_key in sorted(strata):
+            if not strata[stratum_key]:
+                raise ValueError("Unable to preserve full held-out strata coverage")
+            candidate_id = strata[stratum_key].pop(0)
+            assignments[candidate_id] = split_name
+    return assignments
+
+
 def _allocate_remaining_stratified_counts(
     strata: dict[tuple[str, str], list[str]],
     *,
@@ -679,10 +709,13 @@ def _build_global_stratified_split_rows(
             split_config,
             minimum_counts=_stratified_minimum_split_counts(required_heldout_classes),
         )
-        assignments = _reserve_required_heldout_assignments(
-            strata,
-            required_heldout_classes=required_heldout_classes,
-        )
+        if _can_preserve_full_heldout_strata(strata, target_counts=target_counts):
+            assignments = _reserve_full_heldout_strata_assignments(strata)
+        else:
+            assignments = _reserve_required_heldout_assignments(
+                strata,
+                required_heldout_classes=required_heldout_classes,
+            )
         preassigned_counts = {
             split_name: sum(1 for value in assignments.values() if value == split_name)
             for split_name in SPLIT_NAMES
