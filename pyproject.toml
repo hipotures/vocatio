@@ -3,6 +3,7 @@ name = "vocatio"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "pyyaml>=6.0.2",
     "pyside6>=6.11.0",
     "rich==15.0.0",
 ]
