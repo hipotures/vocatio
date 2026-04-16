@@ -161,4 +161,4 @@ After a pipeline run, inspect `FIRST_DAY_WORKSPACE/ml_boundary_corpus/ml_boundar
 
 - `requested_split_strategy`
 - `effective_split_strategy`
-- `required_heldout_classes` when held-out coverage is part of the run contract
+- `required_heldout_classes` to confirm which held-out coverage classes were enforced for the run

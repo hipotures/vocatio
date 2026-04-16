@@ -580,7 +580,7 @@ Verification:
 
 - inspect `FIRST_DAY_WORKSPACE/ml_boundary_corpus/ml_boundary_pipeline_summary.json`
 - check `requested_split_strategy` and `effective_split_strategy` to confirm whether the run stayed on `global_stratified` or fell back to `global_random`
-- inspect `required_heldout_classes` in the same summary when you are enforcing held-out coverage explicitly
+- inspect `required_heldout_classes` in the same summary to confirm which held-out coverage classes were enforced for the run
 
 #### Manual flow (step-by-step)
 
