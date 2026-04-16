@@ -1,0 +1,335 @@
+from __future__ import annotations
+
+import csv
+from dataclasses import dataclass
+from pathlib import Path
+
+from lib.ml_boundary_features import build_candidate_feature_row
+
+
+TRAIN_MODES = ("tabular_only", "tabular_plus_thumbnail")
+THUMBNAIL_IMAGE_COLUMNS = [
+    "frame_01_thumb_path",
+    "frame_02_thumb_path",
+    "frame_03_thumb_path",
+    "frame_04_thumb_path",
+    "frame_05_thumb_path",
+]
+REQUIRED_BASE_COLUMNS = ("day_id", "segment_type", "boundary")
+REQUIRED_DERIVED_FEATURE_SOURCE_COLUMNS = tuple(
+    [
+        f"frame_{frame_index:02d}_timestamp"
+        for frame_index in range(1, 6)
+    ]
+    + [
+        f"frame_{frame_index:02d}_photo_id"
+        for frame_index in range(1, 6)
+    ]
+)
+NON_FEATURE_COLUMNS = frozenset(
+    REQUIRED_BASE_COLUMNS
+    + (
+        "split_name",
+        "left_segment_id",
+        "right_segment_id",
+        "left_segment_type",
+        "right_segment_type",
+    )
+)
+REQUIRED_SPLIT_MANIFEST_COLUMNS = ("day_id", "split_name")
+ALLOWED_SPLIT_NAMES = ("train", "validation", "test")
+
+
+@dataclass(frozen=True)
+class PredictorTrainingData:
+    label_column: str
+    feature_columns: list[str]
+    train_data: "TrainingTable"
+    validation_data: "TrainingTable"
+
+
+@dataclass(frozen=True)
+class TrainingDataBundle:
+    train_rows: "TrainingTable"
+    validation_rows: "TrainingTable"
+    split_counts_by_name: dict[str, int]
+    shared_feature_columns: list[str]
+    image_feature_columns: list[str]
+    segment_type: PredictorTrainingData
+    boundary: PredictorTrainingData
+
+
+class ColumnValues(list):
+    def tolist(self) -> list[object]:
+        return list(self)
+
+
+@dataclass(frozen=True)
+class TrainingTable:
+    rows: list[dict[str, object]]
+    column_names: list[str] | None = None
+
+    @property
+    def columns(self) -> list[str]:
+        if self.column_names is not None:
+            return list(self.column_names)
+        if not self.rows:
+            return []
+        return list(self.rows[0].keys())
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (len(self.rows), len(self.columns))
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, key: str) -> ColumnValues:
+        return ColumnValues(row.get(key) for row in self.rows)
+
+    def select(self, columns: list[str]) -> "TrainingTable":
+        return TrainingTable(
+            [{column: row.get(column) for column in columns} for row in self.rows],
+            column_names=list(columns),
+        )
+
+
+def validate_mode(mode: str) -> str:
+    if mode not in TRAIN_MODES:
+        choices = ", ".join(TRAIN_MODES)
+        raise ValueError(f"mode must be one of: {choices}")
+    return mode
+
+
+def validate_dataset_path(dataset_path: Path) -> None:
+    suffix = dataset_path.suffix.lower()
+    if suffix not in {".csv", ".parquet"}:
+        raise ValueError(
+            f"Unsupported dataset extension for {dataset_path.name}: expected .csv"
+        )
+    if suffix == ".parquet":
+        raise ValueError(
+            "Parquet dataset schema inspection is not supported in this training path; "
+            "use a CSV dataset for now"
+        )
+
+
+def image_feature_columns_for_mode(mode: str) -> list[str]:
+    validate_mode(mode)
+    if mode != "tabular_plus_thumbnail":
+        return []
+    return list(THUMBNAIL_IMAGE_COLUMNS)
+
+
+def load_candidate_training_frame(dataset_path: Path) -> TrainingTable:
+    validate_dataset_path(dataset_path)
+    with dataset_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        rows = [dict(row) for row in reader]
+        return TrainingTable(rows, column_names=list(reader.fieldnames or []))
+
+
+def load_split_manifest_frame(split_manifest_path: Path) -> TrainingTable:
+    with split_manifest_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        rows = [dict(row) for row in reader]
+    frame = TrainingTable(rows, column_names=list(reader.fieldnames or []))
+    _require_columns(
+        frame.columns,
+        required_columns=REQUIRED_SPLIT_MANIFEST_COLUMNS,
+        resource_name=split_manifest_path.name,
+    )
+    if not frame.rows:
+        raise ValueError("split manifest must contain at least one row")
+    normalized_rows: list[dict[str, str]] = []
+    day_ids: list[str] = []
+    split_names: list[str] = []
+    for row in frame.rows:
+        normalized_row = dict(row)
+        normalized_row["day_id"] = str(row.get("day_id", "")).strip()
+        normalized_row["split_name"] = str(row.get("split_name", "")).strip()
+        normalized_rows.append(normalized_row)
+        day_ids.append(normalized_row["day_id"])
+        split_names.append(normalized_row["split_name"])
+    if any(day_id == "" for day_id in day_ids):
+        raise ValueError("split manifest day_id values must not be blank")
+    duplicates = sorted(day_id for day_id in set(day_ids) if day_ids.count(day_id) > 1)
+    if duplicates:
+        raise ValueError(
+            f"split manifest must not contain duplicate day_id entries: {', '.join(duplicates)}"
+        )
+    invalid_splits = sorted(
+        split_name for split_name in set(split_names) if split_name not in ALLOWED_SPLIT_NAMES
+    )
+    if invalid_splits:
+        raise ValueError(
+            "split manifest split_name values must be one of train, validation, test: "
+            + ", ".join(invalid_splits)
+        )
+    return TrainingTable(normalized_rows, column_names=frame.columns)
+
+
+def feature_columns_for_mode(dataset_columns: list[str], mode: str) -> dict[str, list[str]]:
+    image_feature_columns = image_feature_columns_for_mode(mode)
+    shared_feature_columns = [
+        column
+        for column in dataset_columns
+        if column not in NON_FEATURE_COLUMNS and column not in THUMBNAIL_IMAGE_COLUMNS
+    ]
+    predictor_feature_columns = shared_feature_columns + image_feature_columns
+    return {
+        "shared_feature_columns": shared_feature_columns,
+        "segment_type_feature_columns": list(predictor_feature_columns),
+        "boundary_feature_columns": list(predictor_feature_columns),
+        "image_feature_columns": image_feature_columns,
+    }
+
+
+def load_training_data_bundle(
+    dataset_path: Path,
+    *,
+    split_manifest_path: Path,
+    mode: str,
+) -> TrainingDataBundle:
+    validate_mode(mode)
+    candidate_frame = load_candidate_training_frame(dataset_path)
+    required_columns = list(REQUIRED_BASE_COLUMNS)
+    required_columns.extend(REQUIRED_DERIVED_FEATURE_SOURCE_COLUMNS)
+    required_columns.extend(image_feature_columns_for_mode(mode))
+    _require_columns(
+        candidate_frame.columns,
+        required_columns=required_columns,
+        resource_name=dataset_path.name,
+    )
+
+    joined_frame = _join_split_manifest(
+        candidate_frame,
+        split_manifest_frame=load_split_manifest_frame(split_manifest_path),
+    )
+    joined_frame = _derive_feature_view(joined_frame)
+    train_rows = TrainingTable(
+        [row for row in joined_frame.rows if row["split_name"] == "train"]
+    )
+    validation_rows = TrainingTable(
+        [row for row in joined_frame.rows if row["split_name"] == "validation"]
+    )
+    if not train_rows.rows:
+        raise ValueError("split manifest must assign at least one train row")
+    if not validation_rows.rows:
+        raise ValueError("split manifest must assign at least one validation row")
+
+    _normalize_labels(train_rows, split_name="train")
+    _normalize_labels(validation_rows, split_name="validation")
+
+    columns_by_mode = feature_columns_for_mode(joined_frame.columns, mode)
+    segment_type_feature_columns = columns_by_mode["segment_type_feature_columns"]
+    boundary_feature_columns = columns_by_mode["boundary_feature_columns"]
+
+    return TrainingDataBundle(
+        train_rows=train_rows,
+        validation_rows=validation_rows,
+        split_counts_by_name=_split_counts(joined_frame["split_name"]),
+        shared_feature_columns=columns_by_mode["shared_feature_columns"],
+        image_feature_columns=columns_by_mode["image_feature_columns"],
+        segment_type=PredictorTrainingData(
+            label_column="segment_type",
+            feature_columns=segment_type_feature_columns,
+            train_data=train_rows.select(segment_type_feature_columns + ["segment_type"]),
+            validation_data=validation_rows.select(segment_type_feature_columns + ["segment_type"]),
+        ),
+        boundary=PredictorTrainingData(
+            label_column="boundary",
+            feature_columns=boundary_feature_columns,
+            train_data=train_rows.select(boundary_feature_columns + ["boundary"]),
+            validation_data=validation_rows.select(boundary_feature_columns + ["boundary"]),
+        ),
+    )
+
+
+def _require_columns(
+    columns: list[str],
+    *,
+    required_columns: list[str] | tuple[str, ...],
+    resource_name: str,
+) -> None:
+    missing = [column for column in required_columns if column not in columns]
+    if missing:
+        raise ValueError(f"{resource_name} missing required columns: {', '.join(missing)}")
+
+
+def _join_split_manifest(
+    candidate_frame: TrainingTable,
+    *,
+    split_manifest_frame: TrainingTable,
+) -> TrainingTable:
+    candidate_rows: list[dict[str, object]] = []
+    candidate_day_ids: set[str] = set()
+    for row in candidate_frame.rows:
+        normalized_row = dict(row)
+        normalized_row["day_id"] = str(row.get("day_id", "")).strip()
+        if normalized_row["day_id"] == "":
+            raise ValueError("candidate dataset day_id values must not be blank")
+        candidate_rows.append(normalized_row)
+        candidate_day_ids.add(normalized_row["day_id"])
+
+    split_by_day = {
+        str(row["day_id"]).strip(): str(row["split_name"]).strip()
+        for row in split_manifest_frame.rows
+    }
+    missing_day_ids = sorted(candidate_day_ids - set(split_by_day))
+    if missing_day_ids:
+        raise ValueError(
+            "split manifest is missing day_id entries: " + ", ".join(missing_day_ids)
+        )
+
+    joined_rows: list[dict[str, object]] = []
+    for row in candidate_rows:
+        joined_row = {key: value for key, value in row.items() if key != "split_name"}
+        joined_row["split_name"] = split_by_day[row["day_id"]]
+        joined_rows.append(joined_row)
+    return TrainingTable(joined_rows, column_names=list(joined_rows[0].keys()) if joined_rows else candidate_frame.columns)
+
+
+def _normalize_labels(frame: TrainingTable, *, split_name: str) -> None:
+    for row in frame.rows:
+        row["segment_type"] = str(row.get("segment_type", "")).strip()
+        if row["segment_type"] == "":
+            raise ValueError(f"{split_name} split segment_type label must not be blank")
+        row["boundary"] = _normalize_boundary_value(row.get("boundary", ""))
+
+
+def _normalize_boundary_value(value: object) -> int:
+    normalized = str(value).strip().lower()
+    if normalized in {"0", "false"}:
+        return 0
+    if normalized in {"1", "true"}:
+        return 1
+    if normalized == "":
+        raise ValueError("boundary label must not be blank")
+    raise ValueError(f"boundary label must be one of 0, 1, false, true: {value!r}")
+
+
+def _split_counts(split_values: ColumnValues) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for split_name in split_values:
+        normalized = str(split_name)
+        counts[normalized] = counts.get(normalized, 0) + 1
+    return counts
+
+
+def _derive_feature_view(table: TrainingTable) -> TrainingTable:
+    derived_rows: list[dict[str, object]] = []
+    derived_feature_columns: list[str] = []
+    for row in table.rows:
+        derived_features = build_candidate_feature_row(row, descriptors={}, embeddings=None)
+        if not derived_feature_columns:
+            derived_feature_columns = list(derived_features.keys())
+        derived_row = dict(row)
+        derived_row.update(derived_features)
+        derived_rows.append(derived_row)
+    return TrainingTable(
+        derived_rows,
+        column_names=table.columns + [
+            column_name for column_name in derived_feature_columns if column_name not in table.columns
+        ],
+    )

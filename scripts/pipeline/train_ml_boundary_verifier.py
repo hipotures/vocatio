@@ -3,39 +3,37 @@
 from __future__ import annotations
 
 import argparse
-import csv
+import shutil
 from pathlib import Path
 from typing import Sequence
 
 from rich.console import Console
 
+from lib.ml_boundary_training_data import (
+    THUMBNAIL_IMAGE_COLUMNS,
+    TRAIN_MODES,
+    TrainingDataBundle,
+    TrainingTable,
+    image_feature_columns_for_mode as training_image_feature_columns_for_mode,
+    load_training_data_bundle,
+    validate_dataset_path,
+    validate_mode,
+)
 from lib.pipeline_io import atomic_write_json
 
 
 console = Console(stderr=True)
 
-TRAIN_MODES = ("tabular_only", "tabular_plus_thumbnail")
-THUMBNAIL_IMAGE_COLUMNS = [
-    "frame_01_thumb_path",
-    "frame_02_thumb_path",
-    "frame_03_thumb_path",
-    "frame_04_thumb_path",
-    "frame_05_thumb_path",
-]
 TRAINING_PLAN_FILENAME = "training_plan.json"
 TRAINING_METADATA_FILENAME = "training_metadata.json"
-REQUIRED_BASE_COLUMNS = ["segment_type", "boundary"]
-
-
-def _validate_mode(mode: str) -> str:
-    if mode not in TRAIN_MODES:
-        choices = ", ".join(TRAIN_MODES)
-        raise ValueError(f"mode must be one of: {choices}")
-    return mode
+FEATURE_COLUMNS_FILENAME = "feature_columns.json"
+TRAINING_SUMMARY_FILENAME = "training_summary.json"
+SEGMENT_TYPE_MODEL_DIRNAME = "segment_type_model"
+BOUNDARY_MODEL_DIRNAME = "boundary_model"
 
 
 def build_training_plan(mode: str) -> list[dict[str, str]]:
-    _validate_mode(mode)
+    validate_mode(mode)
     return [
         {"name": "segment_type", "problem_type": "multiclass"},
         {"name": "boundary", "problem_type": "binary"},
@@ -47,25 +45,27 @@ def default_boundary_threshold_policy() -> dict[str, float | str]:
 
 
 def image_feature_columns_for_mode(mode: str) -> list[str]:
-    _validate_mode(mode)
-    if mode != "tabular_plus_thumbnail":
-        return []
-    return list(THUMBNAIL_IMAGE_COLUMNS)
+    return training_image_feature_columns_for_mode(mode)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Write ML boundary verifier training contract artifacts from a CSV dataset.",
+        description="Train ML boundary verifier predictors from a CSV dataset and day-level split manifest.",
     )
     parser.add_argument(
         "dataset_path",
         help="Path to ml_boundary_candidates CSV dataset.",
     )
     parser.add_argument(
+        "--split-manifest-csv",
+        required=True,
+        help="Path to ml_boundary_splits CSV used for day-level train/validation/test assignment.",
+    )
+    parser.add_argument(
         "--mode",
         default="tabular_only",
         choices=TRAIN_MODES,
-        help="Training mode to scaffold.",
+        help="Training mode to run.",
     )
     parser.add_argument(
         "--output-dir",
@@ -75,76 +75,36 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Replace existing training contract artifacts in the output directory.",
+        help="Replace existing training artifacts in the output directory.",
     )
     return parser.parse_args(argv)
 
 
-def _build_training_plan_payload(dataset_path: Path, mode: str) -> dict[str, object]:
-    return {
-        "mode": mode,
-        "predictors": build_training_plan(mode),
-        "boundary_threshold_policy": default_boundary_threshold_policy(),
-        "image_feature_columns": image_feature_columns_for_mode(mode),
-        "dataset_path": str(dataset_path),
-    }
-
-
-def _build_training_metadata_payload(dataset_path: Path, output_dir: Path, mode: str) -> dict[str, object]:
-    return {
-        "dataset_path": str(dataset_path),
-        "output_dir": str(output_dir),
-        "mode": mode,
-        "predictor_names": [predictor["name"] for predictor in build_training_plan(mode)],
-        "threshold_policy": default_boundary_threshold_policy(),
-        "image_feature_columns": image_feature_columns_for_mode(mode),
-    }
-
-
-def _require_csv_headers(dataset_path: Path, *, required_headers: Sequence[str]) -> None:
-    with dataset_path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        fieldnames = reader.fieldnames or []
-    missing = [header for header in required_headers if header not in fieldnames]
-    if missing:
-        raise ValueError(
-            f"{dataset_path.name} missing required columns: {', '.join(missing)}"
-        )
-
-
 def validate_dataset_contract(dataset_path: Path, mode: str) -> None:
-    _validate_mode(mode)
-    suffix = dataset_path.suffix.lower()
-    if suffix not in {".csv", ".parquet"}:
-        raise ValueError(
-            f"Unsupported dataset extension for {dataset_path.name}: expected .csv"
-        )
-    if suffix == ".parquet":
-        raise ValueError(
-            "Parquet dataset schema inspection is not supported in this scaffold; "
-            "use a CSV dataset for now"
-        )
-
-    required_headers = list(REQUIRED_BASE_COLUMNS)
-    required_headers.extend(image_feature_columns_for_mode(mode))
-    _require_csv_headers(dataset_path, required_headers=required_headers)
+    validate_mode(mode)
+    validate_dataset_path(dataset_path)
 
 
-def _artifact_paths(output_dir: Path) -> list[Path]:
-    return [
-        output_dir / TRAINING_PLAN_FILENAME,
-        output_dir / TRAINING_METADATA_FILENAME,
-    ]
+def load_tabular_predictor_class():
+    try:
+        from autogluon.tabular import TabularPredictor
+    except ImportError as exc:
+        raise RuntimeError(
+            "AutoGluon tabular dependencies are unavailable. "
+            "Run this command with `uv run --no-default-groups --group autogluon ...`."
+        ) from exc
+    return TabularPredictor
 
 
-def _guard_existing_artifacts(output_dir: Path, *, overwrite: bool) -> None:
-    existing_paths = [path for path in _artifact_paths(output_dir) if path.exists()]
-    if existing_paths and not overwrite:
-        names = ", ".join(path.name for path in existing_paths)
-        raise FileExistsError(
-            f"Output artifacts already exist in {output_dir}: {names}. "
-            "Use --overwrite to replace them."
-        )
+def load_multimodal_predictor_class():
+    try:
+        from autogluon.multimodal import MultiModalPredictor
+    except ImportError as exc:
+        raise RuntimeError(
+            "AutoGluon multimodal dependencies are unavailable. "
+            "Run this command with `uv run --no-default-groups --group autogluon ...`."
+        ) from exc
+    return MultiModalPredictor
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -154,20 +114,227 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise FileNotFoundError(f"Dataset does not exist: {dataset_path}")
     validate_dataset_contract(dataset_path, args.mode)
 
+    split_manifest_path = Path(args.split_manifest_csv).expanduser()
+    if not split_manifest_path.is_file():
+        raise FileNotFoundError(f"Split manifest does not exist: {split_manifest_path}")
+
     output_dir = Path(args.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     _guard_existing_artifacts(output_dir, overwrite=args.overwrite)
 
-    training_plan_payload = _build_training_plan_payload(dataset_path, args.mode)
-    training_metadata_payload = _build_training_metadata_payload(dataset_path, output_dir, args.mode)
-
-    atomic_write_json(output_dir / TRAINING_PLAN_FILENAME, training_plan_payload)
-    atomic_write_json(output_dir / TRAINING_METADATA_FILENAME, training_metadata_payload)
-
-    console.print(
-        f"Wrote training contract artifacts to {output_dir}",
+    training_bundle = load_training_data_bundle(
+        dataset_path,
+        split_manifest_path=split_manifest_path,
+        mode=args.mode,
     )
+    artifact_paths = _artifact_paths(output_dir)
+
+    training_summary = _train_predictors(
+        output_dir=output_dir,
+        training_bundle=training_bundle,
+        mode=args.mode,
+    )
+
+    atomic_write_json(
+        output_dir / TRAINING_PLAN_FILENAME,
+        _build_training_plan_payload(dataset_path, split_manifest_path, args.mode),
+    )
+    atomic_write_json(
+        output_dir / TRAINING_METADATA_FILENAME,
+        _build_training_metadata_payload(output_dir, args.mode, training_bundle, artifact_paths),
+    )
+    atomic_write_json(
+        output_dir / FEATURE_COLUMNS_FILENAME,
+        {
+            "shared_feature_columns": training_bundle.shared_feature_columns,
+            "segment_type_feature_columns": training_bundle.segment_type.feature_columns,
+            "boundary_feature_columns": training_bundle.boundary.feature_columns,
+            "image_feature_columns": training_bundle.image_feature_columns,
+        },
+    )
+    atomic_write_json(
+        output_dir / TRAINING_SUMMARY_FILENAME,
+        training_summary,
+    )
+
+    console.print(f"Wrote training artifacts to {output_dir}")
     return 0
+
+
+def _artifact_paths(output_dir: Path) -> dict[str, Path]:
+    return {
+        "training_plan": output_dir / TRAINING_PLAN_FILENAME,
+        "training_metadata": output_dir / TRAINING_METADATA_FILENAME,
+        "feature_columns": output_dir / FEATURE_COLUMNS_FILENAME,
+        "training_summary": output_dir / TRAINING_SUMMARY_FILENAME,
+        "segment_type_model_dir": output_dir / SEGMENT_TYPE_MODEL_DIRNAME,
+        "boundary_model_dir": output_dir / BOUNDARY_MODEL_DIRNAME,
+    }
+
+
+def _guard_existing_artifacts(output_dir: Path, *, overwrite: bool) -> None:
+    artifact_paths = _artifact_paths(output_dir)
+    existing_paths = [path for path in artifact_paths.values() if path.exists()]
+    if existing_paths and not overwrite:
+        names = ", ".join(path.name for path in existing_paths)
+        raise FileExistsError(
+            f"Output artifacts already exist in {output_dir}: {names}. "
+            "Use --overwrite to replace them."
+        )
+    if overwrite:
+        for path in existing_paths:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+
+
+def _build_training_plan_payload(
+    dataset_path: Path,
+    split_manifest_path: Path,
+    mode: str,
+) -> dict[str, object]:
+    return {
+        "mode": mode,
+        "dataset_path": str(dataset_path),
+        "split_manifest_path": str(split_manifest_path),
+        "predictors": build_training_plan(mode),
+        "image_feature_columns": image_feature_columns_for_mode(mode),
+        "boundary_threshold_policy": default_boundary_threshold_policy(),
+    }
+
+
+def _build_training_metadata_payload(
+    output_dir: Path,
+    mode: str,
+    training_bundle: TrainingDataBundle,
+    artifact_paths: dict[str, Path],
+) -> dict[str, object]:
+    return {
+        "output_dir": str(output_dir),
+        "mode": mode,
+        "predictor_names": [predictor["name"] for predictor in build_training_plan(mode)],
+        "train_row_count": int(len(training_bundle.train_rows)),
+        "validation_row_count": int(len(training_bundle.validation_rows)),
+        "split_counts_by_name": training_bundle.split_counts_by_name,
+        "artifacts": {
+            name: str(path)
+            for name, path in artifact_paths.items()
+        },
+    }
+
+
+def _train_predictors(
+    *,
+    output_dir: Path,
+    training_bundle: TrainingDataBundle,
+    mode: str,
+) -> dict[str, dict[str, object]]:
+    summary: dict[str, dict[str, object]] = {}
+    predictor_specs = {
+        "segment_type": training_bundle.segment_type,
+        "boundary": training_bundle.boundary,
+    }
+    for predictor_plan in build_training_plan(mode):
+        predictor_name = predictor_plan["name"]
+        predictor_output_dir = output_dir / f"{predictor_name}_model"
+        predictor = _fit_predictor(
+            predictor_name=predictor_name,
+            predictor_output_dir=predictor_output_dir,
+            problem_type=predictor_plan["problem_type"],
+            predictor_data=predictor_specs[predictor_name],
+            mode=mode,
+        )
+        evaluation_payload = predictor.evaluate(
+            _to_model_frame(predictor_specs[predictor_name].validation_data)
+        )
+        summary[predictor_name] = {
+            "model_type": predictor.__class__.__name__,
+            "path": str(predictor_output_dir),
+            "eval_metric": "accuracy",
+            "validation_score": _extract_validation_score(evaluation_payload, eval_metric="accuracy"),
+            "fit_summary_excerpt": _fit_summary_excerpt(predictor.fit_summary()),
+        }
+    return summary
+
+
+def _fit_predictor(
+    *,
+    predictor_name: str,
+    predictor_output_dir: Path,
+    problem_type: str,
+    predictor_data,
+    mode: str,
+):
+    if mode == "tabular_plus_thumbnail":
+        predictor_class = load_multimodal_predictor_class()
+        predictor = predictor_class(
+            label=predictor_name,
+            problem_type=problem_type,
+            path=str(predictor_output_dir),
+        )
+        predictor.fit(
+            _to_model_frame(predictor_data.train_data),
+            tuning_data=_to_model_frame(predictor_data.validation_data),
+            presets="medium_quality",
+            column_types={
+                column_name: "image_path" for column_name in THUMBNAIL_IMAGE_COLUMNS
+            },
+        )
+        return predictor
+
+    predictor_class = load_tabular_predictor_class()
+    predictor = predictor_class(
+        label=predictor_name,
+        problem_type=problem_type,
+        eval_metric="accuracy",
+        path=str(predictor_output_dir),
+    )
+    predictor.fit(
+        _to_model_frame(predictor_data.train_data),
+        tuning_data=_to_model_frame(predictor_data.validation_data),
+        presets="medium_quality",
+    )
+    return predictor
+
+
+def _extract_validation_score(evaluation_payload: object, *, eval_metric: str) -> float | None:
+    if isinstance(evaluation_payload, (int, float)):
+        return float(evaluation_payload)
+    if isinstance(evaluation_payload, dict):
+        if eval_metric in evaluation_payload and isinstance(evaluation_payload[eval_metric], (int, float)):
+            return float(evaluation_payload[eval_metric])
+        for value in evaluation_payload.values():
+            if isinstance(value, (int, float)):
+                return float(value)
+    return None
+
+
+def _fit_summary_excerpt(summary_payload: object) -> dict[str, object] | str:
+    if isinstance(summary_payload, dict):
+        preferred_keys = ("best_model", "best_score", "num_models_trained", "problem_type")
+        excerpt = {
+            key: summary_payload[key]
+            for key in preferred_keys
+            if key in summary_payload
+        }
+        if excerpt:
+            return excerpt
+        excerpt = {}
+        for key, value in summary_payload.items():
+            excerpt[key] = value
+            if len(excerpt) == 3:
+                break
+        return excerpt
+    return str(summary_payload)
+
+
+def _to_model_frame(table: TrainingTable):
+    try:
+        import pandas as pd
+    except ImportError:
+        return table
+    return pd.DataFrame(table.rows)
 
 
 if __name__ == "__main__":
