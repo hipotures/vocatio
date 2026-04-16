@@ -193,6 +193,46 @@ def test_build_split_manifest_rows_expands_heldout_groups_when_single_days_lack_
     ]
 
 
+def test_build_split_manifest_rows_rejects_assignments_with_no_train_days() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        build_split_manifest_rows(
+            [
+                {
+                    "day_id": "20250323",
+                    "year": "2025",
+                    "camera": "cam-a",
+                    "domain_shift_hint": "",
+                    "segment_types": '["performance"]',
+                },
+                {
+                    "day_id": "20250324",
+                    "year": "2025",
+                    "camera": "cam-a",
+                    "domain_shift_hint": "",
+                    "segment_types": '["ceremony","warmup"]',
+                },
+                {
+                    "day_id": "20260323",
+                    "year": "2026",
+                    "camera": "cam-b",
+                    "domain_shift_hint": "new-camera",
+                    "segment_types": '["performance"]',
+                },
+                {
+                    "day_id": "20260324",
+                    "year": "2026",
+                    "camera": "cam-b",
+                    "domain_shift_hint": "new-camera",
+                    "segment_types": '["ceremony","warmup"]',
+                },
+            ],
+            required_heldout_classes=["performance", "ceremony", "warmup"],
+        )
+
+    assert "at least one train day" in str(exc_info.value)
+    assert "day-level isolation" in str(exc_info.value)
+
+
 def test_main_merges_repeated_day_metadata_csv_inputs_and_writes_manifest(tmp_path: Path) -> None:
     first_csv = tmp_path / "days_a.csv"
     second_csv = tmp_path / "days_b.csv"

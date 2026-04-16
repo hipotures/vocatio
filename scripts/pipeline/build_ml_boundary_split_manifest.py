@@ -344,6 +344,8 @@ def _build_split_manifest_from_days(
                     continue
 
                 train_days = list(remaining_days)
+                if not train_days:
+                    continue
                 score = _assignment_score(validation_days, test_days, train_days)
                 if best_score is None or score < best_score:
                     best_score = score
@@ -356,7 +358,7 @@ def _build_split_manifest_from_days(
         classes_text = ", ".join(sorted(required_classes)) if required_classes else "none requested"
         raise ValueError(
             "Unable to satisfy required held-out class coverage under day-level isolation "
-            "without leakage. "
+            "without leakage while preserving at least one train day. "
             f"Required held-out classes: {classes_text}."
         )
 
