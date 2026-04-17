@@ -370,11 +370,12 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert "frame_01_timestamp" not in train_columns
     assert "frame_01_preview_path" not in train_columns
     captured = capsys.readouterr()
+    stderr = captured.err.strip()
     assert captured.out == ""
-    assert (
-        captured.err.strip().splitlines()[-1]
-        == "Descriptor annotation coverage: missing annotations for 15 photos across 3 candidates."
-    )
+    assert "Wrote training artifacts to" in stderr
+    assert str(output_dir) in stderr
+    assert "Descriptor annotation coverage: missing annotations for 15 photos across 3 candidates." in stderr
+    assert stderr.index("Wrote training artifacts to") < stderr.index("Descriptor annotation coverage:")
 
 
 def test_train_cli_records_candidate_keyed_split_manifest_scope(
