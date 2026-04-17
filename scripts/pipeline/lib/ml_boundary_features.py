@@ -161,15 +161,6 @@ def _resolve_descriptor_field_registry(
         registry = dict(descriptor_field_registry)
     else:
         registry = build_photo_pre_model_descriptor_field_registry()
-        default_field_names = set(registry)
-        for record in descriptor_records:
-            for field_name, value in record.items():
-                if field_name in default_field_names:
-                    continue
-                if isinstance(value, SequenceABC) and not isinstance(value, (str, bytes)):
-                    registry[field_name] = "multivalue"
-                    continue
-                registry.setdefault(field_name, "scalar")
     multivalue_fields: set[str] = set()
     for field_name, field_kind in registry.items():
         if field_kind == "multivalue":

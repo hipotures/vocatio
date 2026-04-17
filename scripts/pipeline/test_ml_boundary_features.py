@@ -320,7 +320,7 @@ def test_build_candidate_feature_row_uses_schema_stable_default_descriptor_keys(
     assert sparse_row["right_dance_style_hint"] == CANONICAL_MISSING
 
 
-def test_build_candidate_feature_row_infers_extra_flattened_default_descriptor_keys() -> None:
+def test_build_candidate_feature_row_default_schema_ignores_extra_flattened_keys() -> None:
     candidate = {
         "frame_01_timestamp": 0.0,
         "frame_02_timestamp": 0.1,
@@ -360,11 +360,101 @@ def test_build_candidate_feature_row_infers_extra_flattened_default_descriptor_k
     row = build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
 
     assert row["left_upper_garment"] == "top"
+    assert "left_appearance_costume_silhouette" not in row
+    assert "right_scene_lighting_accent_colors_01" not in row
+    assert "right_scene_lighting_accent_colors_02" not in row
+    assert "right_scene_lighting_accent_colors_03" not in row
+    assert "right_metadata_shot_type" not in row
+
+
+def test_build_candidate_feature_row_default_schema_is_shape_stable_across_sparse_rows() -> None:
+    candidate = {
+        "frame_01_timestamp": 0.0,
+        "frame_02_timestamp": 0.1,
+        "frame_03_timestamp": 0.2,
+        "frame_04_timestamp": 20.2,
+        "frame_05_timestamp": 20.3,
+        "frame_01_photo_id": "p1",
+        "frame_02_photo_id": "p2",
+        "frame_03_photo_id": "p3",
+        "frame_04_photo_id": "p4",
+        "frame_05_photo_id": "p5",
+    }
+    sparse_descriptors = {
+        "p1": {"upper_garment": "Top"},
+        "p2": {"upper_garment": "top"},
+        "p4": {"props": "fan; ribbon"},
+    }
+    mixed_shape_descriptors = {
+        "p1": {"dominant_colors": "White/Purple", "upper_garment": "Top"},
+        "p2": {"upper_garment": ["Top", "Jacket"]},
+        "p3": {"upper_garment": "top"},
+        "p4": {"props": ["fan"]},
+        "p5": {"headwear": "hat"},
+    }
+
+    sparse_row = build_candidate_feature_row(candidate, descriptors=sparse_descriptors, embeddings=None)
+    mixed_shape_row = build_candidate_feature_row(
+        candidate,
+        descriptors=mixed_shape_descriptors,
+        embeddings=None,
+    )
+
+    assert set(sparse_row) == set(mixed_shape_row)
+    assert "left_upper_garment_01" not in sparse_row
+    assert "left_upper_garment_01" not in mixed_shape_row
+    assert sparse_row["left_upper_garment"] == "top"
+    assert mixed_shape_row["left_upper_garment"] == "top"
+    assert mixed_shape_row["left_dominant_colors_01"] == "purple"
+    assert mixed_shape_row["left_dominant_colors_02"] == "white"
+    assert mixed_shape_row["right_props_01"] == "fan"
+    assert mixed_shape_row["right_props_02"] == CANONICAL_MISSING
+
+
+def test_build_candidate_feature_row_supports_extra_nested_fields_only_with_explicit_registry() -> None:
+    candidate = {
+        "frame_01_timestamp": 0.0,
+        "frame_02_timestamp": 0.1,
+        "frame_03_timestamp": 0.2,
+        "frame_04_timestamp": 20.2,
+        "frame_05_timestamp": 20.3,
+        "frame_01_photo_id": "p1",
+        "frame_02_photo_id": "p2",
+        "frame_03_photo_id": "p3",
+        "frame_04_photo_id": "p4",
+        "frame_05_photo_id": "p5",
+    }
+    descriptors = {
+        "p1": {
+            "appearance": {"costume": {"silhouette": "Bell"}},
+        },
+        "p2": {
+            "appearance": {"costume": {"silhouette": "bell"}},
+        },
+        "p4": {
+            "scene": {"lighting": {"accent_colors": ["Blue", "Gold"]}},
+        },
+        "p5": {
+            "scene": {"lighting": {"accent_colors": ["gold", "silver"]}},
+        },
+    }
+    descriptor_field_registry = {
+        "appearance_costume_silhouette": "scalar",
+        "scene_lighting_accent_colors": "multivalue",
+    }
+
+    row = build_candidate_feature_row(
+        candidate,
+        descriptors=descriptors,
+        embeddings=None,
+        descriptor_field_registry=descriptor_field_registry,
+    )
+
     assert row["left_appearance_costume_silhouette"] == "bell"
     assert row["right_scene_lighting_accent_colors_01"] == "blue"
     assert row["right_scene_lighting_accent_colors_02"] == "gold"
     assert row["right_scene_lighting_accent_colors_03"] == "silver"
-    assert row["right_metadata_shot_type"] == "closeup"
+    assert row["right_scene_lighting_accent_colors_04"] == CANONICAL_MISSING
 
 
 def test_build_candidate_feature_row_emits_missing_schema_columns_by_default() -> None:
