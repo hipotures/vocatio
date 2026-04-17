@@ -261,6 +261,40 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
                 self.assertEqual(exit_code, 0)
                 self.assertEqual(process_entry.call_count, 2)
 
+    def test_main_continues_after_entry_failure_and_returns_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            day_dir = Path(tmp_dir) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            output_dir = workspace_dir / pre_model.DEFAULT_OUTPUT_DIRNAME
+            entries = [
+                pre_model.ImageEntry(image_path=Path("/tmp/a.jpg"), output_name="a.jpg.txt", source_id="cam/a.hif"),
+                pre_model.ImageEntry(image_path=Path("/tmp/b.jpg"), output_name="b.jpg.txt", source_id="cam/b.hif"),
+            ]
+
+            def fake_process_entry(entry, **_kwargs):
+                if entry.source_id == "cam/a.hif":
+                    return (
+                        entry,
+                        self.make_annotation_payload(),
+                        {"prompt_n": 1, "prompt_ms": 1.0, "predicted_n": 1, "predicted_ms": 1.0},
+                    )
+                raise json.JSONDecodeError("Expecting ',' delimiter", '{"broken": true "oops"}', 16)
+
+            with mock.patch.object(pre_model, "load_image_entries", return_value=entries), mock.patch.object(
+                pre_model, "process_entry", side_effect=fake_process_entry
+            ) as process_entry, mock.patch.object(pre_model.console, "print") as console_print:
+                exit_code = pre_model.main([str(day_dir), "--limit", "2", "--workers", "2"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(process_entry.call_count, 2)
+            self.assertTrue(pre_model.build_annotation_output_path(output_dir, "cam/a.hif").exists())
+            self.assertFalse(pre_model.build_annotation_output_path(output_dir, "cam/b.hif").exists())
+            printed_text = "\n".join(str(call.args[0]) for call in console_print.call_args_list if call.args)
+            self.assertIn("failed=1", printed_text)
+            self.assertIn("cam/b.hif", printed_text)
+            self.assertIn("Expecting ',' delimiter", printed_text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -293,6 +293,7 @@ def render_summary(
     selected: int,
     written: int,
     skipped: int,
+    failed: int,
     interrupted: bool,
     elapsed_seconds: float,
     metrics_list: Sequence[Mapping[str, Any]],
@@ -302,6 +303,7 @@ def render_summary(
         f"selected={selected}\n"
         f"written={written}\n"
         f"skipped={skipped}\n"
+        f"failed={failed}\n"
         f"interrupted={'yes' if interrupted else 'no'}\n"
         f"elapsed_seconds={elapsed_seconds:.3f}\n"
         f"samples={summary['samples']}\n"
@@ -328,16 +330,46 @@ def drain_completed_futures(
     metrics_list: List[Mapping[str, Any]],
     progress: Progress,
     task_id: TaskID,
-) -> int:
+) -> Tuple[int, int]:
     written = 0
+    failed = 0
     for future in [future for future in futures if future.done()]:
         entry = futures.pop(future)
+        if finalize_completed_future(
+            future,
+            entry=entry,
+            output_dir=output_dir,
+            model_name=model_name,
+            metrics_list=metrics_list,
+            progress=progress,
+            task_id=task_id,
+        ):
+            written += 1
+        else:
+            failed += 1
+    return written, failed
+
+
+def finalize_completed_future(
+    future: Future[Tuple[ImageEntry, Dict[str, Any], Dict[str, Any]]],
+    *,
+    entry: ImageEntry,
+    output_dir: Path,
+    model_name: str,
+    metrics_list: List[Mapping[str, Any]],
+    progress: Progress,
+    task_id: TaskID,
+) -> bool:
+    try:
         resolved_entry, payload, timings = future.result()
         write_annotation_output(output_dir, resolved_entry, model_name, payload)
         metrics_list.append(timings)
+    except Exception as exc:
+        progress.console.print(f"[yellow]Failed annotation for {entry.source_id}: {exc}[/yellow]")
         progress.advance(task_id)
-        written += 1
-    return written
+        return False
+    progress.advance(task_id)
+    return True
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -361,6 +393,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     metrics_list: List[Mapping[str, Any]] = []
     written = 0
+    failed = 0
     interrupted = False
     started = time.perf_counter()
     executor = ThreadPoolExecutor(max_workers=args.workers)
@@ -398,7 +431,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 except KeyboardInterrupt:
                     interrupted = True
                     progress.console.print("Interrupted; stopping after completed pre-model annotations.")
-                    written += drain_completed_futures(
+                    drained_written, drained_failed = drain_completed_futures(
                         in_flight,
                         output_dir=output_dir,
                         model_name=args.model_name,
@@ -406,14 +439,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         progress=progress,
                         task_id=task,
                     )
+                    written += drained_written
+                    failed += drained_failed
                     break
                 for future in done:
-                    in_flight.pop(future)
-                    resolved_entry, payload, timings = future.result()
-                    write_annotation_output(output_dir, resolved_entry, args.model_name, payload)
-                    metrics_list.append(timings)
-                    written += 1
-                    progress.advance(task)
+                    entry = in_flight.pop(future)
+                    if finalize_completed_future(
+                        future,
+                        entry=entry,
+                        output_dir=output_dir,
+                        model_name=args.model_name,
+                        metrics_list=metrics_list,
+                        progress=progress,
+                        task_id=task,
+                    ):
+                        written += 1
+                    else:
+                        failed += 1
                     if not interrupted:
                         submit_next()
             if interrupted:
@@ -429,12 +471,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             selected=len(entries_to_process),
             written=written,
             skipped=skipped,
+            failed=failed,
             interrupted=interrupted,
             elapsed_seconds=elapsed_seconds,
             metrics_list=metrics_list,
         )
     )
-    return 130 if interrupted else 0
+    if interrupted:
+        return 130
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
