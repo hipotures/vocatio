@@ -150,6 +150,100 @@ def test_main_writes_ml_boundary_reviewed_truth_csv() -> None:
         ]
 
 
+def test_main_writes_performance_rows_for_numeric_set_split() -> None:
+    with TemporaryDirectory() as tmp:
+        root_dir = Path(tmp)
+        day_dir = root_dir / "20260323"
+        workspace_dir = day_dir / "_workspace"
+        day_dir.mkdir()
+        workspace_dir.mkdir()
+
+        for relative_path in [
+            "cam_a/IMG_0001.ARW",
+            "cam_a/IMG_0002.ARW",
+            "cam_a/IMG_0003.ARW",
+        ]:
+            source_path = day_dir / relative_path
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_bytes(b"raw")
+            proxy_path = workspace_dir / "proxy_jpg" / f"{Path(relative_path).name}.jpg"
+            proxy_path.parent.mkdir(parents=True, exist_ok=True)
+            proxy_path.write_bytes(b"jpg")
+
+        index_payload = {
+            "day": day_dir.name,
+            "workspace_dir": str(workspace_dir),
+            "performance_count": 1,
+            "photo_count": 3,
+            "source_mode": SOURCE_MODE_IMAGE_ONLY_V1,
+            "performances": [
+                {
+                    "performance_number": "86",
+                    "set_id": "set-86",
+                    "timeline_status": "normal",
+                    "performance_start_local": "2026-03-23T14:58:53",
+                    "performance_end_local": "2026-03-23T15:01:00",
+                    "photos": [
+                        _photo("cam_a/IMG_0001.ARW", "2026-03-23T14:58:53"),
+                        _photo("cam_a/IMG_0002.ARW", "2026-03-23T15:00:00"),
+                        _photo("cam_a/IMG_0003.ARW", "2026-03-23T15:01:00"),
+                    ],
+                }
+            ],
+        }
+        review_state = {
+            "version": 2,
+            "day": day_dir.name,
+            "performances": {},
+            "splits": {
+                "set-86": [
+                    {
+                        "start_filename": "IMG_0002.ARW",
+                        "new_name": "87",
+                        "is_set_split": True,
+                    }
+                ]
+            },
+            "merges": [],
+        }
+
+        (workspace_dir / "performance_proxy_index.json").write_text(
+            json.dumps(index_payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        (workspace_dir / "review_state.json").write_text(
+            json.dumps(review_state, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+
+        exit_code = main([str(day_dir), "--workspace-dir", str(workspace_dir)])
+
+        assert exit_code == 0
+        with (workspace_dir / "ml_boundary_reviewed_truth.csv").open(
+            newline="",
+            encoding="utf-8",
+        ) as handle:
+            rows = list(csv.DictReader(handle))
+
+        assert rows == [
+            {
+                "photo_id": "cam_a/IMG_0001.ARW",
+                "segment_id": "set-86",
+                "segment_type": "performance",
+            },
+            {
+                "photo_id": "cam_a/IMG_0002.ARW",
+                "segment_id": "set-86::IMG_0002.ARW",
+                "segment_type": "performance",
+            },
+            {
+                "photo_id": "cam_a/IMG_0003.ARW",
+                "segment_id": "set-86::IMG_0002.ARW",
+                "segment_type": "performance",
+            },
+        ]
+
+
 def test_main_defaults_to_empty_review_state_when_file_is_missing() -> None:
     with TemporaryDirectory() as tmp:
         root_dir = Path(tmp)

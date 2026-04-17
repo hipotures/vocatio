@@ -82,6 +82,29 @@ def _display_name_to_segment_type(display_name: str, *, original_performance_num
     )
 
 
+def _split_spec_to_segment_type(
+    *,
+    new_name: str,
+    is_set_split: bool,
+    original_performance_number: str,
+    set_id: str,
+) -> str:
+    normalized = new_name.strip().lower()
+    if is_set_split:
+        return "performance"
+    if normalized == "ceremony":
+        return "ceremony"
+    if normalized == "warmup":
+        return "warmup"
+    original_normalized = original_performance_number.strip().lower()
+    if normalized == original_normalized:
+        return "performance"
+    raise ValueError(
+        f"Unknown explicit split name for display set {set_id}: {new_name}. "
+        "Use ceremony or warmup for semantic splits, or mark the split as a set split."
+    )
+
+
 def _stable_segment_id(display_set_id: str) -> str:
     return str(display_set_id).strip()
 
@@ -165,12 +188,22 @@ def rebuild_final_display_sets(
                     "start_filename": start_filename,
                     "start_index": photo_index[start_filename],
                     "new_name": str(spec.get("new_name", "") or "").strip(),
+                    "is_set_split": bool(spec.get("is_set_split", False)),
                 }
             )
         valid_specs.sort(key=lambda spec: int(spec["start_index"]))
 
         segment_starts = [0] + [int(spec["start_index"]) for spec in valid_specs]
-        segment_names = [original_number] + [spec["new_name"] or original_number for spec in valid_specs]
+        segment_display_names = [original_number] + [spec["new_name"] or original_number for spec in valid_specs]
+        segment_types = ["performance"] + [
+            _split_spec_to_segment_type(
+                new_name=spec["new_name"],
+                is_set_split=spec["is_set_split"],
+                original_performance_number=original_number,
+                set_id=f"{base_set_id}::{spec['start_filename']}",
+            )
+            for spec in valid_specs
+        ]
         segment_ids = [base_set_id] + [f"{base_set_id}::{spec['start_filename']}" for spec in valid_specs]
 
         for index, start_index in enumerate(segment_starts):
@@ -181,7 +214,8 @@ def rebuild_final_display_sets(
             display_sets.append(
                 {
                     "set_id": segment_ids[index],
-                    "display_name": segment_names[index],
+                    "display_name": segment_display_names[index],
+                    "segment_type": segment_types[index],
                     "original_performance_number": original_number,
                     "photos": segment_photos,
                 }
@@ -226,11 +260,13 @@ def flatten_final_display_sets(display_sets: Iterable[dict[str, Any]]) -> list[d
         display_set_id = _stable_segment_id(str(display_set.get("set_id", "") or ""))
         display_name = str(display_set.get("display_name", "") or "")
         original_performance_number = str(display_set.get("original_performance_number", "") or "")
-        segment_type = _display_name_to_segment_type(
-            display_name,
-            original_performance_number=original_performance_number,
-            set_id=display_set_id,
-        )
+        segment_type = str(display_set.get("segment_type", "") or "").strip().lower()
+        if not segment_type:
+            segment_type = _display_name_to_segment_type(
+                display_name,
+                original_performance_number=original_performance_number,
+                set_id=display_set_id,
+            )
         if segment_type not in VALID_SEGMENT_TYPES:
             raise ValueError(f"Unsupported segment type for display set {display_set_id}: {segment_type}")
         for photo in display_set.get("photos", []):

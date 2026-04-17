@@ -131,6 +131,42 @@ def test_flatten_final_display_sets_migrates_legacy_split_keys_from_performance_
     ]
 
 
+def test_flatten_final_display_sets_treats_numeric_set_split_as_performance() -> None:
+    review_index_payload = {
+        "performances": [
+            _performance(
+                performance_number="86",
+                set_id="set-86",
+                photos=[
+                    _photo("p1", "IMG_0001.JPG", "2026-03-23T14:58:53"),
+                    _photo("p2", "IMG_0002.JPG", "2026-03-23T15:00:00"),
+                    _photo("p3", "IMG_0003.JPG", "2026-03-23T15:01:00"),
+                ],
+            )
+        ]
+    }
+    review_state = {
+        "splits": {
+            "set-86": [
+                {
+                    "start_filename": "IMG_0002.JPG",
+                    "new_name": "87",
+                    "is_set_split": True,
+                }
+            ]
+        },
+        "merges": [],
+    }
+
+    rows = flatten_final_display_sets(rebuild_final_display_sets(review_index_payload, review_state))
+
+    assert rows == [
+        {"photo_id": "p1", "segment_id": "set-86", "segment_type": "performance"},
+        {"photo_id": "p2", "segment_id": "set-86::IMG_0002.JPG", "segment_type": "performance"},
+        {"photo_id": "p3", "segment_id": "set-86::IMG_0002.JPG", "segment_type": "performance"},
+    ]
+
+
 def test_load_review_state_json_defaults_when_file_is_not_readable_json(tmp_path: Path) -> None:
     state_path = tmp_path / "review_state.json"
     state_path.write_text("{not valid json", encoding="utf-8")
@@ -163,7 +199,11 @@ def test_flatten_final_display_sets_rejects_unknown_explicit_split_names() -> No
     review_state = {
         "splits": {
             "set-105": [
-                {"start_filename": "IMG_0002.JPG", "new_name": "Awards"},
+                {
+                    "start_filename": "IMG_0002.JPG",
+                    "new_name": "Awards",
+                    "is_set_split": False,
+                },
             ]
         },
         "merges": [],
