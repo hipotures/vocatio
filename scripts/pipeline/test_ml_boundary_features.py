@@ -15,8 +15,24 @@ from lib.ml_boundary_features import (
     normalize_descriptor_value,
 )
 from lib.photo_pre_model_annotations import (
+    build_photo_pre_model_descriptor_field_registry,
     load_photo_pre_model_data_by_relative_path,
 )
+
+
+def _default_descriptor_feature_columns() -> set[str]:
+    registry = build_photo_pre_model_descriptor_field_registry()
+    columns: set[str] = set()
+    for side_name in ("left", "right"):
+        for field_name, field_kind in registry.items():
+            if field_kind == "multivalue":
+                columns.update(
+                    f"{side_name}_{field_name}_{index:02d}"
+                    for index in range(1, 6)
+                )
+                continue
+            columns.add(f"{side_name}_{field_name}")
+    return columns
 
 
 def test_cosine_distance_uses_l2_normalized_embeddings() -> None:
@@ -472,6 +488,17 @@ def test_build_candidate_feature_row_emits_missing_schema_columns_by_default() -
     }
 
     row = build_candidate_feature_row(candidate, descriptors={}, embeddings=None)
+    expected_descriptor_columns = _default_descriptor_feature_columns()
+    non_descriptor_left_right_columns = {
+        "left_internal_gap_mean",
+        "right_internal_gap_mean",
+    }
+    descriptor_columns = {
+        key
+        for key in row
+        if (key.startswith("left_") or key.startswith("right_"))
+        and key not in non_descriptor_left_right_columns
+    }
 
     assert row["left_people_count"] == CANONICAL_MISSING
     assert row["right_performer_view"] == CANONICAL_MISSING
@@ -481,6 +508,7 @@ def test_build_candidate_feature_row_emits_missing_schema_columns_by_default() -
     assert row["left_dominant_colors_05"] == CANONICAL_MISSING
     assert row["right_props_01"] == CANONICAL_MISSING
     assert row["right_props_05"] == CANONICAL_MISSING
+    assert descriptor_columns == expected_descriptor_columns
 
 
 def test_build_candidate_feature_row_ignores_malformed_multivalue_items() -> None:

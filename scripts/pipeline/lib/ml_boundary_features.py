@@ -154,8 +154,6 @@ def _normalize_scalar_descriptor_value(value: object) -> str:
 
 def _resolve_descriptor_field_registry(
     descriptor_field_registry: Mapping[str, str] | None,
-    *,
-    descriptor_records: Sequence[Mapping[str, object]],
 ) -> tuple[list[str], set[str]]:
     if descriptor_field_registry is not None:
         registry = dict(descriptor_field_registry)
@@ -333,10 +331,7 @@ def build_candidate_feature_row(
     right_descriptor_records = [
         _get_flattened_descriptor_record(descriptor_map, photo_id=photo_id) for photo_id in right_photo_ids
     ]
-    field_names, multivalue_fields = _resolve_descriptor_field_registry(
-        descriptor_field_registry,
-        descriptor_records=[*left_descriptor_records, *right_descriptor_records],
-    )
+    field_names, multivalue_fields = _resolve_descriptor_field_registry(descriptor_field_registry)
     row.update(
         build_side_descriptor_features(
             "left",
