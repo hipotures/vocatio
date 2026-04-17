@@ -154,12 +154,22 @@ def _normalize_scalar_descriptor_value(value: object) -> str:
 
 def _resolve_descriptor_field_registry(
     descriptor_field_registry: Mapping[str, str] | None,
+    *,
+    descriptor_records: Sequence[Mapping[str, object]],
 ) -> tuple[list[str], set[str]]:
-    registry = (
-        dict(descriptor_field_registry)
-        if descriptor_field_registry is not None
-        else build_photo_pre_model_descriptor_field_registry()
-    )
+    if descriptor_field_registry is not None:
+        registry = dict(descriptor_field_registry)
+    else:
+        registry = build_photo_pre_model_descriptor_field_registry()
+        default_field_names = set(registry)
+        for record in descriptor_records:
+            for field_name, value in record.items():
+                if field_name in default_field_names:
+                    continue
+                if isinstance(value, SequenceABC) and not isinstance(value, (str, bytes)):
+                    registry[field_name] = "multivalue"
+                    continue
+                registry.setdefault(field_name, "scalar")
     multivalue_fields: set[str] = set()
     for field_name, field_kind in registry.items():
         if field_kind == "multivalue":
@@ -334,6 +344,7 @@ def build_candidate_feature_row(
     ]
     field_names, multivalue_fields = _resolve_descriptor_field_registry(
         descriptor_field_registry,
+        descriptor_records=[*left_descriptor_records, *right_descriptor_records],
     )
     row.update(
         build_side_descriptor_features(

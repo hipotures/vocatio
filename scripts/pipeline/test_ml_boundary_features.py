@@ -320,6 +320,53 @@ def test_build_candidate_feature_row_uses_schema_stable_default_descriptor_keys(
     assert sparse_row["right_dance_style_hint"] == CANONICAL_MISSING
 
 
+def test_build_candidate_feature_row_infers_extra_flattened_default_descriptor_keys() -> None:
+    candidate = {
+        "frame_01_timestamp": 0.0,
+        "frame_02_timestamp": 0.1,
+        "frame_03_timestamp": 0.2,
+        "frame_04_timestamp": 20.2,
+        "frame_05_timestamp": 20.3,
+        "frame_01_photo_id": "p1",
+        "frame_02_photo_id": "p2",
+        "frame_03_photo_id": "p3",
+        "frame_04_photo_id": "p4",
+        "frame_05_photo_id": "p5",
+    }
+    descriptors = {
+        "p1": {
+            "upper_garment": "Top",
+            "appearance": {"costume": {"silhouette": "Bell"}},
+        },
+        "p2": {
+            "upper_garment": "top",
+            "appearance": {"costume": {"silhouette": "bell"}},
+        },
+        "p3": {
+            "upper_garment": "Jacket",
+            "appearance": {"costume": {"silhouette": "Cape"}},
+        },
+        "p4": {
+            "metadata": {"shot_type": "Closeup"},
+            "props": ["fan"],
+            "scene": {"lighting": {"accent_colors": ["Blue", "Gold"]}},
+        },
+        "p5": {
+            "metadata": {"shot_type": "Closeup"},
+            "scene": {"lighting": {"accent_colors": ["gold", "silver"]}},
+        },
+    }
+
+    row = build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
+
+    assert row["left_upper_garment"] == "top"
+    assert row["left_appearance_costume_silhouette"] == "bell"
+    assert row["right_scene_lighting_accent_colors_01"] == "blue"
+    assert row["right_scene_lighting_accent_colors_02"] == "gold"
+    assert row["right_scene_lighting_accent_colors_03"] == "silver"
+    assert row["right_metadata_shot_type"] == "closeup"
+
+
 def test_build_candidate_feature_row_emits_missing_schema_columns_by_default() -> None:
     candidate = {
         "frame_01_timestamp": 0.0,
