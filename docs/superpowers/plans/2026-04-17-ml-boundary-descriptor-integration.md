@@ -54,14 +54,14 @@ def test_build_candidate_feature_row_flattens_scalar_descriptor_fields() -> None
     descriptors = {
         "p1": {"upper_garment": "Top", "lower_garment": "Skirt"},
         "p2": {"upper_garment": "top", "lower_garment": "skirt"},
-        "p3": {"upper_garment": "Jacket", "lower_garment": "Skirt"},
+        "p3": {"upper_garment": "TOP", "lower_garment": "Skirt"},
         "p4": {"upper_garment": "Top", "lower_garment": "Tutu"},
         "p5": {"upper_garment": "Top", "lower_garment": "Tutu"},
     }
 
     row = build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
 
-    assert row["left_upper_garment"] == "jacket"
+    assert row["left_upper_garment"] == "top"
     assert row["right_upper_garment"] == "top"
     assert row["left_lower_garment"] == "skirt"
     assert row["right_lower_garment"] == "tutu"
@@ -117,14 +117,15 @@ def test_build_candidate_feature_row_splits_text_values_on_list_delimiters_only(
         "p2": {"footwear": "dance_shoes"},
         "p3": {"footwear": "ballet_shoes"},
         "p4": {"props": "fan; ribbon"},
-        "p5": {"props": "ribbon/fan"},
+        "p5": {"props": "ribbon/banner"},
     }
 
     row = build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
 
     assert row["left_footwear"] == "ballet_shoes"
-    assert row["right_props_01"] == "fan"
-    assert row["right_props_02"] == "ribbon"
+    assert row["right_props_01"] == "banner"
+    assert row["right_props_02"] == "fan"
+    assert row["right_props_03"] == "ribbon"
 ```
 
 ```python
