@@ -118,7 +118,7 @@ def test_build_candidate_feature_row_flattens_scalar_descriptor_fields() -> None
 
     row = build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
 
-    assert row["left_upper_garment"] == "jacket"
+    assert row["left_upper_garment"] == "top"
     assert row["right_upper_garment"] == "top"
     assert row["left_lower_garment"] == "skirt"
     assert row["right_lower_garment"] == "tutu"
@@ -150,8 +150,13 @@ def test_build_candidate_feature_row_flattens_multivalue_descriptor_fields() -> 
     assert row["left_dominant_colors_01"] == "purple"
     assert row["left_dominant_colors_02"] == "white"
     assert row["left_dominant_colors_03"] == CANONICAL_MISSING
+    assert row["left_dominant_colors_04"] == CANONICAL_MISSING
+    assert row["left_dominant_colors_05"] == CANONICAL_MISSING
     assert row["right_dominant_colors_01"] == "blue"
     assert row["right_dominant_colors_02"] == "white"
+    assert row["right_dominant_colors_03"] == CANONICAL_MISSING
+    assert row["right_dominant_colors_04"] == CANONICAL_MISSING
+    assert row["right_dominant_colors_05"] == CANONICAL_MISSING
 
 
 def test_build_candidate_feature_row_splits_text_values_on_list_delimiters_only() -> None:
@@ -171,15 +176,16 @@ def test_build_candidate_feature_row_splits_text_values_on_list_delimiters_only(
         "p1": {"footwear": "ballet_shoes"},
         "p2": {"footwear": "dance_shoes"},
         "p3": {"footwear": "ballet_shoes"},
-        "p4": {"props": "fan; ribbon"},
-        "p5": {"props": "ribbon/fan"},
+        "p4": {"props": "fan"},
+        "p5": {"props": "ribbon/banner"},
     }
 
     row = build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
 
     assert row["left_footwear"] == "ballet_shoes"
-    assert row["right_props_01"] == "fan"
-    assert row["right_props_02"] == "ribbon"
+    assert row["right_props_01"] == "banner"
+    assert row["right_props_02"] == "fan"
+    assert row["right_props_03"] == "ribbon"
 
 
 def test_build_candidate_feature_row_rejects_malformed_descriptor_record_shape() -> None:
