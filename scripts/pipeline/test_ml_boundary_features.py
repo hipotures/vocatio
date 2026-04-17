@@ -286,6 +286,66 @@ def test_build_candidate_feature_row_uses_explicit_registry_for_stable_descripto
     assert empty_row["left_props_01"] == CANONICAL_MISSING
 
 
+def test_build_candidate_feature_row_uses_schema_stable_default_descriptor_keys() -> None:
+    candidate = {
+        "frame_01_timestamp": 0.0,
+        "frame_02_timestamp": 0.1,
+        "frame_03_timestamp": 0.2,
+        "frame_04_timestamp": 20.2,
+        "frame_05_timestamp": 20.3,
+        "frame_01_photo_id": "p1",
+        "frame_02_photo_id": "p2",
+        "frame_03_photo_id": "p3",
+        "frame_04_photo_id": "p4",
+        "frame_05_photo_id": "p5",
+    }
+    sparse_descriptors = {
+        "p1": {"upper_garment": "Top", "dominant_colors": ["White", "Purple"]},
+        "p2": {"upper_garment": "top"},
+        "p4": {"props": ["fan"]},
+    }
+    other_descriptors = {
+        "p1": {"footwear": "ballet_shoes"},
+        "p4": {"headwear": "hat"},
+        "p5": {"dance_style_hint": "jazz"},
+    }
+
+    sparse_row = build_candidate_feature_row(candidate, descriptors=sparse_descriptors, embeddings=None)
+    other_row = build_candidate_feature_row(candidate, descriptors=other_descriptors, embeddings=None)
+
+    assert set(sparse_row) == set(other_row)
+    assert sparse_row["left_upper_garment"] == "top"
+    assert sparse_row["left_footwear"] == CANONICAL_MISSING
+    assert sparse_row["right_headwear"] == CANONICAL_MISSING
+    assert sparse_row["right_dance_style_hint"] == CANONICAL_MISSING
+
+
+def test_build_candidate_feature_row_emits_missing_schema_columns_by_default() -> None:
+    candidate = {
+        "frame_01_timestamp": 0.0,
+        "frame_02_timestamp": 0.1,
+        "frame_03_timestamp": 0.2,
+        "frame_04_timestamp": 20.2,
+        "frame_05_timestamp": 20.3,
+        "frame_01_photo_id": "p1",
+        "frame_02_photo_id": "p2",
+        "frame_03_photo_id": "p3",
+        "frame_04_photo_id": "p4",
+        "frame_05_photo_id": "p5",
+    }
+
+    row = build_candidate_feature_row(candidate, descriptors={}, embeddings=None)
+
+    assert row["left_people_count"] == CANONICAL_MISSING
+    assert row["right_performer_view"] == CANONICAL_MISSING
+    assert row["left_headwear"] == CANONICAL_MISSING
+    assert row["right_footwear"] == CANONICAL_MISSING
+    assert row["left_dominant_colors_01"] == CANONICAL_MISSING
+    assert row["left_dominant_colors_05"] == CANONICAL_MISSING
+    assert row["right_props_01"] == CANONICAL_MISSING
+    assert row["right_props_05"] == CANONICAL_MISSING
+
+
 def test_build_candidate_feature_row_ignores_malformed_multivalue_items() -> None:
     candidate = {
         "frame_01_timestamp": 0.0,

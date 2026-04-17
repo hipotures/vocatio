@@ -7,6 +7,7 @@ from statistics import median, pvariance
 from typing import Mapping, Sequence
 
 from lib.photo_pre_model_annotations import (
+    build_photo_pre_model_descriptor_field_registry,
     flatten_annotation_data,
 )
 
@@ -151,46 +152,13 @@ def _normalize_scalar_descriptor_value(value: object) -> str:
     return normalized[0]
 
 
-def _field_is_multivalue(
-    records: Sequence[Mapping[str, object]],
-    *,
-    field_name: str,
-) -> bool:
-    for record in records:
-        if field_name not in record:
-            continue
-        value = record[field_name]
-        if isinstance(value, SequenceABC) and not isinstance(value, (str, bytes)):
-            return True
-        if len(normalize_descriptor_tokens(value)) > 1:
-            return True
-    return False
-
-
-def _infer_descriptor_field_registry(
-    records: Sequence[Mapping[str, object]],
-) -> dict[str, str]:
-    field_names = sorted(
-        {
-            field_name
-            for record in records
-            for field_name in record
-        }
-    )
-    registry: dict[str, str] = {}
-    for field_name in field_names:
-        registry[field_name] = "multivalue" if _field_is_multivalue(records, field_name=field_name) else "scalar"
-    return registry
-
-
 def _resolve_descriptor_field_registry(
-    records: Sequence[Mapping[str, object]],
     descriptor_field_registry: Mapping[str, str] | None,
 ) -> tuple[list[str], set[str]]:
     registry = (
         dict(descriptor_field_registry)
         if descriptor_field_registry is not None
-        else _infer_descriptor_field_registry(records)
+        else build_photo_pre_model_descriptor_field_registry()
     )
     multivalue_fields: set[str] = set()
     for field_name, field_kind in registry.items():
@@ -364,9 +332,7 @@ def build_candidate_feature_row(
     right_descriptor_records = [
         _get_flattened_descriptor_record(descriptor_map, photo_id=photo_id) for photo_id in right_photo_ids
     ]
-    candidate_descriptor_records = left_descriptor_records + right_descriptor_records
     field_names, multivalue_fields = _resolve_descriptor_field_registry(
-        candidate_descriptor_records,
         descriptor_field_registry,
     )
     row.update(

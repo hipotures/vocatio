@@ -51,6 +51,10 @@ REQUIRED_FIELDS = {
     "props",
     "dance_style_hint",
 }
+MULTIVALUE_FIELDS = {
+    "dominant_colors",
+    "props",
+}
 
 
 def normalize_annotation_data_key_part(key: object) -> str:
@@ -174,3 +178,10 @@ def load_photo_pre_model_annotations_by_relative_path(
     relative_paths: Sequence[str],
 ) -> Dict[str, Dict[str, Any]]:
     return load_photo_pre_model_data_by_relative_path(output_dir, relative_paths)
+
+
+def build_photo_pre_model_descriptor_field_registry() -> Dict[str, str]:
+    return {
+        field_name: "multivalue" if field_name in MULTIVALUE_FIELDS else "scalar"
+        for field_name in sorted(REQUIRED_FIELDS)
+    }
