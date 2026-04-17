@@ -10,6 +10,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
 from build_ml_boundary_candidate_dataset import CANDIDATE_ROW_HEADERS
 from lib.ml_boundary_dataset import canonical_candidate_id
+from lib.ml_boundary_features import CANONICAL_MISSING
 from lib.ml_boundary_training_data import (
     load_candidate_training_frame,
     load_training_data_bundle,
@@ -74,6 +75,28 @@ def _write_split_manifest(path: Path, rows: list[dict[str, str]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _write_annotation_payload(
+    annotation_dir: Path,
+    *,
+    relative_path: str,
+    data: dict[str, object],
+) -> None:
+    annotation_path = annotation_dir / f"{relative_path}.json"
+    annotation_path.parent.mkdir(parents=True, exist_ok=True)
+    annotation_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "photo_pre_model_v1",
+                "relative_path": relative_path,
+                "generated_at": "2026-04-15T12:00:00+02:00",
+                "model": "test-model",
+                "data": data,
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_load_candidate_training_frame_reads_csv_rows(tmp_path: Path) -> None:
@@ -333,30 +356,22 @@ def test_load_training_data_bundle_reports_missing_annotation_counts(tmp_path: P
         [{"candidate_id": row["candidate_id"], "split_name": "train"}],
     )
 
-    (annotation_dir / "cam").mkdir()
-    (annotation_dir / "cam" / "20250324-p1.jpg.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "photo_pre_model_v1",
-                "relative_path": "cam/20250324-p1.jpg",
-                "generated_at": "2026-04-15T12:00:00+02:00",
-                "model": "test-model",
-                "data": {
-                    "people_count": "1",
-                    "performer_view": "solo",
-                    "upper_garment": "top",
-                    "lower_garment": "skirt",
-                    "sleeves": "short",
-                    "leg_coverage": "bare",
-                    "dominant_colors": ["white", "purple"],
-                    "headwear": "none",
-                    "footwear": "ballet_shoes",
-                    "props": ["none"],
-                    "dance_style_hint": "ballet",
-                },
-            }
-        ),
-        encoding="utf-8",
+    _write_annotation_payload(
+        annotation_dir,
+        relative_path="cam/20250324-p1.jpg",
+        data={
+            "people_count": "1",
+            "performer_view": "solo",
+            "upper_garment": "top",
+            "lower_garment": "skirt",
+            "sleeves": "short",
+            "leg_coverage": "bare",
+            "dominant_colors": ["white", "purple"],
+            "headwear": "none",
+            "footwear": "ballet_shoes",
+            "props": ["none"],
+            "dance_style_hint": "ballet",
+        },
     )
 
     bundle = load_training_data_bundle(
@@ -369,3 +384,80 @@ def test_load_training_data_bundle_reports_missing_annotation_counts(tmp_path: P
 
     assert bundle.missing_annotation_photo_count == 4
     assert bundle.missing_annotation_candidate_count == 1
+
+
+def test_load_training_data_bundle_extends_descriptor_registry_from_dataset_annotations(
+    tmp_path: Path,
+) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    annotation_dir = tmp_path / "photo_pre_model_annotations"
+
+    train_row = _candidate_row(
+        day_id="20250324",
+        segment_type="performance",
+        boundary="0",
+        candidate_rule_version="gap-v1",
+    )
+    validation_row = _candidate_row(
+        day_id="20250325",
+        segment_type="ceremony",
+        boundary="1",
+        candidate_rule_version="gap-v2",
+    )
+    _write_candidate_csv(dataset_path, [train_row, validation_row])
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"candidate_id": train_row["candidate_id"], "split_name": "train"},
+            {"candidate_id": validation_row["candidate_id"], "split_name": "validation"},
+        ],
+    )
+
+    default_payload = {
+        "people_count": "1",
+        "performer_view": "solo",
+        "upper_garment": "top",
+        "lower_garment": "skirt",
+        "sleeves": "short",
+        "leg_coverage": "bare",
+        "dominant_colors": ["white"],
+        "headwear": "none",
+        "footwear": "ballet_shoes",
+        "props": ["none"],
+        "dance_style_hint": "ballet",
+    }
+    for day_id in ("20250324", "20250325"):
+        for frame_index in range(1, 6):
+            relative_path = f"cam/{day_id}-p{frame_index}.jpg"
+            payload = dict(default_payload)
+            if day_id == "20250324":
+                payload["appearance"] = {"silhouette": "clean-line"}
+            if day_id == "20250325" and frame_index == 4:
+                payload["appearance"] = {"accents": ["Gold", "Silver"]}
+            elif day_id == "20250325" and frame_index == 5:
+                payload["appearance"] = {"accents": "blue/white"}
+            _write_annotation_payload(
+                annotation_dir,
+                relative_path=relative_path,
+                data=payload,
+            )
+
+    bundle = load_training_data_bundle(
+        dataset_path,
+        split_manifest_path=split_manifest_path,
+        mode="tabular_only",
+        annotation_dir=annotation_dir,
+    )
+
+    assert "left_upper_garment" in bundle.shared_feature_columns
+    assert "left_appearance_silhouette" in bundle.shared_feature_columns
+    assert "right_appearance_accents_01" in bundle.shared_feature_columns
+    assert "right_appearance_accents_02" in bundle.shared_feature_columns
+    assert "right_appearance_accents_03" in bundle.shared_feature_columns
+    assert bundle.train_rows["left_appearance_silhouette"].tolist() == ["clean-line"]
+    assert bundle.train_rows["right_appearance_accents_01"].tolist() == [CANONICAL_MISSING]
+    assert bundle.validation_rows["left_appearance_silhouette"].tolist() == [CANONICAL_MISSING]
+    assert bundle.validation_rows["right_appearance_accents_01"].tolist() == ["blue"]
+    assert bundle.validation_rows["right_appearance_accents_02"].tolist() == ["gold"]
+    assert bundle.validation_rows["right_appearance_accents_03"].tolist() == ["silver"]

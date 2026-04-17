@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib.ml_boundary_features import build_candidate_feature_row
+from lib.photo_pre_model_annotations import (
+    build_dataset_photo_pre_model_descriptor_field_registry,
+    load_photo_pre_model_annotations_by_relative_path,
+)
 
 
 TRAIN_MODES = ("tabular_only", "tabular_plus_thumbnail")
@@ -45,8 +49,11 @@ class TrainingDataBundle:
     train_rows: "TrainingTable"
     validation_rows: "TrainingTable"
     test_rows: "TrainingTable"
+    annotation_dir: Path | None
     split_manifest_scope: str
     split_counts_by_name: dict[str, int]
+    missing_annotation_photo_count: int
+    missing_annotation_candidate_count: int
     shared_feature_columns: list[str]
     image_feature_columns: list[str]
     segment_type: PredictorTrainingData
@@ -206,6 +213,7 @@ def load_training_data_bundle(
     split_manifest_path: Path,
     mode: str,
     require_train_validation: bool = True,
+    annotation_dir: Path | None = None,
 ) -> TrainingDataBundle:
     validate_mode(mode)
     candidate_frame = load_candidate_training_frame(dataset_path)
@@ -221,7 +229,15 @@ def load_training_data_bundle(
         candidate_frame,
         split_manifest_frame=split_manifest_frame,
     )
-    joined_frame, derived_feature_columns = _derive_feature_view(joined_frame)
+    (
+        joined_frame,
+        derived_feature_columns,
+        missing_annotation_photo_count,
+        missing_annotation_candidate_count,
+    ) = _derive_feature_view(
+        joined_frame,
+        annotation_dir=annotation_dir,
+    )
     train_rows = TrainingTable(
         [row for row in joined_frame.rows if row["split_name"] == "train"]
     )
@@ -253,8 +269,11 @@ def load_training_data_bundle(
         train_rows=train_rows,
         validation_rows=validation_rows,
         test_rows=test_rows,
+        annotation_dir=annotation_dir,
         split_manifest_scope=split_manifest_scope,
         split_counts_by_name=_split_counts(joined_frame["split_name"]),
+        missing_annotation_photo_count=missing_annotation_photo_count,
+        missing_annotation_candidate_count=missing_annotation_candidate_count,
         shared_feature_columns=columns_by_mode["shared_feature_columns"],
         image_feature_columns=columns_by_mode["image_feature_columns"],
         segment_type=PredictorTrainingData(
@@ -367,11 +386,36 @@ def _split_counts(split_values: ColumnValues) -> dict[str, int]:
     return counts
 
 
-def _derive_feature_view(table: TrainingTable) -> tuple[TrainingTable, list[str]]:
+def _derive_feature_view(
+    table: TrainingTable,
+    *,
+    annotation_dir: Path | None,
+) -> tuple[TrainingTable, list[str], int, int]:
+    descriptors_by_relative_path = _load_annotation_records(table, annotation_dir=annotation_dir)
+    descriptor_field_registry = None
+    if annotation_dir is not None:
+        descriptor_field_registry = build_dataset_photo_pre_model_descriptor_field_registry(
+            descriptors_by_relative_path
+        )
     derived_rows: list[dict[str, object]] = []
     derived_feature_columns: list[str] = []
+    missing_annotation_photo_count = 0
+    missing_annotation_candidate_count = 0
     for row in table.rows:
-        derived_features = build_candidate_feature_row(row, descriptors={}, embeddings=None)
+        descriptors, candidate_missing_annotation_count = _build_candidate_descriptors(
+            row,
+            descriptors_by_relative_path=descriptors_by_relative_path,
+            count_missing_annotations=annotation_dir is not None,
+        )
+        if candidate_missing_annotation_count > 0:
+            missing_annotation_photo_count += candidate_missing_annotation_count
+            missing_annotation_candidate_count += 1
+        derived_features = build_candidate_feature_row(
+            row,
+            descriptors=descriptors,
+            embeddings=None,
+            descriptor_field_registry=descriptor_field_registry,
+        )
         if not derived_feature_columns:
             derived_feature_columns = list(derived_features.keys())
         derived_row: dict[str, object] = {column_name: derived_features[column_name] for column_name in derived_feature_columns}
@@ -393,4 +437,54 @@ def _derive_feature_view(table: TrainingTable) -> tuple[TrainingTable, list[str]
             ),
         ),
         derived_feature_columns,
+        missing_annotation_photo_count,
+        missing_annotation_candidate_count,
     )
+
+
+def _load_annotation_records(
+    table: TrainingTable,
+    *,
+    annotation_dir: Path | None,
+) -> dict[str, dict[str, object]]:
+    if annotation_dir is None:
+        return {}
+    relative_paths = sorted(
+        {
+            relative_path
+            for row in table.rows
+            for relative_path in _candidate_relative_paths(row)
+            if relative_path
+        }
+    )
+    return load_photo_pre_model_annotations_by_relative_path(annotation_dir, relative_paths)
+
+
+def _build_candidate_descriptors(
+    row: dict[str, object],
+    *,
+    descriptors_by_relative_path: dict[str, dict[str, object]],
+    count_missing_annotations: bool,
+) -> tuple[dict[str, dict[str, object]], int]:
+    descriptors: dict[str, dict[str, object]] = {}
+    missing_annotation_count = 0
+    for frame_index in range(1, 6):
+        suffix = f"{frame_index:02d}"
+        photo_id = str(row.get(f"frame_{suffix}_photo_id", "")).strip()
+        relative_path = str(row.get(f"frame_{suffix}_relpath", "")).strip()
+        if not photo_id:
+            continue
+        descriptor_record = descriptors_by_relative_path.get(relative_path)
+        if descriptor_record is None:
+            if count_missing_annotations:
+                missing_annotation_count += 1
+            continue
+        descriptors[photo_id] = descriptor_record
+    return descriptors, missing_annotation_count
+
+
+def _candidate_relative_paths(row: dict[str, object]) -> list[str]:
+    return [
+        str(row.get(f"frame_{frame_index:02d}_relpath", "")).strip()
+        for frame_index in range(1, 6)
+    ]

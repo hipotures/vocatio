@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Mapping, Optional, Sequence
@@ -185,3 +186,37 @@ def build_photo_pre_model_descriptor_field_registry() -> Dict[str, str]:
         field_name: "multivalue" if field_name in MULTIVALUE_FIELDS else "scalar"
         for field_name in sorted(REQUIRED_FIELDS)
     }
+
+
+def build_dataset_photo_pre_model_descriptor_field_registry(
+    annotation_data_by_relative_path: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, str]:
+    registry = build_photo_pre_model_descriptor_field_registry()
+    extra_field_kinds: Dict[str, str] = {}
+    for annotation_data in annotation_data_by_relative_path.values():
+        flattened = flatten_annotation_data(annotation_data)
+        for field_name, value in flattened.items():
+            if field_name in registry:
+                continue
+            if _value_is_multivalue(value):
+                extra_field_kinds[field_name] = "multivalue"
+                continue
+            extra_field_kinds.setdefault(field_name, "scalar")
+    for field_name in sorted(extra_field_kinds):
+        registry[field_name] = extra_field_kinds[field_name]
+    return registry
+
+
+def _value_is_multivalue(value: object) -> bool:
+    if isinstance(value, SequenceABC) and not isinstance(value, (str, bytes)):
+        return not isinstance(value, MappingABC)
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip()
+    if not normalized:
+        return False
+    for delimiter in (",", ";", "|", "/"):
+        parts = [part.strip() for part in normalized.split(delimiter)]
+        if len([part for part in parts if part]) >= 2:
+            return True
+    return False
