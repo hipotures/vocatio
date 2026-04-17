@@ -238,7 +238,7 @@ def test_build_candidate_feature_row_splits_text_values_on_list_delimiters_only(
     assert row["right_props_03"] == "ribbon"
 
 
-def test_build_candidate_feature_row_uses_schema_stable_descriptor_keys() -> None:
+def test_build_candidate_feature_row_uses_explicit_registry_for_stable_descriptor_keys() -> None:
     candidate = {
         "frame_01_timestamp": 0.0,
         "frame_02_timestamp": 0.1,
@@ -251,23 +251,39 @@ def test_build_candidate_feature_row_uses_schema_stable_descriptor_keys() -> Non
         "frame_04_photo_id": "p4",
         "frame_05_photo_id": "p5",
     }
+    descriptor_field_registry = {
+        "appearance_upper_garment": "scalar",
+        "palette_dominant_colors": "multivalue",
+        "props": "multivalue",
+    }
     sparse_descriptors = {
-        "p1": {"upper_garment": "Top"},
-        "p2": {"upper_garment": "top"},
-        "p3": {"upper_garment": "TOP"},
-        "p4": {"dominant_colors": ["Blue"]},
+        "p1": {"appearance": {"upper_garment": "Top"}},
+        "p2": {"appearance": {"upper_garment": "top"}},
+        "p3": {"appearance": {"upper_garment": "TOP"}},
+        "p4": {"palette": {"dominant_colors": ["Blue"]}},
     }
     empty_descriptors = {}
 
-    sparse_row = build_candidate_feature_row(candidate, descriptors=sparse_descriptors, embeddings=None)
-    empty_row = build_candidate_feature_row(candidate, descriptors=empty_descriptors, embeddings=None)
+    sparse_row = build_candidate_feature_row(
+        candidate,
+        descriptors=sparse_descriptors,
+        embeddings=None,
+        descriptor_field_registry=descriptor_field_registry,
+    )
+    empty_row = build_candidate_feature_row(
+        candidate,
+        descriptors=empty_descriptors,
+        embeddings=None,
+        descriptor_field_registry=descriptor_field_registry,
+    )
 
     assert set(sparse_row) == set(empty_row)
-    assert sparse_row["left_people_count"] == CANONICAL_MISSING
-    assert sparse_row["left_upper_garment"] == "top"
-    assert sparse_row["right_dominant_colors_01"] == "blue"
-    assert empty_row["left_upper_garment"] == CANONICAL_MISSING
-    assert empty_row["right_dominant_colors_01"] == CANONICAL_MISSING
+    assert sparse_row["left_appearance_upper_garment"] == "top"
+    assert sparse_row["right_palette_dominant_colors_01"] == "blue"
+    assert sparse_row["left_props_01"] == CANONICAL_MISSING
+    assert empty_row["left_appearance_upper_garment"] == CANONICAL_MISSING
+    assert empty_row["right_palette_dominant_colors_01"] == CANONICAL_MISSING
+    assert empty_row["left_props_01"] == CANONICAL_MISSING
 
 
 def test_build_candidate_feature_row_ignores_malformed_multivalue_items() -> None:

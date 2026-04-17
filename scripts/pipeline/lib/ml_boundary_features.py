@@ -7,19 +7,13 @@ from statistics import median, pvariance
 from typing import Mapping, Sequence
 
 from lib.photo_pre_model_annotations import (
-    get_photo_pre_model_descriptor_field_registry,
+    flatten_annotation_data,
 )
 
 GAP_OUTLIER_K = 3.0
 CANONICAL_MISSING = "__missing__"
 DESCRIPTOR_LIST_DELIMITERS = (",", ";", "|", "/")
 DESCRIPTOR_MAX_VALUES_PER_FIELD = 5
-DESCRIPTOR_FIELD_REGISTRY = get_photo_pre_model_descriptor_field_registry()
-DESCRIPTOR_MULTIVALUE_FIELDS = frozenset(
-    field_name
-    for field_name, field_kind in DESCRIPTOR_FIELD_REGISTRY.items()
-    if field_kind == "multivalue"
-)
 CANONICAL_COSTUME_TYPE_VOCABULARY = frozenset(
     {
         "ballgown",
@@ -114,35 +108,12 @@ def _get_descriptor_record(
     return record
 
 
-def _normalize_descriptor_key_part(key: object) -> str:
-    return str(key).strip().replace(".", "_").replace(" ", "_")
-
-
-def _flatten_descriptor_record(
-    record: Mapping[str, object],
-    *,
-    prefix: str = "",
-) -> dict[str, object]:
-    flattened: dict[str, object] = {}
-    for raw_key in sorted(record.keys(), key=str):
-        key_part = _normalize_descriptor_key_part(raw_key)
-        if not key_part:
-            continue
-        field_name = f"{prefix}_{key_part}" if prefix else key_part
-        value = record[raw_key]
-        if isinstance(value, MappingABC):
-            flattened.update(_flatten_descriptor_record(value, prefix=field_name))
-            continue
-        flattened[field_name] = value
-    return flattened
-
-
 def _get_flattened_descriptor_record(
     descriptors: Mapping[str, object],
     *,
     photo_id: str,
 ) -> dict[str, object]:
-    return _flatten_descriptor_record(_get_descriptor_record(descriptors, photo_id=photo_id))
+    return flatten_annotation_data(_get_descriptor_record(descriptors, photo_id=photo_id))
 
 
 def normalize_descriptor_tokens(value: object) -> list[str]:
@@ -178,6 +149,57 @@ def _normalize_scalar_descriptor_value(value: object) -> str:
     if not normalized:
         return CANONICAL_MISSING
     return normalized[0]
+
+
+def _field_is_multivalue(
+    records: Sequence[Mapping[str, object]],
+    *,
+    field_name: str,
+) -> bool:
+    for record in records:
+        if field_name not in record:
+            continue
+        value = record[field_name]
+        if isinstance(value, SequenceABC) and not isinstance(value, (str, bytes)):
+            return True
+        if len(normalize_descriptor_tokens(value)) > 1:
+            return True
+    return False
+
+
+def _infer_descriptor_field_registry(
+    records: Sequence[Mapping[str, object]],
+) -> dict[str, str]:
+    field_names = sorted(
+        {
+            field_name
+            for record in records
+            for field_name in record
+        }
+    )
+    registry: dict[str, str] = {}
+    for field_name in field_names:
+        registry[field_name] = "multivalue" if _field_is_multivalue(records, field_name=field_name) else "scalar"
+    return registry
+
+
+def _resolve_descriptor_field_registry(
+    records: Sequence[Mapping[str, object]],
+    descriptor_field_registry: Mapping[str, str] | None,
+) -> tuple[list[str], set[str]]:
+    registry = (
+        dict(descriptor_field_registry)
+        if descriptor_field_registry is not None
+        else _infer_descriptor_field_registry(records)
+    )
+    multivalue_fields: set[str] = set()
+    for field_name, field_kind in registry.items():
+        if field_kind == "multivalue":
+            multivalue_fields.add(field_name)
+            continue
+        if field_kind != "scalar":
+            raise ValueError(f"unsupported descriptor field kind for {field_name}: {field_kind}")
+    return sorted(registry), multivalue_fields
 
 
 def build_side_descriptor_features(
@@ -288,6 +310,7 @@ def build_candidate_feature_row(
     candidate: Mapping[str, object],
     descriptors: Mapping[str, object],
     embeddings: Mapping[str, Sequence[float]] | None,
+    descriptor_field_registry: Mapping[str, str] | None = None,
 ) -> dict[str, float | int | str]:
 
     timestamps = [
@@ -341,13 +364,17 @@ def build_candidate_feature_row(
     right_descriptor_records = [
         _get_flattened_descriptor_record(descriptor_map, photo_id=photo_id) for photo_id in right_photo_ids
     ]
-    field_names = sorted(DESCRIPTOR_FIELD_REGISTRY)
+    candidate_descriptor_records = left_descriptor_records + right_descriptor_records
+    field_names, multivalue_fields = _resolve_descriptor_field_registry(
+        candidate_descriptor_records,
+        descriptor_field_registry,
+    )
     row.update(
         build_side_descriptor_features(
             "left",
             left_descriptor_records,
             field_names=field_names,
-            multivalue_fields=DESCRIPTOR_MULTIVALUE_FIELDS,
+            multivalue_fields=multivalue_fields,
             tie_break_index=-1,
         )
     )
@@ -356,7 +383,7 @@ def build_candidate_feature_row(
             "right",
             right_descriptor_records,
             field_names=field_names,
-            multivalue_fields=DESCRIPTOR_MULTIVALUE_FIELDS,
+            multivalue_fields=multivalue_fields,
             tie_break_index=0,
         )
     )
