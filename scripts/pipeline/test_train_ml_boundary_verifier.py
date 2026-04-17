@@ -9,6 +9,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
 from build_ml_boundary_candidate_dataset import CANDIDATE_ROW_HEADERS
 from lib.ml_boundary_dataset import canonical_candidate_id
+from lib.photo_pre_model_annotations import DEFAULT_OUTPUT_DIRNAME
 from train_ml_boundary_verifier import (
     FEATURE_COLUMNS_FILENAME,
     TRAINING_METADATA_FILENAME,
@@ -241,11 +242,13 @@ def test_validate_dataset_contract_requires_thumbnail_columns_for_thumbnail_mode
         raise AssertionError("expected ValueError")
 
 
-def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path) -> None:
+def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, capsys) -> None:
     FakeTabularPredictor.instances.clear()
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
     output_dir = tmp_path / "models" / "run-001"
+    annotation_dir = tmp_path / DEFAULT_OUTPUT_DIRNAME
+    annotation_dir.mkdir()
     _write_candidate_csv(
         dataset_path,
         [
@@ -313,6 +316,8 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path) -
         "validation_row_count": 1,
         "split_manifest_scope": "day_id",
         "split_counts_by_name": {"train": 1, "validation": 1, "test": 1},
+        "missing_annotation_photo_count": 15,
+        "missing_annotation_candidate_count": 3,
         "artifacts": {
             "training_plan": str(output_dir / TRAINING_PLAN_FILENAME),
             "training_metadata": str(output_dir / TRAINING_METADATA_FILENAME),
@@ -350,6 +355,10 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path) -
                 "problem_type": "binary",
             },
         },
+        "descriptor_annotation_coverage": {
+            "missing_annotation_photo_count": 15,
+            "missing_annotation_candidate_count": 3,
+        },
     }
     assert FakeTabularPredictor.instances[0].fit_calls[0]["train_rows"] == 1
     assert FakeTabularPredictor.instances[0].fit_calls[0]["validation_rows"] == 1
@@ -360,6 +369,12 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path) -
     assert "frame_01_relpath" not in train_columns
     assert "frame_01_timestamp" not in train_columns
     assert "frame_01_preview_path" not in train_columns
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (
+        captured.err.strip().splitlines()[-1]
+        == "Descriptor annotation coverage: missing annotations for 15 photos across 3 candidates."
+    )
 
 
 def test_train_cli_records_candidate_keyed_split_manifest_scope(

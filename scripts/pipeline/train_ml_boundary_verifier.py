@@ -178,6 +178,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             shutil.rmtree(staged_output_dir)
 
     console.print(f"Wrote training artifacts to {output_dir}")
+    console.print(_descriptor_annotation_coverage_console_line(training_bundle), soft_wrap=True)
     return 0
 
 
@@ -273,6 +274,8 @@ def _build_training_metadata_payload(
         "validation_row_count": int(len(training_bundle.validation_rows)),
         "split_manifest_scope": training_bundle.split_manifest_scope,
         "split_counts_by_name": training_bundle.split_counts_by_name,
+        "missing_annotation_photo_count": training_bundle.missing_annotation_photo_count,
+        "missing_annotation_candidate_count": training_bundle.missing_annotation_candidate_count,
         "artifacts": {
             name: str(path)
             for name, path in artifact_paths.items()
@@ -286,8 +289,8 @@ def _train_predictors(
     summary_output_dir: Path,
     training_bundle: TrainingDataBundle,
     mode: str,
-) -> dict[str, dict[str, object]]:
-    summary: dict[str, dict[str, object]] = {}
+) -> dict[str, object]:
+    summary: dict[str, object] = {}
     predictor_specs = {
         "segment_type": training_bundle.segment_type,
         "boundary": training_bundle.boundary,
@@ -312,7 +315,24 @@ def _train_predictors(
             "validation_score": _extract_validation_score(evaluation_payload, eval_metric="accuracy"),
             "fit_summary_excerpt": _fit_summary_excerpt(predictor.fit_summary()),
         }
+    summary["descriptor_annotation_coverage"] = _descriptor_annotation_coverage_payload(training_bundle)
     return summary
+
+
+def _descriptor_annotation_coverage_payload(training_bundle: TrainingDataBundle) -> dict[str, int]:
+    return {
+        "missing_annotation_photo_count": training_bundle.missing_annotation_photo_count,
+        "missing_annotation_candidate_count": training_bundle.missing_annotation_candidate_count,
+    }
+
+
+def _descriptor_annotation_coverage_console_line(training_bundle: TrainingDataBundle) -> str:
+    coverage = _descriptor_annotation_coverage_payload(training_bundle)
+    return (
+        "Descriptor annotation coverage: "
+        f"missing annotations for {coverage['missing_annotation_photo_count']} photos "
+        f"across {coverage['missing_annotation_candidate_count']} candidates."
+    )
 
 
 def _fit_predictor(
