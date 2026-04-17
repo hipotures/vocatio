@@ -357,13 +357,13 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             gap_hint_lines=["gap_01_02: visual_distance=0.100 (medium), heuristic_boundary_score=0.200 (low)"],
             extra_instructions="",
             pre_model_lines=[
-                "frame_01: people_count=1, performer_view=solo",
-                "frame_02: people_count=2, performer_view=duo",
+                "frame_01: people_count=solo, performer_view=solo",
+                "frame_02: people_count=duet_trio, performer_view=duo",
             ],
         )
         self.assertIn("Optional pre-model per-image annotations", prompt)
-        self.assertIn("frame_01: people_count=1, performer_view=solo", prompt)
-        self.assertIn("frame_02: people_count=2, performer_view=duo", prompt)
+        self.assertIn("frame_01: people_count=solo, performer_view=solo", prompt)
+        self.assertIn("frame_02: people_count=duet_trio, performer_view=duo", prompt)
 
     def test_build_photo_pre_model_lines_reads_existing_annotation_files(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -378,7 +378,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "generated_at": "2026-04-15T12:00:00+02:00",
                         "model": "test-model",
                         "data": {
-                            "people_count": "1",
+                            "people_count": "solo",
                             "performer_view": "solo",
                             "upper_garment": "leotard",
                             "lower_garment": "tutu",
@@ -401,7 +401,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(
                 lines,
                 [
-                    "frame_01: people_count=1, performer_view=solo, upper_garment=leotard, lower_garment=tutu, sleeves=long, leg_coverage=long, dominant_colors=blue|white, headwear=none, footwear=ballet_shoes, props=none, dance_style_hint=ballet"
+                    "frame_01: people_count=solo, performer_view=solo, upper_garment=leotard, lower_garment=tutu, sleeves=long, leg_coverage=long, dominant_colors=blue|white, headwear=none, footwear=ballet_shoes, props=none, dance_style_hint=ballet"
                 ],
             )
 

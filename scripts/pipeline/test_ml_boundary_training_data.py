@@ -360,7 +360,7 @@ def test_load_training_data_bundle_reports_missing_annotation_counts(tmp_path: P
         annotation_dir,
         relative_path="cam/20250324-p1.jpg",
         data={
-            "people_count": "1",
+            "people_count": "solo",
             "performer_view": "solo",
             "upper_garment": "top",
             "lower_garment": "skirt",
@@ -415,7 +415,7 @@ def test_load_training_data_bundle_extends_descriptor_registry_from_dataset_anno
     )
 
     default_payload = {
-        "people_count": "1",
+        "people_count": "solo",
         "performer_view": "solo",
         "upper_garment": "top",
         "lower_garment": "skirt",
@@ -480,7 +480,7 @@ def test_load_training_data_bundle_resolves_default_annotation_dir_for_corpus_da
         [{"candidate_id": row["candidate_id"], "split_name": "train"}],
     )
     default_payload = {
-        "people_count": "1",
+        "people_count": "solo",
         "performer_view": "solo",
         "upper_garment": "top",
         "lower_garment": "skirt",

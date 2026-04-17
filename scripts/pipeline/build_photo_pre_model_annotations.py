@@ -34,6 +34,7 @@ from lib.photo_pre_model_annotations import (
     build_annotation_record,
     build_prompt_only_json_prompt,
     load_photo_pre_model_annotations_by_relative_path,
+    normalize_annotation_data,
     parse_annotation_content,
     validate_annotation_data,
 )
@@ -223,6 +224,7 @@ def request_annotation(
     )
     response = run_vlm_request(request)
     parsed = dict(response.json_payload) if isinstance(response.json_payload, Mapping) else parse_annotation_content(response.text)
+    parsed = normalize_annotation_data(parsed)
     validate_annotation_data(parsed)
     return parsed, build_request_timings(response)
 

@@ -30,7 +30,7 @@ pre_model = load_module(
 class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
     def make_annotation_payload(self) -> dict[str, object]:
         return {
-            "people_count": "1",
+            "people_count": "solo",
             "performer_view": "solo",
             "upper_garment": "top",
             "lower_garment": "pants",
@@ -166,7 +166,7 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
                         "relative_path": "cam/a.hif",
                         "generated_at": "2026-04-15T12:00:00Z",
                         "model": "test-model",
-                        "data": {"people_count": "1", "performer_view": "solo"},
+                        "data": {"people_count": "solo", "performer_view": "solo"},
                     }
                 ),
                 encoding="utf-8",
@@ -177,7 +177,7 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
             )
             self.assertEqual(
                 annotations,
-                {"cam/a.hif": {"people_count": "1", "performer_view": "solo"}},
+                {"cam/a.hif": {"people_count": "solo", "performer_view": "solo"}},
             )
 
     def test_request_annotation_uses_transport_for_provider_neutral_execution(self):
@@ -218,6 +218,38 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
             self.assertEqual(request.image_paths, [image_path])
             self.assertEqual(request.max_output_tokens, 256)
 
+    def test_request_annotation_canonicalizes_numeric_people_count(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "frame.jpg"
+            image_path.write_bytes(b"fake-image")
+            response = mock.Mock(
+                text='{"people_count": 4, "performer_view": "group", "upper_garment": "top", "lower_garment": "pants", "sleeves": "short", "leg_coverage": "long", "dominant_colors": ["blue"], "headwear": "none", "footwear": "dance_shoes", "props": ["none"], "dance_style_hint": "jazz"}',
+                json_payload=None,
+                raw_response={"provider": "mock"},
+                metrics={"prompt_tokens": 7, "completion_tokens": 3},
+            )
+
+            with mock.patch.object(pre_model, "run_vlm_request", return_value=response):
+                payload, _timings = pre_model.request_annotation(
+                    provider="ollama",
+                    base_url="http://127.0.0.1:11434",
+                    model_name="demo-model",
+                    prompt="Describe costume.",
+                    max_tokens=256,
+                    temperature=0.0,
+                    timeout_seconds=30.0,
+                    image_path=image_path,
+                )
+
+            self.assertEqual(payload["people_count"], "quartet")
+
+    def test_parse_annotation_content_repairs_unquoted_people_count_token(self):
+        payload = pre_model.parse_annotation_content(
+            '{"people_count": 4plus, "performer_view": "group", "upper_garment": "top", "lower_garment": "unitard", "sleeves": "none", "leg_coverage": "long", "dominant_colors": ["red", "black"], "headwear": "none", "footwear": "unclear", "props": ["none"], "dance_style_hint": "unclear"}'
+        )
+
+        self.assertEqual(payload["people_count"], "small_group")
+
     def test_main_writes_missing_files_and_resumes_without_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             day_dir = Path(tmp_dir) / "20260323"
@@ -233,7 +265,7 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
             def fake_process_entry(entry, **_kwargs):
                 return (
                     entry,
-                    {"people_count": "1", "performer_view": "solo"},
+                    {"people_count": "solo", "performer_view": "solo"},
                     {"prompt_n": 1, "prompt_ms": 1.0, "predicted_n": 1, "predicted_ms": 1.0},
                 )
 
