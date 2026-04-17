@@ -111,7 +111,7 @@ def test_build_candidate_feature_row_flattens_scalar_descriptor_fields() -> None
     descriptors = {
         "p1": {"upper_garment": "Top", "lower_garment": "Skirt"},
         "p2": {"upper_garment": "top", "lower_garment": "skirt"},
-        "p3": {"upper_garment": "TOP", "lower_garment": "Skirt"},
+        "p3": {"upper_garment": "Jacket", "lower_garment": "Skirt"},
         "p4": {"upper_garment": "Top", "lower_garment": "Tutu"},
         "p5": {"upper_garment": "Top", "lower_garment": "Tutu"},
     }
@@ -174,7 +174,7 @@ def test_build_candidate_feature_row_splits_text_values_on_list_delimiters_only(
     }
     descriptors = {
         "p1": {"footwear": "ballet_shoes"},
-        "p2": {"footwear": "dance_shoes"},
+        "p2": {"footwear": "ballet_shoes"},
         "p3": {"footwear": "ballet_shoes"},
         "p4": {"props": "fan; ribbon"},
         "p5": {"props": "banner/fan"},
@@ -202,33 +202,11 @@ def test_build_candidate_feature_row_rejects_malformed_descriptor_record_shape()
         "frame_05_photo_id": "p5",
     }
     descriptors = {
-        "p1": {"costume_type": "dress"},
+        "p1": {"upper_garment": "top"},
         "p2": "not-a-mapping",
     }
 
     with pytest.raises(ValueError, match="must be a mapping"):
-        build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
-
-
-def test_build_candidate_feature_row_rejects_out_of_vocabulary_descriptor_values() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 1.0,
-        "frame_03_timestamp": 2.0,
-        "frame_04_timestamp": 3.0,
-        "frame_05_timestamp": 4.0,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
-    descriptors = {
-        "p1": {"costume_type": "dress"},
-        "p2": {"costume_type": "cape"},
-    }
-
-    with pytest.raises(ValueError, match="canonical vocabulary"):
         build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
 
 

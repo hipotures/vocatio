@@ -339,7 +339,21 @@ def test_load_training_data_bundle_reports_missing_annotation_counts(tmp_path: P
             {
                 "schema_version": "photo_pre_model_v1",
                 "relative_path": "cam/20250324-p1.jpg",
-                "data": {"upper_garment": "top"},
+                "generated_at": "2026-04-15T12:00:00+02:00",
+                "model": "test-model",
+                "data": {
+                    "people_count": "1",
+                    "performer_view": "solo",
+                    "upper_garment": "top",
+                    "lower_garment": "skirt",
+                    "sleeves": "short",
+                    "leg_coverage": "bare",
+                    "dominant_colors": ["white", "purple"],
+                    "headwear": "none",
+                    "footwear": "ballet_shoes",
+                    "props": ["none"],
+                    "dance_style_hint": "ballet",
+                },
             }
         ),
         encoding="utf-8",
