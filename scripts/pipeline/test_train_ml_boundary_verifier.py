@@ -1,12 +1,16 @@
 import csv
 import json
 import sys
+from io import StringIO
 from pathlib import Path
+
+from rich.console import Console
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
+import train_ml_boundary_verifier
 from build_ml_boundary_candidate_dataset import CANDIDATE_ROW_HEADERS
 from lib.ml_boundary_dataset import canonical_candidate_id
 from lib.photo_pre_model_annotations import DEFAULT_OUTPUT_DIRNAME
@@ -22,6 +26,17 @@ from train_ml_boundary_verifier import (
     main,
     validate_dataset_contract,
 )
+
+
+def _recording_console(*, width: int) -> Console:
+    return Console(
+        file=StringIO(),
+        stderr=True,
+        force_terminal=False,
+        color_system=None,
+        width=width,
+        record=True,
+    )
 
 
 def _candidate_row(
@@ -162,6 +177,16 @@ class FakeMultiModalPredictor:
         }
 
 
+class FakeTabularPredictorModelBest(FakeTabularPredictor):
+    def fit_summary(self):
+        return {
+            "model_best": f"{self.label}_winner",
+            "num_models_trained": 1,
+            "problem_type": self.problem_type,
+            "label": self.label,
+        }
+
+
 def test_build_training_plan_uses_two_independent_predictors() -> None:
     assert build_training_plan("tabular_only") == [
         {"name": "segment_type", "problem_type": "multiclass"},
@@ -274,6 +299,8 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "train_ml_boundary_verifier.load_multimodal_predictor_class",
         lambda: FakeMultiModalPredictor,
     )
+    rendered_console = _recording_console(width=60)
+    monkeypatch.setattr(train_ml_boundary_verifier, "console", rendered_console)
 
     exit_code = main(
         [
@@ -403,29 +430,32 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert "frame_01_timestamp" not in train_columns
     assert "frame_01_preview_path" not in train_columns
     captured = capsys.readouterr()
-    stderr = captured.err.strip()
+    rendered = rendered_console.export_text()
+    rendered_lines = [line for line in rendered.splitlines() if line]
     assert captured.out == ""
-    assert "Training complete" in stderr
-    assert "Output dir:" in stderr
-    assert str(output_dir) in stderr
-    assert "Segment type:" in stderr
-    assert "segment_type_best" in stderr
-    assert "Boundary:" in stderr
-    assert "boundary_best" in stderr
-    assert "Feature counts:" in stderr
-    assert f"shared={training_report['shared_feature_count']}" in stderr
-    assert f"image={training_report['image_feature_count']}" in stderr
-    assert "Missing annotations:" in stderr
-    assert f"photos={training_report['missing_annotation_photo_count']}" in stderr
-    assert f"candidates={training_report['missing_annotation_candidate_count']}" in stderr
-    assert "training_report.json" in stderr
-    assert str(output_dir / TRAINING_REPORT_FILENAME) in stderr
-    assert stderr.index("Training complete") < stderr.index("Output dir:")
-    assert stderr.index("Output dir:") < stderr.index("Segment type:")
-    assert stderr.index("Segment type:") < stderr.index("Boundary:")
-    assert stderr.index("Boundary:") < stderr.index("Feature counts:")
-    assert stderr.index("Feature counts:") < stderr.index("Missing annotations:")
-    assert stderr.index("Missing annotations:") < stderr.index("Report:")
+    assert captured.err == ""
+    assert "Training complete" in rendered
+    assert "Output dir:" in rendered
+    assert output_dir.name in rendered
+    assert "Segment type:" in rendered
+    assert "segment_type_best" in rendered
+    assert "Boundary:" in rendered
+    assert "boundary_best" in rendered
+    assert "Feature counts:" in rendered
+    assert f"shared={training_report['shared_feature_count']}" in rendered
+    assert f"image={training_report['image_feature_count']}" in rendered
+    assert "Missing annotations:" in rendered
+    assert f"photos={training_report['missing_annotation_photo_count']}" in rendered
+    assert f"candidates={training_report['missing_annotation_candidate_count']}" in rendered
+    assert "training_report.json" in rendered
+    assert TRAINING_REPORT_FILENAME in rendered
+    assert len(rendered_lines) > 7
+    assert rendered.index("Training complete") < rendered.index("Output dir:")
+    assert rendered.index("Output dir:") < rendered.index("Segment type:")
+    assert rendered.index("Segment type:") < rendered.index("Boundary:")
+    assert rendered.index("Boundary:") < rendered.index("Feature counts:")
+    assert rendered.index("Feature counts:") < rendered.index("Missing annotations:")
+    assert rendered.index("Missing annotations:") < rendered.index("Report:")
 
 
 def test_train_cli_records_candidate_keyed_split_manifest_scope(
@@ -486,6 +516,7 @@ def test_train_cli_records_candidate_keyed_split_manifest_scope(
 def test_train_cli_report_falls_back_to_model_type_when_best_model_missing(
     monkeypatch,
     tmp_path: Path,
+    capsys,
 ) -> None:
     FakeMultiModalPredictor.instances.clear()
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
@@ -513,6 +544,8 @@ def test_train_cli_report_falls_back_to_model_type_when_best_model_missing(
         "train_ml_boundary_verifier.load_multimodal_predictor_class",
         lambda: FakeMultiModalPredictor,
     )
+    rendered_console = _recording_console(width=60)
+    monkeypatch.setattr(train_ml_boundary_verifier, "console", rendered_console)
 
     exit_code = main(
         [
@@ -527,9 +560,76 @@ def test_train_cli_report_falls_back_to_model_type_when_best_model_missing(
     )
 
     assert exit_code == 0
+    training_summary = json.loads((output_dir / TRAINING_SUMMARY_FILENAME).read_text(encoding="utf-8"))
     training_report = json.loads((output_dir / TRAINING_REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert training_summary["segment_type"]["model_type"] == "FakeMultiModalPredictor"
+    assert training_summary["boundary"]["model_type"] == "FakeMultiModalPredictor"
     assert training_report["segment_type"]["best_model"] == "FakeMultiModalPredictor"
     assert training_report["boundary"]["best_model"] == "FakeMultiModalPredictor"
+    captured = capsys.readouterr()
+    rendered = rendered_console.export_text()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert "Segment type: best_model=FakeMultiModalPredictor" in rendered
+    assert "Boundary: best_model=FakeMultiModalPredictor" in rendered
+
+
+def test_train_cli_report_uses_model_best_when_present(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    FakeTabularPredictorModelBest.instances.clear()
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    output_dir = tmp_path / "models" / "run-report-model-best"
+    _write_candidate_csv(
+        dataset_path,
+        [
+            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+        ],
+    )
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"day_id": "20250324", "split_name": "train"},
+            {"day_id": "20250325", "split_name": "validation"},
+        ],
+    )
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_tabular_predictor_class",
+        lambda: FakeTabularPredictorModelBest,
+    )
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_multimodal_predictor_class",
+        lambda: FakeMultiModalPredictor,
+    )
+    rendered_console = _recording_console(width=60)
+    monkeypatch.setattr(train_ml_boundary_verifier, "console", rendered_console)
+
+    exit_code = main(
+        [
+            str(dataset_path),
+            "--split-manifest-csv",
+            str(split_manifest_path),
+            "--mode",
+            "tabular_only",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    training_report = json.loads((output_dir / TRAINING_REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert training_report["segment_type"]["best_model"] == "segment_type_winner"
+    assert training_report["boundary"]["best_model"] == "boundary_winner"
+    captured = capsys.readouterr()
+    rendered = rendered_console.export_text()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert "Segment type: best_model=segment_type_winner" in rendered
+    assert "Boundary: best_model=boundary_winner" in rendered
 
 
 def test_train_cli_uses_multimodal_predictor_for_thumbnail_mode(

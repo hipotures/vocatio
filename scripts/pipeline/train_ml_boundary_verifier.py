@@ -8,7 +8,8 @@ import shutil
 from pathlib import Path
 from typing import Sequence
 
-from rich.console import Console
+from rich.console import Console, Group
+from rich.text import Text
 
 from lib.ml_boundary_training_data import (
     THUMBNAIL_IMAGE_COLUMNS,
@@ -188,8 +189,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             training_bundle=training_bundle,
             training_summary=training_summary,
             artifact_paths=final_artifact_paths,
-        ),
-        soft_wrap=True,
+        )
     )
     return 0
 
@@ -391,9 +391,10 @@ def _report_predictor_payload(
 def _best_model_name(summary_entry: dict[str, object]) -> str:
     fit_summary_excerpt = summary_entry.get("fit_summary_excerpt")
     if isinstance(fit_summary_excerpt, dict):
-        best_model = fit_summary_excerpt.get("best_model")
-        if isinstance(best_model, str) and best_model:
-            return best_model
+        for key in ("best_model", "model_best"):
+            best_model = fit_summary_excerpt.get(key)
+            if isinstance(best_model, str) and best_model:
+                return best_model
     model_type = summary_entry.get("model_type")
     if isinstance(model_type, str) and model_type:
         return model_type
@@ -415,7 +416,7 @@ def _final_console_block(
     training_bundle: TrainingDataBundle,
     training_summary: dict[str, object],
     artifact_paths: dict[str, Path],
-) -> str:
+) -> Group:
     lines = [
         "Training complete",
         f"Output dir: {output_dir}",
@@ -433,7 +434,7 @@ def _final_console_block(
         ),
         f"Report: {artifact_paths['training_report']}",
     ]
-    return "\n".join(lines)
+    return Group(*(Text(line, no_wrap=False, overflow="fold") for line in lines))
 
 
 def _fit_predictor(
@@ -490,7 +491,7 @@ def _extract_validation_score(evaluation_payload: object, *, eval_metric: str) -
 
 def _fit_summary_excerpt(summary_payload: object) -> dict[str, object] | str:
     if isinstance(summary_payload, dict):
-        preferred_keys = ("best_model", "best_score", "num_models_trained", "problem_type")
+        preferred_keys = ("best_model", "model_best", "best_score", "num_models_trained", "problem_type")
         excerpt = {
             key: summary_payload[key]
             for key in preferred_keys
