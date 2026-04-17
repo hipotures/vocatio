@@ -14,6 +14,7 @@ from train_ml_boundary_verifier import (
     FEATURE_COLUMNS_FILENAME,
     TRAINING_METADATA_FILENAME,
     TRAINING_PLAN_FILENAME,
+    TRAINING_REPORT_FILENAME,
     TRAINING_SUMMARY_FILENAME,
     build_training_plan,
     default_boundary_threshold_policy,
@@ -294,6 +295,7 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     training_plan = json.loads((output_dir / TRAINING_PLAN_FILENAME).read_text(encoding="utf-8"))
     training_metadata = json.loads((output_dir / TRAINING_METADATA_FILENAME).read_text(encoding="utf-8"))
     feature_columns = json.loads((output_dir / FEATURE_COLUMNS_FILENAME).read_text(encoding="utf-8"))
+    training_report = json.loads((output_dir / TRAINING_REPORT_FILENAME).read_text(encoding="utf-8"))
     training_summary = json.loads((output_dir / TRAINING_SUMMARY_FILENAME).read_text(encoding="utf-8"))
 
     assert training_plan == {
@@ -322,6 +324,7 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
             "training_plan": str(output_dir / TRAINING_PLAN_FILENAME),
             "training_metadata": str(output_dir / TRAINING_METADATA_FILENAME),
             "feature_columns": str(output_dir / FEATURE_COLUMNS_FILENAME),
+            "training_report": str(output_dir / TRAINING_REPORT_FILENAME),
             "training_summary": str(output_dir / TRAINING_SUMMARY_FILENAME),
             "segment_type_model_dir": str(output_dir / "segment_type_model"),
             "boundary_model_dir": str(output_dir / "boundary_model"),
@@ -360,6 +363,36 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
             "missing_annotation_candidate_count": 3,
         },
     }
+    assert training_report == {
+        "output_dir": str(output_dir),
+        "mode": "tabular_only",
+        "split_manifest_scope": "day_id",
+        "train_row_count": 1,
+        "validation_row_count": 1,
+        "shared_feature_count": len(feature_columns["shared_feature_columns"]),
+        "image_feature_count": 0,
+        "missing_annotation_photo_count": 15,
+        "missing_annotation_candidate_count": 3,
+        "segment_type": {
+            "best_model": "segment_type_best",
+            "validation_score": 0.83,
+            "model_dir": str(output_dir / "segment_type_model"),
+        },
+        "boundary": {
+            "best_model": "boundary_best",
+            "validation_score": 0.91,
+            "model_dir": str(output_dir / "boundary_model"),
+        },
+        "artifact_paths": {
+            "training_plan": str(output_dir / TRAINING_PLAN_FILENAME),
+            "training_metadata": str(output_dir / TRAINING_METADATA_FILENAME),
+            "feature_columns": str(output_dir / FEATURE_COLUMNS_FILENAME),
+            "training_report": str(output_dir / TRAINING_REPORT_FILENAME),
+            "training_summary": str(output_dir / TRAINING_SUMMARY_FILENAME),
+            "segment_type_model_dir": str(output_dir / "segment_type_model"),
+            "boundary_model_dir": str(output_dir / "boundary_model"),
+        },
+    }
     assert FakeTabularPredictor.instances[0].fit_calls[0]["train_rows"] == 1
     assert FakeTabularPredictor.instances[0].fit_calls[0]["validation_rows"] == 1
     train_columns = FakeTabularPredictor.instances[0].fit_calls[0]["train_columns"]
@@ -372,10 +405,27 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     captured = capsys.readouterr()
     stderr = captured.err.strip()
     assert captured.out == ""
-    assert "Wrote training artifacts to" in stderr
+    assert "Training complete" in stderr
+    assert "Output dir:" in stderr
     assert str(output_dir) in stderr
-    assert "Descriptor annotation coverage: missing annotations for 15 photos across 3 candidates." in stderr
-    assert stderr.index("Wrote training artifacts to") < stderr.index("Descriptor annotation coverage:")
+    assert "Segment type:" in stderr
+    assert "segment_type_best" in stderr
+    assert "Boundary:" in stderr
+    assert "boundary_best" in stderr
+    assert "Feature counts:" in stderr
+    assert f"shared={training_report['shared_feature_count']}" in stderr
+    assert f"image={training_report['image_feature_count']}" in stderr
+    assert "Missing annotations:" in stderr
+    assert f"photos={training_report['missing_annotation_photo_count']}" in stderr
+    assert f"candidates={training_report['missing_annotation_candidate_count']}" in stderr
+    assert "training_report.json" in stderr
+    assert str(output_dir / TRAINING_REPORT_FILENAME) in stderr
+    assert stderr.index("Training complete") < stderr.index("Output dir:")
+    assert stderr.index("Output dir:") < stderr.index("Segment type:")
+    assert stderr.index("Segment type:") < stderr.index("Boundary:")
+    assert stderr.index("Boundary:") < stderr.index("Feature counts:")
+    assert stderr.index("Feature counts:") < stderr.index("Missing annotations:")
+    assert stderr.index("Missing annotations:") < stderr.index("Report:")
 
 
 def test_train_cli_records_candidate_keyed_split_manifest_scope(
@@ -431,6 +481,55 @@ def test_train_cli_records_candidate_keyed_split_manifest_scope(
     assert training_metadata["split_counts_by_name"] == {"train": 1, "validation": 1, "test": 1}
     assert FakeTabularPredictor.instances[0].fit_calls[0]["train_rows"] == 1
     assert FakeTabularPredictor.instances[0].fit_calls[0]["validation_rows"] == 1
+
+
+def test_train_cli_report_falls_back_to_model_type_when_best_model_missing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    FakeMultiModalPredictor.instances.clear()
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    output_dir = tmp_path / "models" / "run-report-fallback"
+    _write_candidate_csv(
+        dataset_path,
+        [
+            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+        ],
+    )
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"day_id": "20250324", "split_name": "train"},
+            {"day_id": "20250325", "split_name": "validation"},
+        ],
+    )
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_tabular_predictor_class",
+        lambda: FakeTabularPredictor,
+    )
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_multimodal_predictor_class",
+        lambda: FakeMultiModalPredictor,
+    )
+
+    exit_code = main(
+        [
+            str(dataset_path),
+            "--split-manifest-csv",
+            str(split_manifest_path),
+            "--mode",
+            "tabular_plus_thumbnail",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    training_report = json.loads((output_dir / TRAINING_REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert training_report["segment_type"]["best_model"] == "FakeMultiModalPredictor"
+    assert training_report["boundary"]["best_model"] == "FakeMultiModalPredictor"
 
 
 def test_train_cli_uses_multimodal_predictor_for_thumbnail_mode(

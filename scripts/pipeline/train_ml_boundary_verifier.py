@@ -31,6 +31,7 @@ TRAINING_PLAN_FILENAME = "training_plan.json"
 TRAINING_METADATA_FILENAME = "training_metadata.json"
 FEATURE_COLUMNS_FILENAME = "feature_columns.json"
 TRAINING_SUMMARY_FILENAME = "training_summary.json"
+TRAINING_REPORT_FILENAME = "training_report.json"
 SEGMENT_TYPE_MODEL_DIRNAME = "segment_type_model"
 BOUNDARY_MODEL_DIRNAME = "boundary_model"
 
@@ -172,13 +173,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             staged_output_dir / TRAINING_SUMMARY_FILENAME,
             training_summary,
         )
+        atomic_write_json(
+            staged_output_dir / TRAINING_REPORT_FILENAME,
+            _build_training_report_payload(output_dir, args.mode, training_bundle, training_summary, final_artifact_paths),
+        )
         _publish_staged_output(staged_output_dir, output_dir, overwrite=args.overwrite)
     finally:
         if staged_output_dir.exists():
             shutil.rmtree(staged_output_dir)
 
-    console.print(f"Wrote training artifacts to {output_dir}")
-    console.print(_descriptor_annotation_coverage_console_line(training_bundle), soft_wrap=True)
+    console.print(
+        _final_console_block(
+            output_dir=output_dir,
+            training_bundle=training_bundle,
+            training_summary=training_summary,
+            artifact_paths=final_artifact_paths,
+        ),
+        soft_wrap=True,
+    )
     return 0
 
 
@@ -187,6 +199,7 @@ def _artifact_paths(output_dir: Path) -> dict[str, Path]:
         "training_plan": output_dir / TRAINING_PLAN_FILENAME,
         "training_metadata": output_dir / TRAINING_METADATA_FILENAME,
         "feature_columns": output_dir / FEATURE_COLUMNS_FILENAME,
+        "training_report": output_dir / TRAINING_REPORT_FILENAME,
         "training_summary": output_dir / TRAINING_SUMMARY_FILENAME,
         "segment_type_model_dir": output_dir / SEGMENT_TYPE_MODEL_DIRNAME,
         "boundary_model_dir": output_dir / BOUNDARY_MODEL_DIRNAME,
@@ -319,6 +332,32 @@ def _train_predictors(
     return summary
 
 
+def _build_training_report_payload(
+    output_dir: Path,
+    mode: str,
+    training_bundle: TrainingDataBundle,
+    training_summary: dict[str, object],
+    artifact_paths: dict[str, Path],
+) -> dict[str, object]:
+    return {
+        "output_dir": str(output_dir),
+        "mode": mode,
+        "split_manifest_scope": training_bundle.split_manifest_scope,
+        "train_row_count": int(len(training_bundle.train_rows)),
+        "validation_row_count": int(len(training_bundle.validation_rows)),
+        "shared_feature_count": len(training_bundle.shared_feature_columns),
+        "image_feature_count": len(training_bundle.image_feature_columns),
+        "missing_annotation_photo_count": training_bundle.missing_annotation_photo_count,
+        "missing_annotation_candidate_count": training_bundle.missing_annotation_candidate_count,
+        "segment_type": _report_predictor_payload(training_summary, "segment_type"),
+        "boundary": _report_predictor_payload(training_summary, "boundary"),
+        "artifact_paths": {
+            name: str(path)
+            for name, path in artifact_paths.items()
+        },
+    }
+
+
 def _descriptor_annotation_coverage_payload(training_bundle: TrainingDataBundle) -> dict[str, int]:
     return {
         "missing_annotation_photo_count": training_bundle.missing_annotation_photo_count,
@@ -333,6 +372,68 @@ def _descriptor_annotation_coverage_console_line(training_bundle: TrainingDataBu
         f"missing annotations for {coverage['missing_annotation_photo_count']} photos "
         f"across {coverage['missing_annotation_candidate_count']} candidates."
     )
+
+
+def _report_predictor_payload(
+    training_summary: dict[str, object],
+    predictor_name: str,
+) -> dict[str, object]:
+    summary_entry = training_summary[predictor_name]
+    if not isinstance(summary_entry, dict):
+        raise TypeError(f"Expected summary entry dict for predictor {predictor_name}")
+    return {
+        "best_model": _best_model_name(summary_entry),
+        "validation_score": summary_entry.get("validation_score"),
+        "model_dir": summary_entry.get("path"),
+    }
+
+
+def _best_model_name(summary_entry: dict[str, object]) -> str:
+    fit_summary_excerpt = summary_entry.get("fit_summary_excerpt")
+    if isinstance(fit_summary_excerpt, dict):
+        best_model = fit_summary_excerpt.get("best_model")
+        if isinstance(best_model, str) and best_model:
+            return best_model
+    model_type = summary_entry.get("model_type")
+    if isinstance(model_type, str) and model_type:
+        return model_type
+    return "unknown"
+
+
+def _predictor_console_line(training_summary: dict[str, object], predictor_name: str, label: str) -> str:
+    predictor_payload = _report_predictor_payload(training_summary, predictor_name)
+    return (
+        f"{label}: best_model={predictor_payload['best_model']}, "
+        f"validation_score={predictor_payload['validation_score']}, "
+        f"model_dir={predictor_payload['model_dir']}"
+    )
+
+
+def _final_console_block(
+    *,
+    output_dir: Path,
+    training_bundle: TrainingDataBundle,
+    training_summary: dict[str, object],
+    artifact_paths: dict[str, Path],
+) -> str:
+    lines = [
+        "Training complete",
+        f"Output dir: {output_dir}",
+        _predictor_console_line(training_summary, "segment_type", "Segment type"),
+        _predictor_console_line(training_summary, "boundary", "Boundary"),
+        (
+            "Feature counts: "
+            f"shared={len(training_bundle.shared_feature_columns)}, "
+            f"image={len(training_bundle.image_feature_columns)}"
+        ),
+        (
+            "Missing annotations: "
+            f"photos={training_bundle.missing_annotation_photo_count}, "
+            f"candidates={training_bundle.missing_annotation_candidate_count}"
+        ),
+        f"Report: {artifact_paths['training_report']}",
+    ]
+    return "\n".join(lines)
 
 
 def _fit_predictor(
