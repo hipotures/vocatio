@@ -1,3 +1,4 @@
+import json
 import math
 import sys
 from pathlib import Path
@@ -12,6 +13,9 @@ from lib.ml_boundary_features import (
     build_candidate_feature_row,
     cosine_distance,
     normalize_descriptor_value,
+)
+from lib.photo_pre_model_annotations import (
+    load_photo_pre_model_data_by_relative_path,
 )
 
 
@@ -54,6 +58,38 @@ def test_normalize_descriptor_value_enforces_allowed_values() -> None:
 
     with pytest.raises(ValueError, match="canonical vocabulary"):
         normalize_descriptor_value("cape", allowed_values=allowed_values)
+
+
+def test_load_photo_pre_model_data_by_relative_path_reads_payload_data_only(tmp_path: Path) -> None:
+    output_path = tmp_path / "cam" / "a.hif.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "photo_pre_model_v1",
+                "relative_path": "cam/a.hif",
+                "generated_at": "2026-04-17T12:00:00Z",
+                "model": "test-model",
+                "data": {
+                    "upper_garment": "top",
+                    "dominant_colors": ["white", "purple"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    annotations = load_photo_pre_model_data_by_relative_path(
+        tmp_path,
+        ["cam/a.hif", "cam/missing.hif"],
+    )
+
+    assert annotations == {
+        "cam/a.hif": {
+            "upper_garment": "top",
+            "dominant_colors": ["white", "purple"],
+        }
+    }
 
 
 def test_build_candidate_feature_row_computes_ordered_gap_features() -> None:

@@ -130,7 +130,7 @@ def build_prompt_only_json_prompt() -> str:
     )
 
 
-def load_photo_pre_model_annotations_by_relative_path(
+def load_photo_pre_model_data_by_relative_path(
     output_dir: Path,
     relative_paths: Sequence[str],
 ) -> Dict[str, Dict[str, Any]]:
@@ -144,3 +144,10 @@ def load_photo_pre_model_annotations_by_relative_path(
         if isinstance(data, Mapping):
             loaded[relative_path] = dict(data)
     return loaded
+
+
+def load_photo_pre_model_annotations_by_relative_path(
+    output_dir: Path,
+    relative_paths: Sequence[str],
+) -> Dict[str, Dict[str, Any]]:
+    return load_photo_pre_model_data_by_relative_path(output_dir, relative_paths)

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping as MappingABC
+from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
 import math
 from statistics import median, pvariance
 from typing import Mapping, Sequence
 
 GAP_OUTLIER_K = 3.0
 CANONICAL_MISSING = "__missing__"
+DESCRIPTOR_LIST_DELIMITERS = (",", ";", "|", "/")
+DESCRIPTOR_MAX_VALUES_PER_FIELD = 5
 CANONICAL_COSTUME_TYPE_VOCABULARY = frozenset(
     {
         "ballgown",
@@ -100,6 +102,115 @@ def _get_descriptor_record(
     if not isinstance(record, MappingABC):
         raise ValueError(f"descriptor record for {photo_id} must be a mapping")
     return record
+
+
+def _normalize_descriptor_key_part(key: object) -> str:
+    return str(key).strip().replace(".", "_").replace(" ", "_")
+
+
+def _flatten_descriptor_record(
+    record: Mapping[str, object],
+    *,
+    prefix: str = "",
+) -> dict[str, object]:
+    flattened: dict[str, object] = {}
+    for raw_key in sorted(record.keys(), key=str):
+        key_part = _normalize_descriptor_key_part(raw_key)
+        if not key_part:
+            continue
+        field_name = f"{prefix}_{key_part}" if prefix else key_part
+        value = record[raw_key]
+        if isinstance(value, MappingABC):
+            flattened.update(_flatten_descriptor_record(value, prefix=field_name))
+            continue
+        flattened[field_name] = value
+    return flattened
+
+
+def _get_flattened_descriptor_record(
+    descriptors: Mapping[str, object],
+    *,
+    photo_id: str,
+) -> dict[str, object]:
+    return _flatten_descriptor_record(_get_descriptor_record(descriptors, photo_id=photo_id))
+
+
+def normalize_descriptor_tokens(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_tokens = [value]
+    elif isinstance(value, SequenceABC) and not isinstance(value, (str, bytes)):
+        raw_tokens = [str(part) for part in value]
+    else:
+        raw_tokens = [str(value)]
+
+    normalized: list[str] = []
+    for token in raw_tokens:
+        pending = [token.lower()]
+        for delimiter in DESCRIPTOR_LIST_DELIMITERS:
+            next_pending: list[str] = []
+            for part in pending:
+                next_pending.extend(part.split(delimiter))
+            pending = next_pending
+        normalized.extend(part.strip() for part in pending if part.strip())
+    return sorted(set(normalized))[:DESCRIPTOR_MAX_VALUES_PER_FIELD]
+
+
+def _field_is_multivalue(
+    records: Sequence[Mapping[str, object]],
+    *,
+    field_name: str,
+) -> bool:
+    for record in records:
+        if field_name not in record:
+            continue
+        value = record[field_name]
+        if isinstance(value, SequenceABC) and not isinstance(value, (str, bytes)):
+            return True
+        if len(normalize_descriptor_tokens(value)) > 1:
+            return True
+    return False
+
+
+def _normalize_scalar_descriptor_value(value: object) -> str:
+    normalized = normalize_descriptor_tokens(value)
+    if not normalized:
+        return CANONICAL_MISSING
+    return normalized[0]
+
+
+def build_side_descriptor_features(
+    side_name: str,
+    photo_records: Sequence[Mapping[str, object]],
+    *,
+    field_names: Sequence[str],
+    multivalue_fields: set[str],
+    tie_break_index: int,
+) -> dict[str, str]:
+    row: dict[str, str] = {}
+    for field_name in field_names:
+        feature_prefix = f"{side_name}_{field_name}"
+        if field_name in multivalue_fields:
+            aggregated_tokens = sorted(
+                {
+                    token
+                    for record in photo_records
+                    for token in normalize_descriptor_tokens(record.get(field_name))
+                }
+            )[:DESCRIPTOR_MAX_VALUES_PER_FIELD]
+            for index in range(DESCRIPTOR_MAX_VALUES_PER_FIELD):
+                feature_name = f"{feature_prefix}_{index + 1:02d}"
+                if index < len(aggregated_tokens):
+                    row[feature_name] = aggregated_tokens[index]
+                else:
+                    row[feature_name] = CANONICAL_MISSING
+            continue
+
+        values = [_normalize_scalar_descriptor_value(record.get(field_name)) for record in photo_records]
+        tie_break_value = _normalize_scalar_descriptor_value(photo_records[tie_break_index].get(field_name))
+        row[feature_prefix] = aggregate_window_descriptors(values, tie_break_value=tie_break_value)
+    return row
 
 
 def _normalize_embedding(value: Sequence[float]) -> list[float]:
@@ -224,46 +335,42 @@ def build_candidate_feature_row(
         _require_photo_id(candidate, "frame_05_photo_id"),
     ]
     descriptor_map = {photo_id: value for photo_id, value in descriptors.items() if isinstance(photo_id, str)}
-    left_costume_values = [
-        normalize_descriptor_value(
-            _get_descriptor_record(descriptor_map, photo_id=photo_id).get("costume_type"),
-            allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY,
-        )
-        for photo_id in left_photo_ids
+    left_descriptor_records = [
+        _get_flattened_descriptor_record(descriptor_map, photo_id=photo_id) for photo_id in left_photo_ids
     ]
-    right_costume_values = [
-        normalize_descriptor_value(
-            _get_descriptor_record(descriptor_map, photo_id=photo_id).get("costume_type"),
-            allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY,
-        )
-        for photo_id in right_photo_ids
+    right_descriptor_records = [
+        _get_flattened_descriptor_record(descriptor_map, photo_id=photo_id) for photo_id in right_photo_ids
     ]
-    left_costume_value = aggregate_window_descriptors(
-        left_costume_values,
-        tie_break_value=left_costume_values[-1],
-        allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY,
+    candidate_descriptor_records = left_descriptor_records + right_descriptor_records
+    field_names = sorted(
+        {
+            field_name
+            for record in candidate_descriptor_records
+            for field_name in record
+        }
     )
-    right_costume_value = aggregate_window_descriptors(
-        right_costume_values,
-        tie_break_value=right_costume_values[0],
-        allowed_values=CANONICAL_COSTUME_TYPE_VOCABULARY,
+    multivalue_fields = {
+        field_name
+        for field_name in field_names
+        if _field_is_multivalue(candidate_descriptor_records, field_name=field_name)
+    }
+    row.update(
+        build_side_descriptor_features(
+            "left",
+            left_descriptor_records,
+            field_names=field_names,
+            multivalue_fields=multivalue_fields,
+            tie_break_index=-1,
+        )
     )
     row.update(
-        {
-            "costume_type_left_value": left_costume_value,
-            "costume_type_right_value": right_costume_value,
-            "costume_type_changed": int(left_costume_value != right_costume_value),
-            "costume_type_left_missing": int(CANONICAL_MISSING in left_costume_values),
-            "costume_type_right_missing": int(CANONICAL_MISSING in right_costume_values),
-            "costume_type_left_consistency": sum(
-                value == left_costume_value for value in left_costume_values
-            )
-            / len(left_costume_values),
-            "costume_type_right_consistency": sum(
-                value == right_costume_value for value in right_costume_values
-            )
-            / len(right_costume_values),
-        }
+        build_side_descriptor_features(
+            "right",
+            right_descriptor_records,
+            field_names=field_names,
+            multivalue_fields=multivalue_fields,
+            tie_break_index=0,
+        )
     )
 
     if embeddings is None:
