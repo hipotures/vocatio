@@ -18,6 +18,7 @@ from rich.progress import (
     TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
+    TimeRemainingColumn,
 )
 
 from lib.caption_scene_common import (
@@ -62,6 +63,7 @@ def build_progress_columns() -> tuple[object, ...]:
         MofNCompleteColumn(),
         TaskProgressColumn(),
         TimeElapsedColumn(),
+        TimeRemainingColumn(),
     )
 
 
