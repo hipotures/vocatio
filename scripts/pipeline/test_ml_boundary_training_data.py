@@ -461,3 +461,79 @@ def test_load_training_data_bundle_extends_descriptor_registry_from_dataset_anno
     assert bundle.validation_rows["right_appearance_accents_01"].tolist() == ["blue"]
     assert bundle.validation_rows["right_appearance_accents_02"].tolist() == ["gold"]
     assert bundle.validation_rows["right_appearance_accents_03"].tolist() == ["silver"]
+
+
+def test_load_training_data_bundle_resolves_default_annotation_dir_for_corpus_dataset(
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspace"
+    corpus_dir = workspace_dir / "ml_boundary_corpus"
+    dataset_path = corpus_dir / "ml_boundary_candidates.corpus.csv"
+    split_manifest_path = corpus_dir / "ml_boundary_splits.csv"
+    annotation_dir = workspace_dir / "photo_pre_model_annotations"
+    corpus_dir.mkdir(parents=True)
+
+    row = _candidate_row(day_id="20250324", segment_type="performance", boundary="1")
+    _write_candidate_csv(dataset_path, [row])
+    _write_split_manifest(
+        split_manifest_path,
+        [{"candidate_id": row["candidate_id"], "split_name": "train"}],
+    )
+    default_payload = {
+        "people_count": "1",
+        "performer_view": "solo",
+        "upper_garment": "top",
+        "lower_garment": "skirt",
+        "sleeves": "short",
+        "leg_coverage": "bare",
+        "dominant_colors": ["white"],
+        "headwear": "none",
+        "footwear": "ballet_shoes",
+        "props": ["none"],
+        "dance_style_hint": "ballet",
+    }
+    for frame_index in range(1, 4):
+        _write_annotation_payload(
+            annotation_dir,
+            relative_path=f"cam/20250324-p{frame_index}.jpg",
+            data=default_payload,
+        )
+
+    bundle = load_training_data_bundle(
+        dataset_path,
+        split_manifest_path=split_manifest_path,
+        mode="tabular_only",
+        require_train_validation=False,
+    )
+
+    assert bundle.annotation_dir == annotation_dir
+    assert bundle.train_rows["left_upper_garment"].tolist() == ["top"]
+    assert bundle.missing_annotation_photo_count == 2
+
+
+def test_load_training_data_bundle_skips_missing_counts_when_default_annotation_dir_is_absent(
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspace"
+    corpus_dir = workspace_dir / "ml_boundary_corpus"
+    dataset_path = corpus_dir / "ml_boundary_candidates.corpus.csv"
+    split_manifest_path = corpus_dir / "ml_boundary_splits.csv"
+    corpus_dir.mkdir(parents=True)
+
+    row = _candidate_row(day_id="20250324", segment_type="performance", boundary="1")
+    _write_candidate_csv(dataset_path, [row])
+    _write_split_manifest(
+        split_manifest_path,
+        [{"candidate_id": row["candidate_id"], "split_name": "train"}],
+    )
+
+    bundle = load_training_data_bundle(
+        dataset_path,
+        split_manifest_path=split_manifest_path,
+        mode="tabular_only",
+        require_train_validation=False,
+    )
+
+    assert bundle.annotation_dir is None
+    assert bundle.missing_annotation_photo_count == 0
+    assert bundle.missing_annotation_candidate_count == 0

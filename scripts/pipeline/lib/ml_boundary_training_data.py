@@ -6,6 +6,7 @@ from pathlib import Path
 
 from lib.ml_boundary_features import build_candidate_feature_row
 from lib.photo_pre_model_annotations import (
+    DEFAULT_OUTPUT_DIRNAME,
     build_dataset_photo_pre_model_descriptor_field_registry,
     load_photo_pre_model_annotations_by_relative_path,
 )
@@ -229,6 +230,7 @@ def load_training_data_bundle(
         candidate_frame,
         split_manifest_frame=split_manifest_frame,
     )
+    resolved_annotation_dir = _resolve_annotation_dir(dataset_path, annotation_dir=annotation_dir)
     (
         joined_frame,
         derived_feature_columns,
@@ -236,7 +238,7 @@ def load_training_data_bundle(
         missing_annotation_candidate_count,
     ) = _derive_feature_view(
         joined_frame,
-        annotation_dir=annotation_dir,
+        annotation_dir=resolved_annotation_dir,
     )
     train_rows = TrainingTable(
         [row for row in joined_frame.rows if row["split_name"] == "train"]
@@ -269,7 +271,7 @@ def load_training_data_bundle(
         train_rows=train_rows,
         validation_rows=validation_rows,
         test_rows=test_rows,
-        annotation_dir=annotation_dir,
+        annotation_dir=resolved_annotation_dir,
         split_manifest_scope=split_manifest_scope,
         split_counts_by_name=_split_counts(joined_frame["split_name"]),
         missing_annotation_photo_count=missing_annotation_photo_count,
@@ -384,6 +386,18 @@ def _split_counts(split_values: ColumnValues) -> dict[str, int]:
         normalized = str(split_name)
         counts[normalized] = counts.get(normalized, 0) + 1
     return counts
+
+
+def _resolve_annotation_dir(dataset_path: Path, *, annotation_dir: Path | None) -> Path | None:
+    if annotation_dir is not None:
+        return annotation_dir
+    candidate_dirs = [dataset_path.parent / DEFAULT_OUTPUT_DIRNAME]
+    if dataset_path.parent.name == "ml_boundary_corpus":
+        candidate_dirs.insert(0, dataset_path.parent.parent / DEFAULT_OUTPUT_DIRNAME)
+    for candidate_dir in candidate_dirs:
+        if candidate_dir.exists():
+            return candidate_dir
+    return None
 
 
 def _derive_feature_view(
