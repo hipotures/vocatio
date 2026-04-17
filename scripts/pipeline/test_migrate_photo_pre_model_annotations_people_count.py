@@ -95,6 +95,41 @@ class MigratePhotoPreModelAnnotationsPeopleCountTests(unittest.TestCase):
 
             self.assertFalse(changed)
 
+    def test_migrate_annotation_file_maps_none_to_no_visible_people(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "cam" / "a.hif.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "photo_pre_model_v1",
+                        "relative_path": "cam/a.hif",
+                        "generated_at": "2026-04-17T10:00:00+02:00",
+                        "model": "test-model",
+                        "data": {
+                            "people_count": "none",
+                            "performer_view": "unclear",
+                            "upper_garment": "unclear",
+                            "lower_garment": "unclear",
+                            "sleeves": "unclear",
+                            "leg_coverage": "unclear",
+                            "dominant_colors": ["unclear"],
+                            "headwear": "unclear",
+                            "footwear": "unclear",
+                            "props": ["none"],
+                            "dance_style_hint": "unclear",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            changed = migrate_people_count.migrate_annotation_file(path)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(changed)
+            self.assertEqual(payload["data"]["people_count"], "no_visible_people")
+
 
 if __name__ == "__main__":
     unittest.main()

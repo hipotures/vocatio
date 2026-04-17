@@ -11,7 +11,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 SCHEMA_VERSION = "photo_pre_model_v1"
 DEFAULT_OUTPUT_DIRNAME = "photo_pre_model_annotations"
 
-PEOPLE_COUNT_VALUES = ["solo", "duet_trio", "quartet", "small_group", "large_group"]
+PEOPLE_COUNT_VALUES = ["no_visible_people", "solo", "duet_trio", "quartet", "small_group", "large_group"]
 PERFORMER_VIEW_VALUES = ["solo", "duo", "group", "unclear"]
 UPPER_GARMENT_VALUES = ["leotard", "top", "shirt", "jacket", "dress_upper", "unitard_upper", "mixed", "unclear"]
 LOWER_GARMENT_VALUES = ["tutu", "skirt", "dress", "pants", "shorts", "unitard", "mixed", "unclear"]
@@ -153,11 +153,16 @@ def canonicalize_people_count(value: object) -> str:
     if normalized in PEOPLE_COUNT_VALUES:
         return normalized
     legacy_aliases = {
+        "0": "no_visible_people",
         "1": "solo",
         "2": "duet_trio",
         "3": "duet_trio",
         "4": "quartet",
         "4plus": "small_group",
+        "none": "no_visible_people",
+        "no_people": "no_visible_people",
+        "no visible people": "no_visible_people",
+        "no_visible_people": "no_visible_people",
     }
     if normalized in legacy_aliases:
         return legacy_aliases[normalized]
@@ -187,8 +192,10 @@ def repair_annotation_json_text(object_text: str) -> str:
 
 
 def _canonicalize_people_count_from_number(value: int) -> str:
-    if value <= 0:
+    if value < 0:
         raise ValueError(f"Unsupported people_count value: {value!r}")
+    if value == 0:
+        return "no_visible_people"
     if value == 1:
         return "solo"
     if value in {2, 3}:
@@ -209,6 +216,7 @@ def build_prompt_only_json_prompt() -> str:
         "people_count, performer_view, upper_garment, lower_garment, sleeves, leg_coverage, "
         "dominant_colors, headwear, footwear, props, dance_style_hint. "
         f"people_count must be a JSON string and one of: {', '.join(PEOPLE_COUNT_VALUES)}. "
+        "Use people_count=no_visible_people when no person is visible in the frame. "
         f"performer_view must be one of: {', '.join(PERFORMER_VIEW_VALUES)}. "
         f"upper_garment must be one of: {', '.join(UPPER_GARMENT_VALUES)}. "
         f"lower_garment must be one of: {', '.join(LOWER_GARMENT_VALUES)}. "

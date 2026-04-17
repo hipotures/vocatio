@@ -243,6 +243,31 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
 
             self.assertEqual(payload["people_count"], "quartet")
 
+    def test_request_annotation_canonicalizes_zero_people_count(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "frame.jpg"
+            image_path.write_bytes(b"fake-image")
+            response = mock.Mock(
+                text='{"people_count": 0, "performer_view": "unclear", "upper_garment": "unclear", "lower_garment": "unclear", "sleeves": "unclear", "leg_coverage": "unclear", "dominant_colors": ["unclear"], "headwear": "unclear", "footwear": "unclear", "props": ["none"], "dance_style_hint": "unclear"}',
+                json_payload=None,
+                raw_response={"provider": "mock"},
+                metrics={"prompt_tokens": 7, "completion_tokens": 3},
+            )
+
+            with mock.patch.object(pre_model, "run_vlm_request", return_value=response):
+                payload, _timings = pre_model.request_annotation(
+                    provider="ollama",
+                    base_url="http://127.0.0.1:11434",
+                    model_name="demo-model",
+                    prompt="Describe costume.",
+                    max_tokens=256,
+                    temperature=0.0,
+                    timeout_seconds=30.0,
+                    image_path=image_path,
+                )
+
+            self.assertEqual(payload["people_count"], "no_visible_people")
+
     def test_parse_annotation_content_repairs_unquoted_people_count_token(self):
         payload = pre_model.parse_annotation_content(
             '{"people_count": 4plus, "performer_view": "group", "upper_garment": "top", "lower_garment": "unitard", "sleeves": "none", "leg_coverage": "long", "dominant_colors": ["red", "black"], "headwear": "none", "footwear": "unclear", "props": ["none"], "dance_style_hint": "unclear"}'
