@@ -1,4 +1,5 @@
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -317,3 +318,40 @@ def test_load_training_data_bundle_requires_split_manifest_coverage(tmp_path: Pa
             split_manifest_path=split_manifest_path,
             mode="tabular_only",
         )
+
+
+def test_load_training_data_bundle_reports_missing_annotation_counts(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    annotation_dir = tmp_path / "photo_pre_model_annotations"
+    annotation_dir.mkdir()
+
+    row = _candidate_row(day_id="20250324", segment_type="performance", boundary="1")
+    _write_candidate_csv(dataset_path, [row])
+    _write_split_manifest(
+        split_manifest_path,
+        [{"candidate_id": row["candidate_id"], "split_name": "train"}],
+    )
+
+    (annotation_dir / "cam").mkdir()
+    (annotation_dir / "cam" / "20250324-p1.jpg.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "photo_pre_model_v1",
+                "relative_path": "cam/20250324-p1.jpg",
+                "data": {"upper_garment": "top"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_training_data_bundle(
+        dataset_path,
+        split_manifest_path=split_manifest_path,
+        mode="tabular_only",
+        require_train_validation=False,
+        annotation_dir=annotation_dir,
+    )
+
+    assert bundle.missing_annotation_photo_count == 4
+    assert bundle.missing_annotation_candidate_count == 1
