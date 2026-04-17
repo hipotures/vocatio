@@ -11,6 +11,7 @@ from lib.ml_boundary_features import (
     CANONICAL_MISSING,
     build_candidate_feature_row,
     cosine_distance,
+    normalize_descriptor_value,
 )
 
 
@@ -40,6 +41,19 @@ def test_cosine_distance_rejects_invalid_components_and_shapes() -> None:
 
     with pytest.raises(ValueError, match="shapes must match"):
         cosine_distance([1.0, 0.0], [1.0, 0.0, 0.0])
+
+
+def test_normalize_descriptor_value_enforces_allowed_values() -> None:
+    allowed_values = frozenset({"top", "jacket"})
+
+    assert normalize_descriptor_value(None, allowed_values=allowed_values) == CANONICAL_MISSING
+    assert normalize_descriptor_value("  TOP  ", allowed_values=allowed_values) == "top"
+
+    with pytest.raises(ValueError, match="strings or null"):
+        normalize_descriptor_value(True, allowed_values=allowed_values)
+
+    with pytest.raises(ValueError, match="canonical vocabulary"):
+        normalize_descriptor_value("cape", allowed_values=allowed_values)
 
 
 def test_build_candidate_feature_row_computes_ordered_gap_features() -> None:
