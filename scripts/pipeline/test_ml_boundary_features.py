@@ -238,6 +238,67 @@ def test_build_candidate_feature_row_splits_text_values_on_list_delimiters_only(
     assert row["right_props_03"] == "ribbon"
 
 
+def test_build_candidate_feature_row_uses_schema_stable_descriptor_keys() -> None:
+    candidate = {
+        "frame_01_timestamp": 0.0,
+        "frame_02_timestamp": 0.1,
+        "frame_03_timestamp": 0.2,
+        "frame_04_timestamp": 20.2,
+        "frame_05_timestamp": 20.3,
+        "frame_01_photo_id": "p1",
+        "frame_02_photo_id": "p2",
+        "frame_03_photo_id": "p3",
+        "frame_04_photo_id": "p4",
+        "frame_05_photo_id": "p5",
+    }
+    sparse_descriptors = {
+        "p1": {"upper_garment": "Top"},
+        "p2": {"upper_garment": "top"},
+        "p3": {"upper_garment": "TOP"},
+        "p4": {"dominant_colors": ["Blue"]},
+    }
+    empty_descriptors = {}
+
+    sparse_row = build_candidate_feature_row(candidate, descriptors=sparse_descriptors, embeddings=None)
+    empty_row = build_candidate_feature_row(candidate, descriptors=empty_descriptors, embeddings=None)
+
+    assert set(sparse_row) == set(empty_row)
+    assert sparse_row["left_people_count"] == CANONICAL_MISSING
+    assert sparse_row["left_upper_garment"] == "top"
+    assert sparse_row["right_dominant_colors_01"] == "blue"
+    assert empty_row["left_upper_garment"] == CANONICAL_MISSING
+    assert empty_row["right_dominant_colors_01"] == CANONICAL_MISSING
+
+
+def test_build_candidate_feature_row_ignores_malformed_multivalue_items() -> None:
+    candidate = {
+        "frame_01_timestamp": 0.0,
+        "frame_02_timestamp": 0.1,
+        "frame_03_timestamp": 0.2,
+        "frame_04_timestamp": 20.2,
+        "frame_05_timestamp": 20.3,
+        "frame_01_photo_id": "p1",
+        "frame_02_photo_id": "p2",
+        "frame_03_photo_id": "p3",
+        "frame_04_photo_id": "p4",
+        "frame_05_photo_id": "p5",
+    }
+    descriptors = {
+        "p1": {"dominant_colors": ["White", None, True, "", " / ", "Blue"]},
+        "p2": {"dominant_colors": [False, "blue"]},
+        "p3": {"props": ["fan", None, True, "", " ribbon "]},
+    }
+
+    row = build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
+
+    assert row["left_dominant_colors_01"] == "blue"
+    assert row["left_dominant_colors_02"] == "white"
+    assert row["left_dominant_colors_03"] == CANONICAL_MISSING
+    assert row["left_props_01"] == "fan"
+    assert row["left_props_02"] == "ribbon"
+    assert row["left_props_03"] == CANONICAL_MISSING
+
+
 def test_build_candidate_feature_row_rejects_malformed_descriptor_record_shape() -> None:
     candidate = {
         "frame_01_timestamp": 0.0,

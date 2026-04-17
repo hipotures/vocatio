@@ -51,6 +51,28 @@ REQUIRED_FIELDS = {
     "props",
     "dance_style_hint",
 }
+PHOTO_PRE_MODEL_DESCRIPTOR_FIELD_REGISTRY = {
+    "people_count": "scalar",
+    "performer_view": "scalar",
+    "upper_garment": "scalar",
+    "lower_garment": "scalar",
+    "sleeves": "scalar",
+    "leg_coverage": "scalar",
+    "dominant_colors": "multivalue",
+    "headwear": "scalar",
+    "footwear": "scalar",
+    "props": "multivalue",
+    "dance_style_hint": "scalar",
+}
+PHOTO_PRE_MODEL_MULTIVALUE_FIELDS = frozenset(
+    field_name
+    for field_name, field_kind in PHOTO_PRE_MODEL_DESCRIPTOR_FIELD_REGISTRY.items()
+    if field_kind == "multivalue"
+)
+
+
+def get_photo_pre_model_descriptor_field_registry() -> Dict[str, str]:
+    return dict(PHOTO_PRE_MODEL_DESCRIPTOR_FIELD_REGISTRY)
 
 
 def build_annotation_output_path(output_dir: Path, relative_path: str) -> Path:

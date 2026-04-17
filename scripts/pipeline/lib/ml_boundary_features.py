@@ -6,10 +6,20 @@ import math
 from statistics import median, pvariance
 from typing import Mapping, Sequence
 
+from lib.photo_pre_model_annotations import (
+    get_photo_pre_model_descriptor_field_registry,
+)
+
 GAP_OUTLIER_K = 3.0
 CANONICAL_MISSING = "__missing__"
 DESCRIPTOR_LIST_DELIMITERS = (",", ";", "|", "/")
 DESCRIPTOR_MAX_VALUES_PER_FIELD = 5
+DESCRIPTOR_FIELD_REGISTRY = get_photo_pre_model_descriptor_field_registry()
+DESCRIPTOR_MULTIVALUE_FIELDS = frozenset(
+    field_name
+    for field_name, field_kind in DESCRIPTOR_FIELD_REGISTRY.items()
+    if field_kind == "multivalue"
+)
 CANONICAL_COSTUME_TYPE_VOCABULARY = frozenset(
     {
         "ballgown",
@@ -136,14 +146,20 @@ def _get_flattened_descriptor_record(
 
 
 def normalize_descriptor_tokens(value: object) -> list[str]:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return []
     if isinstance(value, str):
         raw_tokens = [value]
     elif isinstance(value, SequenceABC) and not isinstance(value, (str, bytes)):
-        raw_tokens = [str(part) for part in value]
+        raw_tokens = []
+        for part in value:
+            if isinstance(part, str):
+                raw_tokens.append(part)
+                continue
+            if part is None or isinstance(part, bool):
+                continue
     else:
-        raw_tokens = [str(value)]
+        return []
 
     normalized: list[str] = []
     for token in raw_tokens:
@@ -155,22 +171,6 @@ def normalize_descriptor_tokens(value: object) -> list[str]:
             pending = next_pending
         normalized.extend(part.strip() for part in pending if part.strip())
     return sorted(set(normalized))[:DESCRIPTOR_MAX_VALUES_PER_FIELD]
-
-
-def _field_is_multivalue(
-    records: Sequence[Mapping[str, object]],
-    *,
-    field_name: str,
-) -> bool:
-    for record in records:
-        if field_name not in record:
-            continue
-        value = record[field_name]
-        if isinstance(value, SequenceABC) and not isinstance(value, (str, bytes)):
-            return True
-        if len(normalize_descriptor_tokens(value)) > 1:
-            return True
-    return False
 
 
 def _normalize_scalar_descriptor_value(value: object) -> str:
@@ -341,25 +341,13 @@ def build_candidate_feature_row(
     right_descriptor_records = [
         _get_flattened_descriptor_record(descriptor_map, photo_id=photo_id) for photo_id in right_photo_ids
     ]
-    candidate_descriptor_records = left_descriptor_records + right_descriptor_records
-    field_names = sorted(
-        {
-            field_name
-            for record in candidate_descriptor_records
-            for field_name in record
-        }
-    )
-    multivalue_fields = {
-        field_name
-        for field_name in field_names
-        if _field_is_multivalue(candidate_descriptor_records, field_name=field_name)
-    }
+    field_names = sorted(DESCRIPTOR_FIELD_REGISTRY)
     row.update(
         build_side_descriptor_features(
             "left",
             left_descriptor_records,
             field_names=field_names,
-            multivalue_fields=multivalue_fields,
+            multivalue_fields=DESCRIPTOR_MULTIVALUE_FIELDS,
             tie_break_index=-1,
         )
     )
@@ -368,7 +356,7 @@ def build_candidate_feature_row(
             "right",
             right_descriptor_records,
             field_names=field_names,
-            multivalue_fields=multivalue_fields,
+            multivalue_fields=DESCRIPTOR_MULTIVALUE_FIELDS,
             tie_break_index=0,
         )
     )
