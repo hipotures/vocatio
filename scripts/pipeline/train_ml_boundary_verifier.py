@@ -115,7 +115,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--train-minutes",
         type=float,
-        help="Optional training time limit in minutes shared across both predictors.",
+        help="Optional training time limit in minutes applied separately to each predictor.",
     )
     return parser.parse_args(argv)
 
