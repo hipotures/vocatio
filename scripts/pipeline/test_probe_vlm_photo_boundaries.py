@@ -49,6 +49,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "on",
                 "--json-validation-mode",
                 "relaxed",
+                "--ml-model-run-id",
+                "day-20260323-best",
                 "--ollama-think",
                 "false",
                 "--dump-debug-dir",
@@ -63,6 +65,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(args.temperature, 0.25)
         self.assertEqual(args.response_schema_mode, "on")
         self.assertEqual(args.json_validation_mode, "relaxed")
+        self.assertEqual(args.ml_model_run_id, "day-20260323-best")
         self.assertEqual(args.ollama_think, "false")
         self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
         self.assertFalse(hasattr(args, "write_gui_index"))
@@ -73,6 +76,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(args.boundary_gap_seconds, 10)
         self.assertEqual(args.json_validation_mode, "strict")
         self.assertEqual(args.photo_manifest_csv, "media_manifest.csv")
+        self.assertEqual(args.ml_model_run_id, "")
 
     def test_parse_args_accepts_provider_other_than_ollama(self):
         args = probe.parse_args(["/tmp/day", "--provider", "vllm"])
@@ -110,6 +114,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "VLM_RESPONSE_SCHEMA_MODE=on",
                         "VLM_JSON_VALIDATION_MODE=relaxed",
                         "VLM_PHOTO_PRE_MODEL_DIR=custom_pre_model",
+                        "VLM_ML_MODEL_RUN_ID=day-20260323-best",
                         "VLM_DUMP_DEBUG_DIR=/tmp/vlm-debug",
                     ]
                 ),
@@ -136,6 +141,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(args.response_schema_mode, "on")
             self.assertEqual(args.json_validation_mode, "relaxed")
             self.assertEqual(args.photo_pre_model_dir, "custom_pre_model")
+            self.assertEqual(args.ml_model_run_id, "day-20260323-best")
             self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
 
     def test_build_response_schema_uses_boundary_after_frame_and_dynamic_notes(self):
@@ -251,47 +257,60 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             ],
         )
 
-    def test_build_gap_hint_lines_uses_boundary_scores_when_available(self):
-        rows = [
-            {"relative_path": "cam/a.hif", "start_epoch_ms": "1000"},
-            {"relative_path": "cam/b.hif", "start_epoch_ms": "45000"},
-            {"relative_path": "cam/c.hif", "start_epoch_ms": "46000"},
-        ]
-        boundary_rows_by_pair = {
-            ("cam/a.hif", "cam/b.hif"): {
-                "dino_cosine_distance": "0.709211",
-                "boundary_score": "0.501221",
-            },
-            ("cam/b.hif", "cam/c.hif"): {
-                "dino_cosine_distance": "0.040000",
-                "boundary_score": "0.020000",
-            },
-        }
+    def test_resolve_ml_model_run_selects_latest_non_hidden_directory(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace_dir = Path(tmp_dir)
+            model_root = workspace_dir / "ml_boundary_corpus" / "ml_boundary_models"
+            model_root.mkdir(parents=True)
+            hidden_dir = model_root / ".ignore-me"
+            hidden_dir.mkdir()
+            older_dir = model_root / "run-001"
+            older_dir.mkdir()
+            newer_dir = model_root / "run-002"
+            newer_dir.mkdir()
+            self.assertEqual(
+                probe.resolve_ml_model_run(workspace_dir, ""),
+                ("run-002", newer_dir.resolve()),
+            )
+            self.assertEqual(
+                probe.resolve_ml_model_run(workspace_dir, "run-001"),
+                ("run-001", older_dir.resolve()),
+            )
+            self.assertEqual(
+                probe.resolve_ml_model_run(workspace_dir, "missing-run"),
+                ("missing-run", None),
+            )
+
+    def test_build_ml_hint_lines_renders_task_language(self):
+        lines = probe.build_ml_hint_lines(
+            probe.MlHintPrediction(
+                boundary_prediction=True,
+                boundary_confidence=0.82,
+                boundary_positive_probability=0.82,
+                segment_type_prediction="performance",
+                segment_type_confidence=0.74,
+            )
+        )
         self.assertEqual(
-            probe.build_gap_hint_lines(rows, boundary_rows_by_pair),
+            lines,
             [
-                "gap_01_02: visual_distance=0.709 (high), heuristic_boundary_score=0.501 (medium)",
-                "gap_02_03: visual_distance=0.040 (low), heuristic_boundary_score=0.020 (low)",
+                "ML hint for the main candidate gap in this window: likely cut at the main candidate gap (confidence 0.82).",
+                "ML hint for the likely segment on the right side of the candidate gap: dance (confidence 0.74).",
             ],
         )
 
-    def test_build_gap_hint_lines_marks_missing_visual_hints_as_unknown(self):
-        rows = [
-            {"relative_path": "cam/a.hif", "start_epoch_ms": "1000"},
-            {"relative_path": "cam/b.hif", "start_epoch_ms": "2000"},
-        ]
+    def test_build_ml_hint_lines_reports_unavailable_when_prediction_missing(self):
         self.assertEqual(
-            probe.build_gap_hint_lines(rows, {}),
-            [
-                "gap_01_02: visual_distance=unknown (unknown), heuristic_boundary_score=unknown (unknown)",
-            ],
+            probe.build_ml_hint_lines(None),
+            ["ML hints are unavailable for this window."],
         )
 
-    def test_build_user_prompt_mentions_single_cut_decisions_and_heuristic_hints(self):
+    def test_build_user_prompt_mentions_ml_hints_and_not_raw_heuristics(self):
         prompt = probe.build_user_prompt(
             window_size=2,
-            gap_hint_lines=[
-                "gap_01_02: visual_distance=0.150 (medium), heuristic_boundary_score=0.200 (low)",
+            ml_hint_lines=[
+                "ML hint for the main candidate gap in this window: likely no cut at the main candidate gap (confidence 0.88).",
+                "ML hint for the likely segment on the right side of the candidate gap: ceremony (confidence 0.74).",
             ],
         )
         self.assertIn('"no_cut"', prompt)
@@ -303,9 +322,12 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIn("Reason about continuity from left to right", prompt)
         self.assertIn("Decision priority", prompt)
         self.assertIn("images", prompt)
-        self.assertIn("heuristic hints", prompt)
-        self.assertIn("Heuristic hints for consecutive gaps", prompt)
-        self.assertIn("gap_01_02: visual_distance=0.150 (medium)", prompt)
+        self.assertIn("ML hints", prompt)
+        self.assertIn("ML hint for the main candidate gap in this window", prompt)
+        self.assertIn("likely no cut at the main candidate gap", prompt)
+        self.assertIn("likely segment on the right side of the candidate gap: ceremony", prompt)
+        self.assertNotIn("Heuristic hints for consecutive gaps", prompt)
+        self.assertNotIn("visual_distance=", prompt)
         self.assertIn("audience or backstage insert", prompt)
         self.assertIn("floor rehearsal / floor test / stage test", prompt)
         self.assertIn("ceremony / award / host / result reading", prompt)
@@ -319,19 +341,18 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIn("group shot followed by a solo shot of one dancer from the same group", prompt)
         self.assertIn("do not create a boundary only because fewer or more dancers are visible", prompt)
         self.assertIn("you must return null", prompt)
-        self.assertNotIn("time_gap_seconds", prompt)
         self.assertIn("If more than one real boundary appears", prompt)
         self.assertIn('If there is no clear evidence for a boundary, choose "no_cut"', prompt)
         self.assertIn("Keep frame notes short and concrete", prompt)
         self.assertIn('"frame_notes"', prompt)
         self.assertIn('"primary_evidence"', prompt)
         self.assertIn('"summary"', prompt)
-        self.assertNotIn("confidence", prompt.lower())
+        self.assertIn("confidence", prompt.lower())
 
     def test_build_user_prompt_appends_extra_instructions(self):
         prompt = probe.build_user_prompt(
             window_size=1,
-            gap_hint_lines=[],
+            ml_hint_lines=[],
             extra_instructions="Prefer strong performer identity changes over lighting changes.",
         )
         self.assertIn("Additional instructions", prompt)
@@ -340,7 +361,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
     def test_build_user_prompt_schema_mode_mentions_boundary_after_frame(self):
         prompt = probe.build_user_prompt(
             window_size=3,
-            gap_hint_lines=["gap_01_02: visual_distance=0.100 (medium), heuristic_boundary_score=0.200 (low)"],
+            ml_hint_lines=["ML hint for the main candidate gap in this window: likely cut at the main candidate gap (confidence 0.82)."],
             extra_instructions="",
             response_schema_mode="on",
         )
@@ -351,59 +372,78 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertNotIn('"decision"', prompt)
         self.assertIn("<one of: null, frame_01, frame_02>", prompt)
 
-    def test_build_user_prompt_includes_pre_model_lines_when_available(self):
-        prompt = probe.build_user_prompt(
-            window_size=2,
-            gap_hint_lines=["gap_01_02: visual_distance=0.100 (medium), heuristic_boundary_score=0.200 (low)"],
-            extra_instructions="",
-            pre_model_lines=[
-                "frame_01: people_count=solo, performer_view=solo",
-                "frame_02: people_count=duet_trio, performer_view=duo",
+    def test_build_ml_hint_lines_for_candidate_uses_model_predictions(self):
+        class FakeBoundaryPredictor:
+            def predict(self, _frame):
+                return [1]
+
+            def predict_proba(self, _frame):
+                return [{"0": 0.18, "1": 0.82}]
+
+        class FakeSegmentPredictor:
+            def predict(self, _frame):
+                return ["ceremony"]
+
+            def predict_proba(self, _frame):
+                return [{"performance": 0.12, "ceremony": 0.74, "warmup": 0.14}]
+
+        ml_hint_context = probe.MlHintContext(
+            run_id="day-20260323",
+            mode="tabular_only",
+            model_dir=Path("/tmp/fake-model"),
+            boundary_predictor=FakeBoundaryPredictor(),
+            segment_type_predictor=FakeSegmentPredictor(),
+            boundary_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45"],
+            segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45"],
+        )
+        joined_rows = []
+        for index, name in enumerate(("a", "b", "c", "d", "e"), start=1):
+            joined_rows.append(
+                {
+                    "day": "20260323",
+                    "photo_id": f"cam/{name}.hif",
+                    "relative_path": f"cam/{name}.hif",
+                    "start_epoch_ms": str(index * 1000),
+                    "thumb_path": f"/tmp/{name}.jpg",
+                }
+            )
+        lines = probe.build_ml_hint_lines_for_candidate(
+            joined_rows=joined_rows,
+            cut_index=2,
+            boundary_rows_by_pair={},
+            photo_pre_model_dir=None,
+            ml_hint_context=ml_hint_context,
+        )
+        self.assertEqual(
+            lines,
+            [
+                "ML hint for the main candidate gap in this window: likely cut at the main candidate gap (confidence 0.82).",
+                "ML hint for the likely segment on the right side of the candidate gap: ceremony (confidence 0.74).",
             ],
         )
-        self.assertIn("Optional pre-model per-image annotations", prompt)
-        self.assertIn("frame_01: people_count=solo, performer_view=solo", prompt)
-        self.assertIn("frame_02: people_count=duet_trio, performer_view=duo", prompt)
 
-    def test_build_photo_pre_model_lines_reads_existing_annotation_files(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            output_dir = Path(tmp_dir)
-            annotation_path = output_dir / "cam" / "a.hif.json"
-            annotation_path.parent.mkdir(parents=True, exist_ok=True)
-            annotation_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": "photo_pre_model_v1",
-                        "relative_path": "cam/a.hif",
-                        "generated_at": "2026-04-15T12:00:00+02:00",
-                        "model": "test-model",
-                        "data": {
-                            "people_count": "solo",
-                            "performer_view": "solo",
-                            "upper_garment": "leotard",
-                            "lower_garment": "tutu",
-                            "sleeves": "long",
-                            "leg_coverage": "long",
-                            "dominant_colors": ["blue", "white"],
-                            "headwear": "none",
-                            "footwear": "ballet_shoes",
-                            "props": ["none"],
-                            "dance_style_hint": "ballet",
-                        },
-                    }
-                ),
-                encoding="utf-8",
+    def test_build_ml_hint_lines_for_candidate_falls_back_when_model_context_missing(self):
+        joined_rows = []
+        for index, name in enumerate(("a", "b", "c", "d", "e"), start=1):
+            joined_rows.append(
+                {
+                    "day": "20260323",
+                    "photo_id": f"cam/{name}.hif",
+                    "relative_path": f"cam/{name}.hif",
+                    "start_epoch_ms": str(index * 1000),
+                    "thumb_path": f"/tmp/{name}.jpg",
+                }
             )
-            lines = probe.build_photo_pre_model_lines(
-                [{"relative_path": "cam/a.hif"}, {"relative_path": "cam/missing.hif"}],
-                output_dir,
-            )
-            self.assertEqual(
-                lines,
-                [
-                    "frame_01: people_count=solo, performer_view=solo, upper_garment=leotard, lower_garment=tutu, sleeves=long, leg_coverage=long, dominant_colors=blue|white, headwear=none, footwear=ballet_shoes, props=none, dance_style_hint=ballet"
-                ],
-            )
+        self.assertEqual(
+            probe.build_ml_hint_lines_for_candidate(
+                joined_rows=joined_rows,
+                cut_index=2,
+                boundary_rows_by_pair={},
+                photo_pre_model_dir=None,
+                ml_hint_context=None,
+            ),
+            ["ML hints are unavailable for this window."],
+        )
 
     def test_build_system_prompt_mentions_boundary_after_frame_in_schema_mode(self):
         self.assertIn("boundary_after_frame", probe.build_system_prompt("on"))
@@ -1654,7 +1694,14 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 },
             )
 
-            with mock.patch.object(probe, "run_vlm_request", return_value=response) as run_vlm_mock, mock.patch.object(
+            with mock.patch.object(
+                probe,
+                "build_ml_hint_lines_for_candidate",
+                return_value=[
+                    "ML hint for the main candidate gap in this window: likely cut at the main candidate gap (confidence 0.82).",
+                    "ML hint for the likely segment on the right side of the candidate gap: ceremony (confidence 0.74).",
+                ],
+            ), mock.patch.object(probe, "run_vlm_request", return_value=response) as run_vlm_mock, mock.patch.object(
                 probe, "build_run_id", return_value="vlm-20260414071000"
             ):
                 row_count = probe.probe_vlm_photo_boundaries(
@@ -1702,6 +1749,9 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     },
                 },
             )
+            self.assertIn("ML hint for the main candidate gap in this window", request.messages[1]["content"])
+            self.assertNotIn("Heuristic hints for consecutive gaps", request.messages[1]["content"])
+            self.assertNotIn("Optional pre-model per-image annotations", request.messages[1]["content"])
             rows = probe.read_result_rows(output_csv)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["decision"], "cut_after_4")
