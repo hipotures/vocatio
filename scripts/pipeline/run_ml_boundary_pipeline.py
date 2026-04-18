@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from rich.console import Console
+from rich.console import Group
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -23,6 +24,8 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
+from rich.table import Table
+from rich.text import Text
 
 from build_ml_boundary_candidate_dataset import CANDIDATE_ROW_HEADERS
 from lib.ml_boundary_truth import VALID_SEGMENT_TYPES
@@ -969,10 +972,35 @@ def _training_split_count(training_metadata: dict[str, object] | None, split_nam
         return 0
 
 
+def _build_segment_type_confusion_table(metrics_payload: dict[str, object]) -> Table:
+    confusion_payload = metrics_payload.get("segment_type_confusion_matrix")
+    if not isinstance(confusion_payload, dict):
+        raise ValueError("evaluation metrics missing segment_type_confusion_matrix object")
+
+    labels = sorted(VALID_SEGMENT_TYPES)
+    table = Table(title="Segment Type Confusion Matrix", expand=False)
+    table.add_column("truth\\pred", justify="left")
+    for label in labels:
+        table.add_column(label, justify="right")
+
+    for truth_label in labels:
+        row_payload = confusion_payload.get(truth_label, {})
+        if not isinstance(row_payload, dict):
+            row_payload = {}
+        table.add_row(
+            truth_label,
+            *[
+                str(int(row_payload.get(predicted_label, 0) or 0))
+                for predicted_label in labels
+            ],
+        )
+    return table
+
+
 def _render_eval_metrics_summary(
     metrics_payload: dict[str, object],
     training_metadata: dict[str, object] | None = None,
-) -> str:
+) -> Group:
     review_cost_metrics = metrics_payload.get("review_cost_metrics")
     if not isinstance(review_cost_metrics, dict):
         raise ValueError("evaluation metrics missing review_cost_metrics object")
@@ -992,13 +1020,17 @@ def _render_eval_metrics_summary(
     estimated_correction_actions = int(review_cost_metrics.get("estimated_correction_actions", 0) or 0)
     merge_run_count = int(review_cost_metrics.get("merge_run_count", 0) or 0)
     split_run_count = int(review_cost_metrics.get("split_run_count", 0) or 0)
-    return (
-        "\n"
-        "Final ML summary:\n"
-        f"Rows: train={train_row_count}, validation={validation_row_count}, test={test_row_count}\n"
-        f"Segment type: accuracy={segment_type_accuracy:.4f}, correct={segment_type_correct_count}, incorrect={segment_type_incorrect_count}\n"
-        f"Boundary: f1={boundary_f1:.4f}, correct={boundary_correct_count}, incorrect={boundary_incorrect_count}, tp={boundary_true_positive_count}, fp={boundary_false_positive_count}, fn={boundary_false_negative_count}, tn={boundary_true_negative_count}\n"
-        f"Review cost: merge_runs={merge_run_count}, split_runs={split_run_count}, estimated_actions={estimated_correction_actions}"
+    lines = [
+        "",
+        "Final ML summary:",
+        f"Rows: train={train_row_count}, validation={validation_row_count}, test={test_row_count}",
+        f"Segment type: accuracy={segment_type_accuracy:.4f}, correct={segment_type_correct_count}, incorrect={segment_type_incorrect_count}",
+        f"Boundary: f1={boundary_f1:.4f}, correct={boundary_correct_count}, incorrect={boundary_incorrect_count}, tp={boundary_true_positive_count}, fp={boundary_false_positive_count}, fn={boundary_false_negative_count}, tn={boundary_true_negative_count}",
+        f"Review cost: merge_runs={merge_run_count}, split_runs={split_run_count}, estimated_actions={estimated_correction_actions}",
+    ]
+    return Group(
+        *(Text(line, no_wrap=False, overflow="fold") for line in lines),
+        _build_segment_type_confusion_table(metrics_payload),
     )
 
 

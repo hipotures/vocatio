@@ -234,6 +234,11 @@ def test_eval_cli_writes_metrics_artifact(tmp_path: Path, monkeypatch) -> None:
         "segment_type_accuracy": 1.0,
         "segment_type_correct_count": 1,
         "segment_type_incorrect_count": 0,
+        "segment_type_confusion_matrix": {
+            "ceremony": {"ceremony": 0, "performance": 0, "warmup": 0},
+            "performance": {"ceremony": 0, "performance": 0, "warmup": 0},
+            "warmup": {"ceremony": 0, "performance": 0, "warmup": 1},
+        },
         "boundary_f1": 0.0,
         "boundary_true_positive_count": 0,
         "boundary_false_positive_count": 0,
@@ -494,6 +499,7 @@ def test_train_and_eval_cli_integration_writes_metrics(tmp_path: Path, monkeypat
     assert metrics_payload["model_mode"] == "tabular_plus_thumbnail"
     assert metrics_payload["segment_type_correct_count"] == 1
     assert metrics_payload["segment_type_incorrect_count"] == 0
+    assert metrics_payload["segment_type_confusion_matrix"]["warmup"]["warmup"] == 1
     assert metrics_payload["boundary_true_negative_count"] == 1
     assert metrics_payload["boundary_correct_count"] == 1
     assert metrics_payload["boundary_incorrect_count"] == 0

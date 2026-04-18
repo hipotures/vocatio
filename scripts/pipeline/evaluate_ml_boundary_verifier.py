@@ -10,6 +10,7 @@ from typing import Iterable, Mapping, Sequence
 from rich.console import Console
 
 from lib.ml_boundary_training_data import load_training_data_bundle
+from lib.ml_boundary_truth import VALID_SEGMENT_TYPES
 from lib.pipeline_io import atomic_write_json
 from lib.workspace_dir import resolve_workspace_dir
 from train_ml_boundary_verifier import (
@@ -229,6 +230,31 @@ def _compute_binary_confusion_counts(
     }
 
 
+def _compute_multiclass_confusion_matrix(
+    predicted: Sequence[str],
+    truth: Sequence[str],
+    *,
+    labels: Sequence[str],
+) -> dict[str, dict[str, int]]:
+    predicted_values = list(predicted)
+    truth_values = list(truth)
+    if len(predicted_values) != len(truth_values):
+        raise ValueError("predicted and truth must have the same length")
+
+    matrix = {
+        truth_label: {predicted_label: 0 for predicted_label in labels}
+        for truth_label in labels
+    }
+    for truth_value, predicted_value in zip(truth_values, predicted_values):
+        if truth_value not in matrix:
+            matrix[truth_value] = {predicted_label: 0 for predicted_label in labels}
+        if predicted_value not in matrix[truth_value]:
+            for row in matrix.values():
+                row.setdefault(predicted_value, 0)
+        matrix[truth_value][predicted_value] += 1
+    return matrix
+
+
 def _to_plain_list(value: object) -> list[object]:
     if isinstance(value, list):
         return value
@@ -390,6 +416,11 @@ def _build_metrics_payload(
         segment_predictions,
         segment_truth,
     )
+    segment_type_confusion_matrix = _compute_multiclass_confusion_matrix(
+        segment_predictions,
+        segment_truth,
+        labels=sorted(VALID_SEGMENT_TYPES),
+    )
     boundary_counts = _compute_binary_confusion_counts(boundary_predictions, boundary_truth)
 
     review_cost_totals = {
@@ -436,6 +467,7 @@ def _build_metrics_payload(
         "segment_type_accuracy": _compute_accuracy(segment_predictions, segment_truth),
         "segment_type_correct_count": segment_type_correct_count,
         "segment_type_incorrect_count": segment_type_incorrect_count,
+        "segment_type_confusion_matrix": segment_type_confusion_matrix,
         "boundary_f1": _compute_boundary_f1(boundary_predictions, boundary_truth),
         "boundary_true_positive_count": boundary_counts["true_positive_count"],
         "boundary_false_positive_count": boundary_counts["false_positive_count"],

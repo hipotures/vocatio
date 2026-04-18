@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from rich.console import Console
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
@@ -161,6 +162,11 @@ def test_render_eval_metrics_summary_uses_human_readable_precision() -> None:
             "segment_type_accuracy": 0.8478260869565217,
             "segment_type_correct_count": 39,
             "segment_type_incorrect_count": 7,
+            "segment_type_confusion_matrix": {
+                "ceremony": {"ceremony": 4, "performance": 2, "warmup": 1},
+                "performance": {"ceremony": 3, "performance": 33, "warmup": 2},
+                "warmup": {"ceremony": 0, "performance": 1, "warmup": 0},
+            },
             "boundary_f1": 0.8163265306122449,
             "boundary_correct_count": 37,
             "boundary_incorrect_count": 9,
@@ -178,12 +184,20 @@ def test_render_eval_metrics_summary_uses_human_readable_precision() -> None:
             "split_counts_by_name": {"train": 214, "validation": 46, "test": 46},
         },
     )
+    console = Console(record=True, width=120)
+    console.print(rendered)
+    output = console.export_text()
 
-    assert rendered.startswith("\nFinal ML summary:\n")
-    assert "Rows: train=214, validation=46, test=46" in rendered
-    assert "Segment type: accuracy=0.8478, correct=39, incorrect=7" in rendered
-    assert "Boundary: f1=0.8163, correct=37, incorrect=9, tp=20, fp=3, fn=6, tn=17" in rendered
-    assert "Review cost: merge_runs=4, split_runs=5, estimated_actions=9" in rendered
+    assert "Final ML summary:" in output
+    assert "Rows: train=214, validation=46, test=46" in output
+    assert "Segment type: accuracy=0.8478, correct=39, incorrect=7" in output
+    assert "Boundary: f1=0.8163, correct=37, incorrect=9, tp=20, fp=3, fn=6, tn=17" in output
+    assert "Review cost: merge_runs=4, split_runs=5, estimated_actions=9" in output
+    assert "Segment Type Confusion Matrix" in output
+    assert "truth\\pred" in output
+    assert "performance" in output
+    assert "ceremony" in output
+    assert "warmup" in output
 
 
 def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, monkeypatch) -> None:
@@ -240,6 +254,11 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
                         "segment_type_accuracy": 0.81,
                         "segment_type_correct_count": 7,
                         "segment_type_incorrect_count": 2,
+                        "segment_type_confusion_matrix": {
+                            "ceremony": {"ceremony": 1, "performance": 0, "warmup": 0},
+                            "performance": {"ceremony": 1, "performance": 5, "warmup": 0},
+                            "warmup": {"ceremony": 0, "performance": 1, "warmup": 1},
+                        },
                         "boundary_f1": 0.67,
                         "boundary_correct_count": 6,
                         "boundary_incorrect_count": 3,
@@ -496,6 +515,11 @@ def test_main_single_day_global_random_is_allowed(tmp_path: Path, monkeypatch) -
                         "segment_type_accuracy": 0.75,
                         "segment_type_correct_count": 15,
                         "segment_type_incorrect_count": 5,
+                        "segment_type_confusion_matrix": {
+                            "ceremony": {"ceremony": 0, "performance": 0, "warmup": 0},
+                            "performance": {"ceremony": 2, "performance": 13, "warmup": 3},
+                            "warmup": {"ceremony": 0, "performance": 0, "warmup": 2},
+                        },
                         "boundary_f1": 0.5,
                         "boundary_correct_count": 16,
                         "boundary_incorrect_count": 4,
