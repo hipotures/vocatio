@@ -984,6 +984,86 @@ def _training_split_count(training_metadata: dict[str, object] | None, split_nam
         return 0
 
 
+def _training_metadata_int(training_metadata: dict[str, object] | None, key: str) -> int | None:
+    if not isinstance(training_metadata, dict):
+        return None
+    raw_value = training_metadata.get(key)
+    if raw_value is None:
+        return None
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _heuristic_coverage_summary_line(training_metadata: dict[str, object] | None) -> str | None:
+    coverage = _heuristic_coverage_summary_payload(training_metadata)
+    if coverage is None:
+        return None
+    if coverage["source_available"] is False:
+        return (
+            "Heuristics (training corpus): unavailable "
+            f"(photo_boundary_scores.csv not found; expected_pairs={coverage['total_pair_count']}, "
+            f"expected_candidates={coverage['total_candidate_count']})"
+        )
+    if (
+        coverage["total_pair_count"] is not None
+        and coverage["missing_pair_count"] is not None
+        and coverage["total_candidate_count"] is not None
+        and coverage["missing_candidate_count"] is not None
+    ):
+        return (
+            "Heuristics (training corpus): "
+            f"pairs={coverage['covered_pair_count']}/{coverage['total_pair_count']}, "
+            f"complete_candidates={coverage['complete_candidate_count']}/{coverage['total_candidate_count']}"
+        )
+    return (
+        "Heuristics (training corpus): "
+        f"missing_pairs={coverage['missing_pair_count']}, "
+        f"missing_candidates={coverage['missing_candidate_count']}"
+    )
+
+
+def _heuristic_coverage_summary_payload(
+    training_metadata: dict[str, object] | None,
+) -> dict[str, int | bool | None] | None:
+    if not isinstance(training_metadata, dict):
+        return None
+    total_pair_count = _training_metadata_int(training_metadata, "total_heuristic_pair_count")
+    missing_pair_count = _training_metadata_int(training_metadata, "missing_heuristic_pair_count")
+    total_candidate_count = _training_metadata_int(training_metadata, "total_heuristic_candidate_count")
+    missing_candidate_count = _training_metadata_int(training_metadata, "missing_heuristic_candidate_count")
+    source_available = training_metadata.get("heuristic_scores_source_available")
+    if (
+        total_pair_count is not None
+        and missing_pair_count is not None
+        and total_candidate_count is not None
+        and missing_candidate_count is not None
+    ):
+        covered_pair_count = total_pair_count - missing_pair_count
+        complete_candidate_count = total_candidate_count - missing_candidate_count
+        return {
+            "source_available": bool(source_available) if source_available is not None else None,
+            "total_pair_count": total_pair_count,
+            "covered_pair_count": covered_pair_count,
+            "missing_pair_count": missing_pair_count,
+            "total_candidate_count": total_candidate_count,
+            "complete_candidate_count": complete_candidate_count,
+            "missing_candidate_count": missing_candidate_count,
+        }
+    if missing_pair_count is not None and missing_candidate_count is not None:
+        return {
+            "source_available": bool(source_available) if source_available is not None else None,
+            "total_pair_count": None,
+            "covered_pair_count": None,
+            "missing_pair_count": missing_pair_count,
+            "total_candidate_count": None,
+            "complete_candidate_count": None,
+            "missing_candidate_count": missing_candidate_count,
+        }
+    return None
+
+
 def _build_segment_type_confusion_table(metrics_payload: dict[str, object]) -> Table:
     confusion_payload = metrics_payload.get("segment_type_confusion_matrix")
     if not isinstance(confusion_payload, dict):
@@ -1048,21 +1128,28 @@ def _render_eval_metrics_summary(
         "",
         "Final ML summary:",
         f"Rows: train={train_row_count}, validation={validation_row_count}, test={test_row_count}",
-        (
-            "Segment type: "
-            f"{segment_type_metric_spec.validation_metric_name}={segment_type_primary_value:.4f}, "
-            f"accuracy={segment_type_accuracy:.4f}, "
-            f"correct={segment_type_correct_count}, incorrect={segment_type_incorrect_count}"
-        ),
-        (
-            "Boundary: "
-            f"{boundary_metric_spec.validation_metric_name}={boundary_primary_value:.4f}, "
-            f"correct={boundary_correct_count}, incorrect={boundary_incorrect_count}, "
-            f"tp={boundary_true_positive_count}, fp={boundary_false_positive_count}, "
-            f"fn={boundary_false_negative_count}, tn={boundary_true_negative_count}"
-        ),
-        f"Review cost: merge_runs={merge_run_count}, split_runs={split_run_count}, estimated_actions={estimated_correction_actions}",
     ]
+    heuristic_coverage_line = _heuristic_coverage_summary_line(training_metadata)
+    if heuristic_coverage_line is not None:
+        lines.append(heuristic_coverage_line)
+    lines.extend(
+        [
+            (
+                "Segment type: "
+                f"{segment_type_metric_spec.validation_metric_name}={segment_type_primary_value:.4f}, "
+                f"accuracy={segment_type_accuracy:.4f}, "
+                f"correct={segment_type_correct_count}, incorrect={segment_type_incorrect_count}"
+            ),
+            (
+                "Boundary: "
+                f"{boundary_metric_spec.validation_metric_name}={boundary_primary_value:.4f}, "
+                f"correct={boundary_correct_count}, incorrect={boundary_incorrect_count}, "
+                f"tp={boundary_true_positive_count}, fp={boundary_false_positive_count}, "
+                f"fn={boundary_false_negative_count}, tn={boundary_true_negative_count}"
+            ),
+            f"Review cost: merge_runs={merge_run_count}, split_runs={split_run_count}, estimated_actions={estimated_correction_actions}",
+        ]
+    )
     return Group(
         *(Text(line, no_wrap=False, overflow="fold") for line in lines),
         _build_segment_type_confusion_table(metrics_payload),
@@ -1182,6 +1269,9 @@ def _write_pipeline_summary(
         payload["training_preset"] = training_metadata.get("training_preset")
         payload["train_minutes"] = training_metadata.get("train_minutes")
         payload["time_limit_seconds"] = training_metadata.get("time_limit_seconds")
+        heuristic_coverage = _heuristic_coverage_summary_payload(training_metadata)
+        if heuristic_coverage is not None:
+            payload["heuristic_boundary_coverage"] = heuristic_coverage
     if note:
         payload["note"] = note
     atomic_write_json(summary_path, payload)

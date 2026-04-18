@@ -569,7 +569,10 @@ def test_load_training_data_bundle_joins_heuristic_boundary_scores_and_counts_mi
     assert math.isnan(bundle.validation_rows["heuristic_dino_dist_34"].tolist()[0])
     assert math.isnan(bundle.validation_rows["heuristic_boundary_score_45"].tolist()[0])
     assert bundle.validation_rows["heuristic_boundary_label_34"].tolist() == [CANONICAL_MISSING]
+    assert bundle.heuristic_scores_path == boundary_scores_path
+    assert bundle.total_heuristic_pair_count == 8
     assert bundle.missing_heuristic_pair_count == 2
+    assert bundle.total_heuristic_candidate_count == 2
     assert bundle.missing_heuristic_candidate_count == 1
 
 
@@ -787,5 +790,10 @@ def test_load_training_data_bundle_skips_missing_counts_when_default_annotation_
     )
 
     assert bundle.annotation_dir is None
+    assert bundle.heuristic_scores_path is None
     assert bundle.missing_annotation_photo_count == 0
     assert bundle.missing_annotation_candidate_count == 0
+    assert bundle.total_heuristic_pair_count == 4
+    assert bundle.missing_heuristic_pair_count == 4
+    assert bundle.total_heuristic_candidate_count == 1
+    assert bundle.missing_heuristic_candidate_count == 1

@@ -374,7 +374,10 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "time_limit_seconds": None,
         "missing_annotation_photo_count": 15,
         "missing_annotation_candidate_count": 3,
+        "heuristic_scores_source_available": False,
+        "total_heuristic_pair_count": 12,
         "missing_heuristic_pair_count": 12,
+        "total_heuristic_candidate_count": 3,
         "missing_heuristic_candidate_count": 3,
         "artifacts": {
             "training_plan": str(output_dir / TRAINING_PLAN_FILENAME),
@@ -433,7 +436,13 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "missing_annotation_photo_count": 15,
         "missing_annotation_candidate_count": 3,
         "heuristic_boundary_coverage": {
+            "source_available": False,
+            "source_path": None,
+            "total_pair_count": 12,
+            "covered_pair_count": 0,
             "missing_pair_count": 12,
+            "total_candidate_count": 3,
+            "complete_candidate_count": 0,
             "missing_candidate_count": 3,
         },
         "segment_type": {
@@ -503,8 +512,9 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert f"photos={training_report['missing_annotation_photo_count']}" in rendered
     assert f"candidates={training_report['missing_annotation_candidate_count']}" in rendered
     assert "Heuristic coverage:" in rendered
-    assert "missing_pairs=12" in rendered
-    assert "missing_candidates=3" in rendered
+    assert "unavailable" in rendered
+    assert "photo_boundary_scores.csv" in rendered
+    assert "not found" in rendered
     assert "training_report.json" in rendered
     assert TRAINING_REPORT_FILENAME in rendered
     assert len(rendered_lines) > 7
@@ -515,6 +525,24 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert rendered.index("Feature counts:") < rendered.index("Missing annotations:")
     assert rendered.index("Missing annotations:") < rendered.index("Heuristic coverage:")
     assert rendered.index("Heuristic coverage:") < rendered.index("Report:")
+
+
+def test_heuristic_boundary_coverage_console_line_reports_complete_candidates_when_available() -> None:
+    bundle = type(
+        "Bundle",
+        (),
+        {
+            "heuristic_scores_path": Path("/tmp/photo_boundary_scores.csv"),
+            "total_heuristic_pair_count": 12,
+            "missing_heuristic_pair_count": 2,
+            "total_heuristic_candidate_count": 3,
+            "missing_heuristic_candidate_count": 1,
+        },
+    )()
+
+    line = train_ml_boundary_verifier._heuristic_boundary_coverage_console_line(bundle)
+
+    assert line == "Heuristic coverage: pairs=10/12, complete_candidates=2/3"
 
 
 def test_train_cli_applies_explicit_training_options(monkeypatch, tmp_path: Path) -> None:

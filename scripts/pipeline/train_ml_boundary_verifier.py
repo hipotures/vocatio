@@ -409,7 +409,10 @@ def _build_training_metadata_payload(
         "time_limit_seconds": training_options["time_limit_seconds"],
         "missing_annotation_photo_count": training_bundle.missing_annotation_photo_count,
         "missing_annotation_candidate_count": training_bundle.missing_annotation_candidate_count,
+        "heuristic_scores_source_available": training_bundle.heuristic_scores_path is not None,
+        "total_heuristic_pair_count": training_bundle.total_heuristic_pair_count,
         "missing_heuristic_pair_count": training_bundle.missing_heuristic_pair_count,
+        "total_heuristic_candidate_count": training_bundle.total_heuristic_candidate_count,
         "missing_heuristic_candidate_count": training_bundle.missing_heuristic_candidate_count,
         "artifacts": {
             name: str(path)
@@ -516,19 +519,33 @@ def _descriptor_annotation_coverage_console_line(training_bundle: TrainingDataBu
     )
 
 
-def _heuristic_boundary_coverage_payload(training_bundle: TrainingDataBundle) -> dict[str, int]:
+def _heuristic_boundary_coverage_payload(training_bundle: TrainingDataBundle) -> dict[str, int | bool | None]:
+    source_available = training_bundle.heuristic_scores_path is not None
+    covered_pair_count = training_bundle.total_heuristic_pair_count - training_bundle.missing_heuristic_pair_count
+    complete_candidate_count = (
+        training_bundle.total_heuristic_candidate_count
+        - training_bundle.missing_heuristic_candidate_count
+    )
     return {
+        "source_available": source_available,
+        "source_path": str(training_bundle.heuristic_scores_path) if source_available else None,
+        "total_pair_count": training_bundle.total_heuristic_pair_count,
+        "covered_pair_count": covered_pair_count,
         "missing_pair_count": training_bundle.missing_heuristic_pair_count,
+        "total_candidate_count": training_bundle.total_heuristic_candidate_count,
+        "complete_candidate_count": complete_candidate_count,
         "missing_candidate_count": training_bundle.missing_heuristic_candidate_count,
     }
 
 
 def _heuristic_boundary_coverage_console_line(training_bundle: TrainingDataBundle) -> str:
     coverage = _heuristic_boundary_coverage_payload(training_bundle)
+    if not bool(coverage["source_available"]):
+        return "Heuristic coverage: unavailable (photo_boundary_scores.csv not found)"
     return (
         "Heuristic coverage: "
-        f"missing_pairs={coverage['missing_pair_count']}, "
-        f"missing_candidates={coverage['missing_candidate_count']}"
+        f"pairs={coverage['covered_pair_count']}/{coverage['total_pair_count']}, "
+        f"complete_candidates={coverage['complete_candidate_count']}/{coverage['total_candidate_count']}"
     )
 
 

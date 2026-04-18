@@ -75,11 +75,14 @@ class TrainingDataBundle:
     validation_rows: "TrainingTable"
     test_rows: "TrainingTable"
     annotation_dir: Path | None
+    heuristic_scores_path: Path | None
     split_manifest_scope: str
     split_counts_by_name: dict[str, int]
     missing_annotation_photo_count: int
     missing_annotation_candidate_count: int
+    total_heuristic_pair_count: int
     missing_heuristic_pair_count: int
+    total_heuristic_candidate_count: int
     missing_heuristic_candidate_count: int
     shared_feature_columns: list[str]
     image_feature_columns: list[str]
@@ -257,7 +260,8 @@ def load_training_data_bundle(
         split_manifest_frame=split_manifest_frame,
     )
     resolved_annotation_dir = _resolve_annotation_dir(dataset_path, annotation_dir=annotation_dir)
-    heuristic_rows_by_pair = _load_heuristic_records(dataset_path)
+    heuristic_scores_path = _resolve_boundary_scores_path(dataset_path)
+    heuristic_rows_by_pair = _load_heuristic_records(heuristic_scores_path)
     (
         joined_frame,
         derived_feature_columns,
@@ -302,11 +306,14 @@ def load_training_data_bundle(
         validation_rows=validation_rows,
         test_rows=test_rows,
         annotation_dir=resolved_annotation_dir,
+        heuristic_scores_path=heuristic_scores_path,
         split_manifest_scope=split_manifest_scope,
         split_counts_by_name=_split_counts(joined_frame["split_name"]),
         missing_annotation_photo_count=missing_annotation_photo_count,
         missing_annotation_candidate_count=missing_annotation_candidate_count,
+        total_heuristic_pair_count=len(joined_frame.rows) * len(HEURISTIC_PAIR_JOIN_COLUMNS),
         missing_heuristic_pair_count=missing_heuristic_pair_count,
+        total_heuristic_candidate_count=len(joined_frame.rows),
         missing_heuristic_candidate_count=missing_heuristic_candidate_count,
         shared_feature_columns=columns_by_mode["shared_feature_columns"],
         image_feature_columns=columns_by_mode["image_feature_columns"],
@@ -530,9 +537,8 @@ def _load_annotation_records(
 
 
 def _load_heuristic_records(
-    dataset_path: Path,
+    boundary_scores_path: Path | None,
 ) -> dict[tuple[str, str], dict[str, str]]:
-    boundary_scores_path = _resolve_boundary_scores_path(dataset_path)
     if boundary_scores_path is None:
         return {}
     heuristic_rows_by_pair: dict[tuple[str, str], dict[str, str]] = {}

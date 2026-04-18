@@ -184,6 +184,11 @@ def test_render_eval_metrics_summary_uses_human_readable_precision() -> None:
         },
         {
             "split_counts_by_name": {"train": 214, "validation": 46, "test": 46},
+            "heuristic_scores_source_available": False,
+            "total_heuristic_pair_count": 184,
+            "missing_heuristic_pair_count": 184,
+            "total_heuristic_candidate_count": 46,
+            "missing_heuristic_candidate_count": 46,
         },
     )
     console = Console(record=True, width=120)
@@ -192,6 +197,10 @@ def test_render_eval_metrics_summary_uses_human_readable_precision() -> None:
 
     assert "Final ML summary:" in output
     assert "Rows: train=214, validation=46, test=46" in output
+    assert "Heuristics (training corpus): unavailable" in output
+    assert "photo_boundary_scores.csv not found" in output
+    assert "expected_pairs=184" in output
+    assert "expected_candidates=46" in output
     assert "Segment type: macro_f1=0.7778, accuracy=0.8478, correct=39, incorrect=7" in output
     assert "Boundary: f1=0.8163, correct=37, incorrect=9, tp=20, fp=3, fn=6, tn=17" in output
     assert "Review cost: merge_runs=4, split_runs=5, estimated_actions=9" in output
@@ -240,6 +249,11 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
                         "split_counts_by_name": {"train": 6, "validation": 1, "test": 2},
                         "missing_annotation_photo_count": 0,
                         "missing_annotation_candidate_count": 0,
+                        "heuristic_scores_source_available": True,
+                        "total_heuristic_pair_count": 36,
+                        "missing_heuristic_pair_count": 4,
+                        "total_heuristic_candidate_count": 9,
+                        "missing_heuristic_candidate_count": 1,
                     }
                 ),
                 encoding="utf-8",
@@ -319,6 +333,15 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
     assert summary_payload["evaluation_metrics"]["segment_type_accuracy"] == 0.81
     assert summary_payload["evaluation_metrics"]["boundary_f1"] == 0.67
     assert summary_payload["evaluation_metrics"]["review_cost_metrics"]["estimated_correction_actions"] == 9
+    assert summary_payload["heuristic_boundary_coverage"] == {
+        "source_available": True,
+        "total_pair_count": 36,
+        "covered_pair_count": 32,
+        "missing_pair_count": 4,
+        "total_candidate_count": 9,
+        "complete_candidate_count": 8,
+        "missing_candidate_count": 1,
+    }
     assert summary_payload["training_metadata"]["split_counts_by_name"] == {
         "train": 6,
         "validation": 1,
@@ -364,6 +387,11 @@ def test_main_forwards_training_options_and_records_pipeline_summary_fields(
                         "training_preset": "best_quality",
                         "train_minutes": 10.0,
                         "time_limit_seconds": 600,
+                        "heuristic_scores_source_available": True,
+                        "total_heuristic_pair_count": 12,
+                        "missing_heuristic_pair_count": 2,
+                        "total_heuristic_candidate_count": 3,
+                        "missing_heuristic_candidate_count": 1,
                     }
                 ),
                 encoding="utf-8",
@@ -438,6 +466,7 @@ def test_main_forwards_training_options_and_records_pipeline_summary_fields(
     assert summary_payload["training_preset"] == "best_quality"
     assert summary_payload["train_minutes"] == 10.0
     assert summary_payload["time_limit_seconds"] == 600
+    assert summary_payload["heuristic_boundary_coverage"]["complete_candidate_count"] == 2
 
 
 def test_main_prepare_only_skips_train_and_eval(tmp_path: Path, monkeypatch) -> None:
@@ -482,6 +511,48 @@ def test_main_prepare_only_skips_train_and_eval(tmp_path: Path, monkeypatch) -> 
         (corpus_workspace / "ml_boundary_pipeline_summary.json").read_text(encoding="utf-8")
     )
     assert summary_payload["prepare_only"] is True
+
+
+def test_render_eval_metrics_summary_labels_training_corpus_heuristics_when_available() -> None:
+    rendered = _render_eval_metrics_summary(
+        {
+            "row_count": 10,
+            "segment_type_macro_f1": 0.5,
+            "segment_type_accuracy": 0.7,
+            "segment_type_correct_count": 7,
+            "segment_type_incorrect_count": 3,
+            "segment_type_confusion_matrix": {
+                "ceremony": {"ceremony": 1, "performance": 1, "warmup": 0},
+                "performance": {"ceremony": 1, "performance": 5, "warmup": 0},
+                "warmup": {"ceremony": 0, "performance": 1, "warmup": 1},
+            },
+            "boundary_f1": 0.6,
+            "boundary_correct_count": 8,
+            "boundary_incorrect_count": 2,
+            "boundary_true_positive_count": 3,
+            "boundary_false_positive_count": 1,
+            "boundary_false_negative_count": 1,
+            "boundary_true_negative_count": 5,
+            "review_cost_metrics": {
+                "merge_run_count": 1,
+                "split_run_count": 1,
+                "estimated_correction_actions": 2,
+            },
+        },
+        {
+            "split_counts_by_name": {"train": 20, "validation": 5, "test": 10},
+            "heuristic_scores_source_available": True,
+            "total_heuristic_pair_count": 140,
+            "missing_heuristic_pair_count": 8,
+            "total_heuristic_candidate_count": 35,
+            "missing_heuristic_candidate_count": 3,
+        },
+    )
+    console = Console(record=True, width=140)
+    console.print(rendered)
+    output = console.export_text()
+
+    assert "Heuristics (training corpus): pairs=132/140, complete_candidates=32/35" in output
 
 
 def test_main_returns_short_error_when_no_candidate_rows_are_retained(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -614,6 +685,11 @@ def test_main_single_day_global_random_is_allowed(tmp_path: Path, monkeypatch) -
                 json.dumps(
                     {
                         "split_counts_by_name": {"train": 14, "validation": 3, "test": 3},
+                        "heuristic_scores_source_available": True,
+                        "total_heuristic_pair_count": 80,
+                        "missing_heuristic_pair_count": 5,
+                        "total_heuristic_candidate_count": 20,
+                        "missing_heuristic_candidate_count": 2,
                     }
                 ),
                 encoding="utf-8",
