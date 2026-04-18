@@ -1890,14 +1890,12 @@ class MainWindow(QMainWindow):
                 target_set.get("segment_type", ""),
                 source_set.get("segment_type", ""),
             )
-            merged_override_active = bool(target_set.get("type_override_active")) or bool(source_set.get("type_override_active"))
             target_set["segment_type"] = merged_segment_type
             target_set["type_code"] = segment_type_to_code(merged_segment_type)
-            target_set["type_override_active"] = merged_override_active
             for photo in target_set["photos"]:
                 photo["segment_type"] = merged_segment_type
                 photo["type_code"] = target_set["type_code"]
-                photo["type_override_active"] = merged_override_active
+            apply_segment_type_override_to_display_set(target_set, self.review_entry(target_set["set_id"]))
             merged_sets.pop(source_index)
         return merged_sets
 

@@ -406,6 +406,46 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             [True, True],
         )
 
+    def test_rebuild_display_sets_reapplies_persisted_override_after_merge(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.review_state = {
+            "performances": {
+                "set-a": {
+                    "viewed": False,
+                    "first_viewed_at": "",
+                    "last_viewed_at": "",
+                    "view_count": 0,
+                    "no_photos_confirmed": False,
+                    "segment_type_override": "ceremony",
+                }
+            },
+            "splits": {},
+            "merges": [{"target_set_id": "set-a", "source_set_id": "set-b"}],
+        }
+        window.raw_performances = [
+            self.build_raw_performance("set-a", "dance"),
+            self.build_raw_performance("set-b", "audience"),
+        ]
+
+        window.rebuild_display_sets()
+
+        self.assertEqual(len(window.display_sets), 1)
+        display_set = window.display_sets[0]
+        self.assertEqual(display_set["set_id"], "set-a")
+        self.assertEqual(display_set["segment_type"], "ceremony")
+        self.assertEqual(display_set["type_code"], "C")
+        self.assertTrue(display_set["type_override_active"])
+        self.assertEqual(
+            [photo["segment_type"] for photo in display_set["photos"]],
+            ["ceremony", "ceremony", "ceremony", "ceremony"],
+        )
+        self.assertEqual(display_set["photo_count"], 4)
+        self.assertEqual([photo["type_code"] for photo in display_set["photos"]], ["C", "C", "C", "C"])
+        self.assertEqual(
+            [photo["type_override_active"] for photo in display_set["photos"]],
+            [True, True, True, True],
+        )
+
     def test_apply_display_set_merges_keeps_known_type_when_merging_known_and_empty(self):
         window = self.build_merge_test_window([{"target_set_id": "set-a", "source_set_id": "set-b"}])
         merged_sets = window.apply_display_set_merges(
