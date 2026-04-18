@@ -28,6 +28,7 @@ from rich.table import Table
 from rich.text import Text
 
 from build_ml_boundary_candidate_dataset import CANDIDATE_ROW_HEADERS
+from lib.ml_boundary_metrics import predictor_metric_spec
 from lib.ml_boundary_truth import VALID_SEGMENT_TYPES
 from lib.pipeline_io import atomic_write_csv, atomic_write_json
 from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
@@ -1001,6 +1002,11 @@ def _build_segment_type_confusion_table(metrics_payload: dict[str, object]) -> T
     return table
 
 
+def _primary_eval_metric_value(metrics_payload: dict[str, object], predictor_name: str) -> float:
+    metric_spec = predictor_metric_spec(predictor_name)
+    return float(metrics_payload.get(metric_spec.evaluation_metric_key, 0.0) or 0.0)
+
+
 def _render_eval_metrics_summary(
     metrics_payload: dict[str, object],
     training_metadata: dict[str, object] | None = None,
@@ -1008,13 +1014,16 @@ def _render_eval_metrics_summary(
     review_cost_metrics = metrics_payload.get("review_cost_metrics")
     if not isinstance(review_cost_metrics, dict):
         raise ValueError("evaluation metrics missing review_cost_metrics object")
+    segment_type_metric_spec = predictor_metric_spec("segment_type")
+    boundary_metric_spec = predictor_metric_spec("boundary")
     train_row_count = _training_split_count(training_metadata, "train")
     validation_row_count = _training_split_count(training_metadata, "validation")
     test_row_count = _training_split_count(training_metadata, "test")
+    segment_type_primary_value = _primary_eval_metric_value(metrics_payload, "segment_type")
     segment_type_accuracy = float(metrics_payload.get("segment_type_accuracy", 0.0) or 0.0)
     segment_type_correct_count = int(metrics_payload.get("segment_type_correct_count", 0) or 0)
     segment_type_incorrect_count = int(metrics_payload.get("segment_type_incorrect_count", 0) or 0)
-    boundary_f1 = float(metrics_payload.get("boundary_f1", 0.0) or 0.0)
+    boundary_primary_value = _primary_eval_metric_value(metrics_payload, "boundary")
     boundary_correct_count = int(metrics_payload.get("boundary_correct_count", 0) or 0)
     boundary_incorrect_count = int(metrics_payload.get("boundary_incorrect_count", 0) or 0)
     boundary_true_positive_count = int(metrics_payload.get("boundary_true_positive_count", 0) or 0)
@@ -1028,8 +1037,19 @@ def _render_eval_metrics_summary(
         "",
         "Final ML summary:",
         f"Rows: train={train_row_count}, validation={validation_row_count}, test={test_row_count}",
-        f"Segment type: accuracy={segment_type_accuracy:.4f}, correct={segment_type_correct_count}, incorrect={segment_type_incorrect_count}",
-        f"Boundary: f1={boundary_f1:.4f}, correct={boundary_correct_count}, incorrect={boundary_incorrect_count}, tp={boundary_true_positive_count}, fp={boundary_false_positive_count}, fn={boundary_false_negative_count}, tn={boundary_true_negative_count}",
+        (
+            "Segment type: "
+            f"{segment_type_metric_spec.validation_metric_name}={segment_type_primary_value:.4f}, "
+            f"accuracy={segment_type_accuracy:.4f}, "
+            f"correct={segment_type_correct_count}, incorrect={segment_type_incorrect_count}"
+        ),
+        (
+            "Boundary: "
+            f"{boundary_metric_spec.validation_metric_name}={boundary_primary_value:.4f}, "
+            f"correct={boundary_correct_count}, incorrect={boundary_incorrect_count}, "
+            f"tp={boundary_true_positive_count}, fp={boundary_false_positive_count}, "
+            f"fn={boundary_false_negative_count}, tn={boundary_true_negative_count}"
+        ),
         f"Review cost: merge_runs={merge_run_count}, split_runs={split_run_count}, estimated_actions={estimated_correction_actions}",
     ]
     return Group(

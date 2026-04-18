@@ -160,6 +160,7 @@ def test_render_eval_metrics_summary_uses_human_readable_precision() -> None:
     rendered = _render_eval_metrics_summary(
         {
             "row_count": 46,
+            "segment_type_macro_f1": 0.7777777777777778,
             "segment_type_accuracy": 0.8478260869565217,
             "segment_type_correct_count": 39,
             "segment_type_incorrect_count": 7,
@@ -191,7 +192,7 @@ def test_render_eval_metrics_summary_uses_human_readable_precision() -> None:
 
     assert "Final ML summary:" in output
     assert "Rows: train=214, validation=46, test=46" in output
-    assert "Segment type: accuracy=0.8478, correct=39, incorrect=7" in output
+    assert "Segment type: macro_f1=0.7778, accuracy=0.8478, correct=39, incorrect=7" in output
     assert "Boundary: f1=0.8163, correct=37, incorrect=9, tp=20, fp=3, fn=6, tn=17" in output
     assert "Review cost: merge_runs=4, split_runs=5, estimated_actions=9" in output
     assert "Segment Type Confusion Matrix (test split, n=46)" in output
@@ -252,6 +253,7 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
             (eval_dir / "metrics.json").write_text(
                 json.dumps(
                     {
+                        "segment_type_macro_f1": 0.73,
                         "segment_type_accuracy": 0.81,
                         "segment_type_correct_count": 7,
                         "segment_type_incorrect_count": 2,
@@ -313,6 +315,7 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
     assert summary_payload["prepare_only"] is False
     assert summary_payload["model_dir"].endswith("ml_boundary_models/run-010")
     assert summary_payload["eval_dir"].endswith("ml_boundary_eval/run-010")
+    assert summary_payload["evaluation_metrics"]["segment_type_macro_f1"] == 0.73
     assert summary_payload["evaluation_metrics"]["segment_type_accuracy"] == 0.81
     assert summary_payload["evaluation_metrics"]["boundary_f1"] == 0.67
     assert summary_payload["evaluation_metrics"]["review_cost_metrics"]["estimated_correction_actions"] == 9

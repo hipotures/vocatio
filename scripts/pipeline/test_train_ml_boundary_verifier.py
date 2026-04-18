@@ -366,7 +366,7 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "segment_type": {
             "model_type": "FakeTabularPredictor",
             "path": str(output_dir / "segment_type_model"),
-            "eval_metric": "accuracy",
+            "eval_metric": "f1_macro",
             "validation_score": 0.83,
             "fit_summary_excerpt": {
                 "best_model": "segment_type_best",
@@ -377,7 +377,7 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "boundary": {
             "model_type": "FakeTabularPredictor",
             "path": str(output_dir / "boundary_model"),
-            "eval_metric": "accuracy",
+            "eval_metric": "f1",
             "validation_score": 0.91,
             "fit_summary_excerpt": {
                 "best_model": "boundary_best",
@@ -402,11 +402,13 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "missing_annotation_candidate_count": 3,
         "segment_type": {
             "best_model": "segment_type_best",
+            "validation_metric": "macro_f1",
             "validation_score": 0.83,
             "model_dir": str(output_dir / "segment_type_model"),
         },
         "boundary": {
             "best_model": "boundary_best",
+            "validation_metric": "f1",
             "validation_score": 0.91,
             "model_dir": str(output_dir / "boundary_model"),
         },
@@ -422,6 +424,8 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     }
     assert FakeTabularPredictor.instances[0].fit_calls[0]["train_rows"] == 1
     assert FakeTabularPredictor.instances[0].fit_calls[0]["validation_rows"] == 1
+    assert FakeTabularPredictor.instances[0].eval_metric == "f1_macro"
+    assert FakeTabularPredictor.instances[1].eval_metric == "f1"
     train_columns = FakeTabularPredictor.instances[0].fit_calls[0]["train_columns"]
     assert "gap_34" in train_columns
     assert "candidate_id" not in train_columns
@@ -441,6 +445,8 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert "segment_type_best" in rendered
     assert "Boundary:" in rendered
     assert "boundary_best" in rendered
+    assert "validation_macro_f1=0.83" in rendered
+    assert "validation_f1=0.91" in rendered
     assert "Feature counts:" in rendered
     assert f"shared={training_report['shared_feature_count']}" in rendered
     assert f"image={training_report['image_feature_count']}" in rendered
@@ -566,12 +572,16 @@ def test_train_cli_report_falls_back_to_model_type_when_best_model_missing(
     assert training_summary["boundary"]["model_type"] == "FakeMultiModalPredictor"
     assert training_report["segment_type"]["best_model"] == "FakeMultiModalPredictor"
     assert training_report["boundary"]["best_model"] == "FakeMultiModalPredictor"
+    assert training_report["segment_type"]["validation_metric"] == "macro_f1"
+    assert training_report["boundary"]["validation_metric"] == "f1"
     captured = capsys.readouterr()
     rendered = rendered_console.export_text()
     assert captured.out == ""
     assert captured.err == ""
     assert "Segment type: best_model=FakeMultiModalPredictor" in rendered
+    assert "validation_macro_f1=0.79" in rendered
     assert "Boundary: best_model=FakeMultiModalPredictor" in rendered
+    assert "validation_f1=0.88" in rendered
 
 
 def test_train_cli_report_uses_model_best_when_present(
@@ -624,12 +634,16 @@ def test_train_cli_report_uses_model_best_when_present(
     training_report = json.loads((output_dir / TRAINING_REPORT_FILENAME).read_text(encoding="utf-8"))
     assert training_report["segment_type"]["best_model"] == "segment_type_winner"
     assert training_report["boundary"]["best_model"] == "boundary_winner"
+    assert training_report["segment_type"]["validation_metric"] == "macro_f1"
+    assert training_report["boundary"]["validation_metric"] == "f1"
     captured = capsys.readouterr()
     rendered = rendered_console.export_text()
     assert captured.out == ""
     assert captured.err == ""
     assert "Segment type: best_model=segment_type_winner" in rendered
+    assert "validation_macro_f1=0.83" in rendered
     assert "Boundary: best_model=boundary_winner" in rendered
+    assert "validation_f1=0.91" in rendered
 
 
 def test_train_cli_uses_multimodal_predictor_for_thumbnail_mode(

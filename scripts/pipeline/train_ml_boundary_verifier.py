@@ -11,6 +11,7 @@ from typing import Sequence
 from rich.console import Console, Group
 from rich.text import Text
 
+from lib.ml_boundary_metrics import predictor_metric_spec
 from lib.ml_boundary_training_data import (
     THUMBNAIL_IMAGE_COLUMNS,
     TRAIN_MODES,
@@ -44,8 +45,11 @@ DEFAULT_MODEL_ROOT_DIRNAME = "ml_boundary_models"
 def build_training_plan(mode: str) -> list[dict[str, str]]:
     validate_mode(mode)
     return [
-        {"name": "segment_type", "problem_type": "multiclass"},
-        {"name": "boundary", "problem_type": "binary"},
+        {
+            "name": predictor_name,
+            "problem_type": predictor_metric_spec(predictor_name).problem_type,
+        }
+        for predictor_name in ("segment_type", "boundary")
     ]
 
 
@@ -387,7 +391,21 @@ def _train_predictors(
     }
     for predictor_plan in build_training_plan(mode):
         predictor_name = predictor_plan["name"]
+        metric_spec = predictor_metric_spec(predictor_name)
         predictor_output_dir = output_dir / f"{predictor_name}_model"
+        console.print("")
+        console.print(
+            Text(
+                (
+                    "=== "
+                    f"Train predictor: {metric_spec.console_label} "
+                    f"({predictor_plan['problem_type']}, eval_metric={metric_spec.training_eval_metric})"
+                    " ==="
+                ),
+                no_wrap=False,
+                overflow="fold",
+            )
+        )
         predictor = _fit_predictor(
             predictor_name=predictor_name,
             predictor_output_dir=predictor_output_dir,
@@ -401,8 +419,11 @@ def _train_predictors(
         summary[predictor_name] = {
             "model_type": predictor.__class__.__name__,
             "path": str(summary_output_dir / f"{predictor_name}_model"),
-            "eval_metric": "accuracy",
-            "validation_score": _extract_validation_score(evaluation_payload, eval_metric="accuracy"),
+            "eval_metric": metric_spec.training_eval_metric,
+            "validation_score": _extract_validation_score(
+                evaluation_payload,
+                eval_metric=metric_spec.training_eval_metric,
+            ),
             "fit_summary_excerpt": _fit_summary_excerpt(predictor.fit_summary()),
         }
     summary["descriptor_annotation_coverage"] = _descriptor_annotation_coverage_payload(training_bundle)
@@ -456,10 +477,12 @@ def _report_predictor_payload(
     predictor_name: str,
 ) -> dict[str, object]:
     summary_entry = training_summary[predictor_name]
+    metric_spec = predictor_metric_spec(predictor_name)
     if not isinstance(summary_entry, dict):
         raise TypeError(f"Expected summary entry dict for predictor {predictor_name}")
     return {
         "best_model": _best_model_name(summary_entry),
+        "validation_metric": metric_spec.validation_metric_name,
         "validation_score": summary_entry.get("validation_score"),
         "model_dir": summary_entry.get("path"),
     }
@@ -480,9 +503,10 @@ def _best_model_name(summary_entry: dict[str, object]) -> str:
 
 def _predictor_console_line(training_summary: dict[str, object], predictor_name: str, label: str) -> str:
     predictor_payload = _report_predictor_payload(training_summary, predictor_name)
+    validation_metric = str(predictor_payload.get("validation_metric", "score") or "score")
     return (
         f"{label}: best_model={predictor_payload['best_model']}, "
-        f"validation_score={predictor_payload['validation_score']}, "
+        f"validation_{validation_metric}={predictor_payload['validation_score']}, "
         f"model_dir={predictor_payload['model_dir']}"
     )
 
@@ -522,11 +546,13 @@ def _fit_predictor(
     predictor_data,
     mode: str,
 ):
+    metric_spec = predictor_metric_spec(predictor_name)
     if mode == "tabular_plus_thumbnail":
         predictor_class = load_multimodal_predictor_class()
         predictor = predictor_class(
             label=predictor_name,
             problem_type=problem_type,
+            eval_metric=metric_spec.training_eval_metric,
             path=str(predictor_output_dir),
         )
         predictor.fit(
@@ -543,7 +569,7 @@ def _fit_predictor(
     predictor = predictor_class(
         label=predictor_name,
         problem_type=problem_type,
-        eval_metric="accuracy",
+        eval_metric=metric_spec.training_eval_metric,
         path=str(predictor_output_dir),
     )
     predictor.fit(

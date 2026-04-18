@@ -9,6 +9,7 @@ from typing import Iterable, Mapping, Sequence
 
 from rich.console import Console
 
+from lib.ml_boundary_metrics import predictor_metric_spec
 from lib.ml_boundary_training_data import load_training_data_bundle
 from lib.ml_boundary_truth import VALID_SEGMENT_TYPES
 from lib.pipeline_io import atomic_write_json
@@ -177,6 +178,42 @@ def _compute_accuracy(predicted: Sequence[str], truth: Sequence[str]) -> float:
         if predicted_value == truth_value
     )
     return matches / len(truth_values)
+
+
+def _compute_macro_f1(
+    predicted: Sequence[str],
+    truth: Sequence[str],
+    *,
+    labels: Sequence[str],
+) -> float:
+    predicted_values = list(predicted)
+    truth_values = list(truth)
+    observed_labels = set(predicted_values) | set(truth_values)
+    active_labels = [label for label in labels if label in observed_labels]
+    if not active_labels:
+        return 0.0
+    confusion_matrix = _compute_multiclass_confusion_matrix(
+        predicted_values,
+        truth_values,
+        labels=labels,
+    )
+    f1_scores: list[float] = []
+    for label in active_labels:
+        row = confusion_matrix.get(label, {})
+        true_positive = int(row.get(label, 0) or 0)
+        false_negative = sum(
+            int(row.get(predicted_label, 0) or 0)
+            for predicted_label in active_labels
+            if predicted_label != label
+        )
+        false_positive = sum(
+            int(confusion_matrix.get(other_label, {}).get(label, 0) or 0)
+            for other_label in active_labels
+            if other_label != label
+        )
+        denominator = (2 * true_positive) + false_positive + false_negative
+        f1_scores.append(0.0 if denominator == 0 else (2 * true_positive) / denominator)
+    return sum(f1_scores) / len(f1_scores)
 
 
 def _compute_label_match_counts(
@@ -464,11 +501,19 @@ def _build_metrics_payload(
         "threshold_policy": threshold_policy,
         "final_boundary_threshold": threshold,
         "row_count": len(boundary_truth),
+        predictor_metric_spec("segment_type").evaluation_metric_key: _compute_macro_f1(
+            segment_predictions,
+            segment_truth,
+            labels=sorted(VALID_SEGMENT_TYPES),
+        ),
         "segment_type_accuracy": _compute_accuracy(segment_predictions, segment_truth),
         "segment_type_correct_count": segment_type_correct_count,
         "segment_type_incorrect_count": segment_type_incorrect_count,
         "segment_type_confusion_matrix": segment_type_confusion_matrix,
-        "boundary_f1": _compute_boundary_f1(boundary_predictions, boundary_truth),
+        predictor_metric_spec("boundary").evaluation_metric_key: _compute_boundary_f1(
+            boundary_predictions,
+            boundary_truth,
+        ),
         "boundary_true_positive_count": boundary_counts["true_positive_count"],
         "boundary_false_positive_count": boundary_counts["false_positive_count"],
         "boundary_false_negative_count": boundary_counts["false_negative_count"],

@@ -231,6 +231,7 @@ def test_eval_cli_writes_metrics_artifact(tmp_path: Path, monkeypatch) -> None:
         "threshold_policy": {"policy": "fixed", "threshold": 0.5},
         "final_boundary_threshold": 0.5,
         "row_count": 1,
+        "segment_type_macro_f1": 1.0,
         "segment_type_accuracy": 1.0,
         "segment_type_correct_count": 1,
         "segment_type_incorrect_count": 0,
