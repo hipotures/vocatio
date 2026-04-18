@@ -573,6 +573,71 @@ def test_load_training_data_bundle_joins_heuristic_boundary_scores_and_counts_mi
     assert bundle.missing_heuristic_candidate_count == 1
 
 
+def test_load_training_data_bundle_rejects_duplicate_heuristic_pair_rows(
+    tmp_path: Path,
+) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    boundary_scores_path = tmp_path / "photo_boundary_scores.csv"
+
+    row = _candidate_row(day_id="20250324", segment_type="performance", boundary="1")
+    _write_candidate_csv(dataset_path, [row])
+    _write_split_manifest(
+        split_manifest_path,
+        [{"candidate_id": row["candidate_id"], "split_name": "train"}],
+    )
+    _write_boundary_scores_csv(
+        boundary_scores_path,
+        [
+            {
+                "left_relative_path": "cam/20250324-p1.jpg",
+                "right_relative_path": "cam/20250324-p2.jpg",
+                "left_start_local": "2025-03-24T10:00:01",
+                "right_start_local": "2025-03-24T10:00:02",
+                "left_start_epoch_ms": "1000",
+                "right_start_epoch_ms": "2000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.101000",
+                "distance_zscore": "0.201000",
+                "smoothed_distance_zscore": "0.301000",
+                "time_gap_boost": "0.000000",
+                "boundary_score": "0.401000",
+                "boundary_label": "none",
+                "boundary_reason": "baseline",
+                "model_source": "bootstrap_heuristic",
+            },
+            {
+                "left_relative_path": "cam/20250324-p1.jpg",
+                "right_relative_path": "cam/20250324-p2.jpg",
+                "left_start_local": "2025-03-24T10:00:01",
+                "right_start_local": "2025-03-24T10:00:02",
+                "left_start_epoch_ms": "1000",
+                "right_start_epoch_ms": "2000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.999000",
+                "distance_zscore": "0.999000",
+                "smoothed_distance_zscore": "0.999000",
+                "time_gap_boost": "0.999000",
+                "boundary_score": "0.999000",
+                "boundary_label": "soft",
+                "boundary_reason": "duplicate",
+                "model_source": "bootstrap_heuristic",
+            },
+        ],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="photo_boundary_scores.csv contains duplicate adjacent pair rows for cam/20250324-p1.jpg -> cam/20250324-p2.jpg",
+    ):
+        load_training_data_bundle(
+            dataset_path,
+            split_manifest_path=split_manifest_path,
+            mode="tabular_only",
+            require_train_validation=False,
+        )
+
+
 def test_load_training_data_bundle_extends_descriptor_registry_from_dataset_annotations(
     tmp_path: Path,
 ) -> None:

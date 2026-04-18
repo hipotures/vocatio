@@ -550,6 +550,11 @@ def _load_heuristic_records(
         if left_relative_path == "" or right_relative_path == "":
             continue
         pair_key = (left_relative_path, right_relative_path)
+        if pair_key in heuristic_rows_by_pair:
+            raise ValueError(
+                "photo_boundary_scores.csv contains duplicate adjacent pair rows for "
+                f"{left_relative_path} -> {right_relative_path}"
+            )
         heuristic_rows_by_pair[pair_key] = {
             "left_relative_path": left_relative_path,
             "right_relative_path": right_relative_path,
