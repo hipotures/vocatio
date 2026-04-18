@@ -1,5 +1,6 @@
 import csv
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
+from bootstrap_photo_boundaries import PHOTO_BOUNDARY_SCORE_HEADERS
 from build_ml_boundary_candidate_dataset import CANDIDATE_ROW_HEADERS
 from lib.ml_boundary_dataset import canonical_candidate_id
 from lib.ml_boundary_features import CANONICAL_MISSING
@@ -75,6 +77,38 @@ def _write_split_manifest(path: Path, rows: list[dict[str, str]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _write_boundary_scores_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PHOTO_BOUNDARY_SCORE_HEADERS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _shift_candidate_window(row: dict[str, str], *, day_id: str, first_photo_index: int) -> dict[str, str]:
+    shifted_row = dict(row)
+    window_photo_ids = [f"{day_id}-p{photo_index}" for photo_index in range(first_photo_index, first_photo_index + 5)]
+    window_relative_paths = [f"cam/{photo_id}.jpg" for photo_id in window_photo_ids]
+    for frame_index, photo_index in enumerate(range(first_photo_index, first_photo_index + 5), start=1):
+        suffix = f"{frame_index:02d}"
+        photo_id = f"{day_id}-p{photo_index}"
+        shifted_row[f"frame_{suffix}_photo_id"] = photo_id
+        shifted_row[f"frame_{suffix}_relpath"] = f"cam/{photo_id}.jpg"
+        shifted_row[f"frame_{suffix}_timestamp"] = str(float(photo_index))
+        shifted_row[f"frame_{suffix}_thumb_path"] = f"thumb/{photo_id}.jpg"
+        shifted_row[f"frame_{suffix}_preview_path"] = f"preview/{photo_id}.jpg"
+    shifted_row["center_left_photo_id"] = window_photo_ids[2]
+    shifted_row["center_right_photo_id"] = window_photo_ids[3]
+    shifted_row["candidate_id"] = canonical_candidate_id(
+        day_id=day_id,
+        center_left_photo_id=window_photo_ids[2],
+        center_right_photo_id=window_photo_ids[3],
+        candidate_rule_version=str(shifted_row["candidate_rule_version"]),
+    )
+    shifted_row["window_photo_ids"] = json.dumps([photo_id.split("-", 1)[1] for photo_id in window_photo_ids])
+    shifted_row["window_relative_paths"] = json.dumps(window_relative_paths)
+    return shifted_row
 
 
 def _write_annotation_payload(
@@ -384,6 +418,127 @@ def test_load_training_data_bundle_reports_missing_annotation_counts(tmp_path: P
 
     assert bundle.missing_annotation_photo_count == 4
     assert bundle.missing_annotation_candidate_count == 1
+
+
+def test_load_training_data_bundle_joins_heuristic_boundary_scores_and_counts_missing_pairs(
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspace"
+    corpus_dir = workspace_dir / "ml_boundary_corpus"
+    dataset_path = corpus_dir / "ml_boundary_candidates.corpus.csv"
+    split_manifest_path = corpus_dir / "ml_boundary_splits.csv"
+    boundary_scores_path = workspace_dir / "photo_boundary_scores.csv"
+    corpus_dir.mkdir(parents=True)
+
+    train_row = _candidate_row(day_id="20250324", segment_type="performance", boundary="1")
+    validation_row = _shift_candidate_window(
+        _candidate_row(
+            day_id="20250324",
+            segment_type="ceremony",
+            boundary="0",
+            candidate_rule_version="gap-v2",
+        ),
+        day_id="20250324",
+        first_photo_index=3,
+    )
+    _write_candidate_csv(dataset_path, [train_row, validation_row])
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"candidate_id": train_row["candidate_id"], "split_name": "train"},
+            {"candidate_id": validation_row["candidate_id"], "split_name": "validation"},
+        ],
+    )
+    _write_boundary_scores_csv(
+        boundary_scores_path,
+        [
+            {
+                "left_relative_path": "cam/20250324-p1.jpg",
+                "right_relative_path": "cam/20250324-p2.jpg",
+                "left_start_local": "2025-03-24T10:00:01",
+                "right_start_local": "2025-03-24T10:00:02",
+                "left_start_epoch_ms": "1000",
+                "right_start_epoch_ms": "2000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.101000",
+                "distance_zscore": "0.201000",
+                "smoothed_distance_zscore": "0.301000",
+                "time_gap_boost": "0.000000",
+                "boundary_score": "0.401000",
+                "boundary_label": "none",
+                "boundary_reason": "baseline",
+                "model_source": "bootstrap_heuristic",
+            },
+            {
+                "left_relative_path": "cam/20250324-p2.jpg",
+                "right_relative_path": "cam/20250324-p3.jpg",
+                "left_start_local": "2025-03-24T10:00:02",
+                "right_start_local": "2025-03-24T10:00:03",
+                "left_start_epoch_ms": "2000",
+                "right_start_epoch_ms": "3000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.102000",
+                "distance_zscore": "0.202000",
+                "smoothed_distance_zscore": "0.302000",
+                "time_gap_boost": "0.100000",
+                "boundary_score": "0.802000",
+                "boundary_label": "soft",
+                "boundary_reason": "lifted",
+                "model_source": "bootstrap_heuristic",
+            },
+            {
+                "left_relative_path": "cam/20250324-p3.jpg",
+                "right_relative_path": "cam/20250324-p4.jpg",
+                "left_start_local": "2025-03-24T10:00:03",
+                "right_start_local": "2025-03-24T10:00:04",
+                "left_start_epoch_ms": "3000",
+                "right_start_epoch_ms": "4000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.103000",
+                "distance_zscore": "0.203000",
+                "smoothed_distance_zscore": "0.303000",
+                "time_gap_boost": "0.200000",
+                "boundary_score": "0.803000",
+                "boundary_label": "hard",
+                "boundary_reason": "center-cut",
+                "model_source": "bootstrap_heuristic",
+            },
+            {
+                "left_relative_path": "cam/20250324-p4.jpg",
+                "right_relative_path": "cam/20250324-p5.jpg",
+                "left_start_local": "2025-03-24T10:00:04",
+                "right_start_local": "2025-03-24T10:00:05",
+                "left_start_epoch_ms": "4000",
+                "right_start_epoch_ms": "5000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.104000",
+                "distance_zscore": "0.204000",
+                "smoothed_distance_zscore": "0.304000",
+                "time_gap_boost": "0.300000",
+                "boundary_score": "0.404000",
+                "boundary_label": "none",
+                "boundary_reason": "settled",
+                "model_source": "bootstrap_heuristic",
+            },
+        ],
+    )
+
+    bundle = load_training_data_bundle(
+        dataset_path,
+        split_manifest_path=split_manifest_path,
+        mode="tabular_only",
+    )
+
+    assert bundle.train_rows["heuristic_dino_dist_12"].tolist() == [0.101]
+    assert bundle.train_rows["heuristic_boundary_score_23"].tolist() == [0.802]
+    assert bundle.train_rows["heuristic_smoothed_distance_zscore_34"].tolist() == [0.303]
+    assert bundle.train_rows["heuristic_time_gap_boost_45"].tolist() == [0.3]
+    assert bundle.train_rows["heuristic_boundary_label_34"].tolist() == ["hard"]
+    assert math.isnan(bundle.validation_rows["heuristic_dino_dist_34"].tolist()[0])
+    assert math.isnan(bundle.validation_rows["heuristic_boundary_score_45"].tolist()[0])
+    assert bundle.validation_rows["heuristic_boundary_label_34"].tolist() == [CANONICAL_MISSING]
+    assert bundle.missing_heuristic_pair_count == 2
+    assert bundle.missing_heuristic_candidate_count == 1
 
 
 def test_load_training_data_bundle_extends_descriptor_registry_from_dataset_annotations(

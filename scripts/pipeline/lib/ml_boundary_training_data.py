@@ -4,6 +4,7 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
+from build_photo_segments import PHOTO_BOUNDARY_SCORE_FILENAME, read_boundary_scores
 from lib.ml_boundary_features import build_candidate_feature_row
 from lib.photo_pre_model_annotations import (
     DEFAULT_OUTPUT_DIRNAME,
@@ -34,6 +35,20 @@ REQUIRED_DERIVED_FEATURE_SOURCE_COLUMNS = tuple(
 NON_MODEL_FEATURE_COLUMNS = frozenset(REQUIRED_BASE_COLUMNS + ("split_name",))
 SPLIT_MANIFEST_VALUE_COLUMNS = ("split_name",)
 ALLOWED_SPLIT_NAMES = ("train", "validation", "test")
+HEURISTIC_PAIR_JOIN_COLUMNS = (
+    ("12", "frame_01_relpath", "frame_02_relpath"),
+    ("23", "frame_02_relpath", "frame_03_relpath"),
+    ("34", "frame_03_relpath", "frame_04_relpath"),
+    ("45", "frame_04_relpath", "frame_05_relpath"),
+)
+HEURISTIC_VALUE_COLUMNS = (
+    "dino_cosine_distance",
+    "boundary_score",
+    "distance_zscore",
+    "smoothed_distance_zscore",
+    "time_gap_boost",
+    "boundary_label",
+)
 
 
 @dataclass(frozen=True)
@@ -55,6 +70,8 @@ class TrainingDataBundle:
     split_counts_by_name: dict[str, int]
     missing_annotation_photo_count: int
     missing_annotation_candidate_count: int
+    missing_heuristic_pair_count: int
+    missing_heuristic_candidate_count: int
     shared_feature_columns: list[str]
     image_feature_columns: list[str]
     segment_type: PredictorTrainingData
@@ -231,14 +248,18 @@ def load_training_data_bundle(
         split_manifest_frame=split_manifest_frame,
     )
     resolved_annotation_dir = _resolve_annotation_dir(dataset_path, annotation_dir=annotation_dir)
+    heuristic_rows_by_pair = _load_heuristic_records(dataset_path)
     (
         joined_frame,
         derived_feature_columns,
         missing_annotation_photo_count,
         missing_annotation_candidate_count,
+        missing_heuristic_pair_count,
+        missing_heuristic_candidate_count,
     ) = _derive_feature_view(
         joined_frame,
         annotation_dir=resolved_annotation_dir,
+        heuristic_rows_by_pair=heuristic_rows_by_pair,
     )
     train_rows = TrainingTable(
         [row for row in joined_frame.rows if row["split_name"] == "train"]
@@ -276,6 +297,8 @@ def load_training_data_bundle(
         split_counts_by_name=_split_counts(joined_frame["split_name"]),
         missing_annotation_photo_count=missing_annotation_photo_count,
         missing_annotation_candidate_count=missing_annotation_candidate_count,
+        missing_heuristic_pair_count=missing_heuristic_pair_count,
+        missing_heuristic_candidate_count=missing_heuristic_candidate_count,
         shared_feature_columns=columns_by_mode["shared_feature_columns"],
         image_feature_columns=columns_by_mode["image_feature_columns"],
         segment_type=PredictorTrainingData(
@@ -400,11 +423,22 @@ def _resolve_annotation_dir(dataset_path: Path, *, annotation_dir: Path | None) 
     return None
 
 
+def _resolve_boundary_scores_path(dataset_path: Path) -> Path | None:
+    candidate_paths = [dataset_path.parent / PHOTO_BOUNDARY_SCORE_FILENAME]
+    if dataset_path.parent.name == "ml_boundary_corpus":
+        candidate_paths.insert(0, dataset_path.parent.parent / PHOTO_BOUNDARY_SCORE_FILENAME)
+    for candidate_path in candidate_paths:
+        if candidate_path.exists():
+            return candidate_path
+    return None
+
+
 def _derive_feature_view(
     table: TrainingTable,
     *,
     annotation_dir: Path | None,
-) -> tuple[TrainingTable, list[str], int, int]:
+    heuristic_rows_by_pair: dict[tuple[str, str], dict[str, str]],
+) -> tuple[TrainingTable, list[str], int, int, int, int]:
     descriptors_by_relative_path = _load_annotation_records(table, annotation_dir=annotation_dir)
     descriptor_field_registry = None
     if annotation_dir is not None:
@@ -415,6 +449,8 @@ def _derive_feature_view(
     derived_feature_columns: list[str] = []
     missing_annotation_photo_count = 0
     missing_annotation_candidate_count = 0
+    missing_heuristic_pair_count = 0
+    missing_heuristic_candidate_count = 0
     for row in table.rows:
         descriptors, candidate_missing_annotation_count = _build_candidate_descriptors(
             row,
@@ -424,11 +460,19 @@ def _derive_feature_view(
         if candidate_missing_annotation_count > 0:
             missing_annotation_photo_count += candidate_missing_annotation_count
             missing_annotation_candidate_count += 1
+        heuristic_features, candidate_missing_heuristic_pair_count = _build_candidate_heuristic_features(
+            row,
+            heuristic_rows_by_pair=heuristic_rows_by_pair,
+        )
+        if candidate_missing_heuristic_pair_count > 0:
+            missing_heuristic_pair_count += candidate_missing_heuristic_pair_count
+            missing_heuristic_candidate_count += 1
         derived_features = build_candidate_feature_row(
             row,
             descriptors=descriptors,
             embeddings=None,
             descriptor_field_registry=descriptor_field_registry,
+            heuristic_features=heuristic_features,
         )
         if not derived_feature_columns:
             derived_feature_columns = list(derived_features.keys())
@@ -453,6 +497,8 @@ def _derive_feature_view(
         derived_feature_columns,
         missing_annotation_photo_count,
         missing_annotation_candidate_count,
+        missing_heuristic_pair_count,
+        missing_heuristic_candidate_count,
     )
 
 
@@ -472,6 +518,24 @@ def _load_annotation_records(
         }
     )
     return load_photo_pre_model_annotations_by_relative_path(annotation_dir, relative_paths)
+
+
+def _load_heuristic_records(
+    dataset_path: Path,
+) -> dict[tuple[str, str], dict[str, str]]:
+    boundary_scores_path = _resolve_boundary_scores_path(dataset_path)
+    if boundary_scores_path is None:
+        return {}
+    heuristic_rows_by_pair: dict[tuple[str, str], dict[str, str]] = {}
+    for row in read_boundary_scores(boundary_scores_path):
+        pair_key = (row["left_relative_path"], row["right_relative_path"])
+        if pair_key in heuristic_rows_by_pair:
+            raise ValueError(
+                "photo_boundary_scores.csv contains duplicate adjacent pair rows for "
+                f"{pair_key[0]} -> {pair_key[1]}"
+            )
+        heuristic_rows_by_pair[pair_key] = row
+    return heuristic_rows_by_pair
 
 
 def _build_candidate_descriptors(
@@ -495,6 +559,26 @@ def _build_candidate_descriptors(
             continue
         descriptors[photo_id] = descriptor_record
     return descriptors, missing_annotation_count
+
+
+def _build_candidate_heuristic_features(
+    row: dict[str, object],
+    *,
+    heuristic_rows_by_pair: dict[tuple[str, str], dict[str, str]],
+) -> tuple[dict[str, dict[str, str]], int]:
+    heuristic_features: dict[str, dict[str, str]] = {}
+    missing_pair_count = 0
+    for pair_name, left_column, right_column in HEURISTIC_PAIR_JOIN_COLUMNS:
+        left_relative_path = str(row.get(left_column, "")).strip()
+        right_relative_path = str(row.get(right_column, "")).strip()
+        pair_row = heuristic_rows_by_pair.get((left_relative_path, right_relative_path))
+        if pair_row is None:
+            missing_pair_count += 1
+            continue
+        heuristic_features[pair_name] = {
+            column_name: pair_row[column_name] for column_name in HEURISTIC_VALUE_COLUMNS
+        }
+    return heuristic_features, missing_pair_count
 
 
 def _candidate_relative_paths(row: dict[str, object]) -> list[str]:
