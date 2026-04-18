@@ -422,6 +422,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 }
             )
         lines = probe.build_ml_hint_lines_for_candidate(
+            day_id="20260323",
             joined_rows=joined_rows,
             cut_index=2,
             boundary_rows_by_pair={},
@@ -450,6 +451,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             )
         self.assertEqual(
             probe.build_ml_hint_lines_for_candidate(
+                day_id="20260323",
                 joined_rows=joined_rows,
                 cut_index=2,
                 boundary_rows_by_pair={},
@@ -1181,6 +1183,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 probe, "run_vlm_request"
             ) as run_vlm_mock:
                 row_count = probe.probe_vlm_photo_boundaries(
+                    day_id=day_dir.name,
                     workspace_dir=workspace_dir,
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,
@@ -1315,6 +1318,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 probe, "build_run_id", return_value="vlm-20260414060000"
             ):
                 row_count = probe.probe_vlm_photo_boundaries(
+                    day_id=day_dir.name,
                     workspace_dir=workspace_dir,
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,
@@ -1442,6 +1446,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 ),
             ), mock.patch.object(probe, "build_run_id", return_value="vlm-20260414061000"):
                 row_count = probe.probe_vlm_photo_boundaries(
+                    day_id=day_dir.name,
                     workspace_dir=workspace_dir,
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,
@@ -1572,6 +1577,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 ),
             ) as run_vlm_mock, mock.patch.object(probe, "build_run_id", return_value="vlm-20260414070000"):
                 row_count = probe.probe_vlm_photo_boundaries(
+                    day_id=day_dir.name,
                     workspace_dir=workspace_dir,
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,
@@ -1719,6 +1725,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 probe, "build_run_id", return_value="vlm-20260414071000"
             ):
                 row_count = probe.probe_vlm_photo_boundaries(
+                    day_id=day_dir.name,
                     workspace_dir=workspace_dir,
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,

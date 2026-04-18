@@ -762,14 +762,16 @@ def _build_ml_candidate_window_rows(
 
 def _build_ml_candidate_row(
     rows: Sequence[Mapping[str, str]],
+    *,
+    day_id: str,
 ) -> dict[str, object]:
     if len(rows) != ML_BOUNDARY_WINDOW_SIZE:
         raise ValueError(f"ML candidate rows must contain exactly {ML_BOUNDARY_WINDOW_SIZE} frames")
-    day_id = str(rows[0].get("day", "") or "").strip()
-    if day_id == "":
-        raise ValueError("joined photo rows must include non-blank day values")
+    normalized_day_id = day_id.strip()
+    if normalized_day_id == "":
+        raise ValueError("day_id must not be blank for ML prompt inference")
     candidate_row: dict[str, object] = {
-        "day_id": day_id,
+        "day_id": normalized_day_id,
         "window_size": ML_BOUNDARY_WINDOW_SIZE,
         "center_left_photo_id": str(rows[2].get("photo_id", "") or rows[2].get("relative_path", "")).strip(),
         "center_right_photo_id": str(rows[3].get("photo_id", "") or rows[3].get("relative_path", "")).strip(),
@@ -930,6 +932,7 @@ def build_ml_hint_lines(
 
 def build_ml_hint_lines_for_candidate(
     *,
+    day_id: str,
     joined_rows: Sequence[Mapping[str, str]],
     cut_index: int,
     boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
@@ -943,7 +946,7 @@ def build_ml_hint_lines_for_candidate(
         return build_ml_hint_lines(None)
     prediction = predict_ml_hint_for_candidate(
         ml_hint_context=ml_hint_context,
-        candidate_row=_build_ml_candidate_row(candidate_rows),
+        candidate_row=_build_ml_candidate_row(candidate_rows, day_id=day_id),
         boundary_rows_by_pair=boundary_rows_by_pair,
         photo_pre_model_dir=photo_pre_model_dir,
     )
@@ -1788,6 +1791,7 @@ def build_batch_result_message(
 
 def probe_vlm_photo_boundaries(
     *,
+    day_id: str,
     workspace_dir: Path,
     embedded_manifest_csv: Path,
     photo_manifest_csv: Path,
@@ -1922,6 +1926,7 @@ def probe_vlm_photo_boundaries(
             end_index = start_index + window_size
             window_rows = joined_rows[start_index:end_index]
             ml_hint_lines = build_ml_hint_lines_for_candidate(
+                day_id=day_id,
                 joined_rows=joined_rows,
                 cut_index=cut_index,
                 boundary_rows_by_pair=boundary_rows_by_pair,
@@ -2073,6 +2078,7 @@ def main() -> int:
         "dump_debug_dir": args.dump_debug_dir,
     }
     row_count = probe_vlm_photo_boundaries(
+        day_id=day_dir.name,
         workspace_dir=workspace_dir,
         embedded_manifest_csv=embedded_manifest_csv,
         photo_manifest_csv=photo_manifest_csv,
