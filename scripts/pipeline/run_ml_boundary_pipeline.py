@@ -31,6 +31,7 @@ from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
 
 
 console = Console()
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 CORPUS_CANDIDATES_FILENAME = "ml_boundary_candidates.corpus.csv"
 DAY_METADATA_FILENAME = "ml_boundary_day_metadata.csv"
@@ -150,8 +151,16 @@ def _script_path(script_name: str) -> Path:
     return Path(__file__).resolve().parent / script_name
 
 
+def _script_ref(script_name: str) -> str:
+    return str(Path("scripts/pipeline") / script_name)
+
+
 def _run_command(command: Sequence[str]) -> None:
-    subprocess.run(list(command), check=True)
+    subprocess.run(list(command), check=True, cwd=REPO_ROOT)
+
+
+def _print_compact_command(label: str, command: Sequence[str]) -> None:
+    console.print(f"Run {label}: {' '.join(str(value) for value in command)}")
 
 
 def _existing_day_candidate_outputs(workspace_dir: Path) -> list[Path]:
@@ -180,10 +189,10 @@ def _prepare_single_day(day_dir: Path, *, restart: bool) -> Path:
     workspace_dir = resolve_workspace_dir(day_dir, None)
     export_command = [
         sys.executable,
-        str(_script_path("export_ml_boundary_reviewed_truth.py")),
+        _script_ref("export_ml_boundary_reviewed_truth.py"),
         str(day_dir),
     ]
-    console.print(f"Run Export reviewed truth: {' '.join(export_command)}")
+    _print_compact_command("Export reviewed truth", export_command)
     _run_command(export_command)
 
     existing_outputs = _existing_day_candidate_outputs(workspace_dir)
@@ -195,20 +204,20 @@ def _prepare_single_day(day_dir: Path, *, restart: bool) -> Path:
 
     build_command = [
         sys.executable,
-        str(_script_path("build_ml_boundary_candidate_dataset.py")),
+        _script_ref("build_ml_boundary_candidate_dataset.py"),
         str(day_dir),
     ]
     if restart:
         build_command.append("--overwrite")
-    console.print(f"Run Build candidate dataset: {' '.join(build_command)}")
+    _print_compact_command("Build candidate dataset", build_command)
     _run_command(build_command)
 
     validate_command = [
         sys.executable,
-        str(_script_path("validate_ml_boundary_dataset.py")),
+        _script_ref("validate_ml_boundary_dataset.py"),
         str(day_dir),
     ]
-    console.print(f"Run Validate day dataset: {' '.join(validate_command)}")
+    _print_compact_command("Validate day dataset", validate_command)
     _run_command(validate_command)
 
     return workspace_dir
@@ -1009,18 +1018,16 @@ def _run_training_and_evaluation(
         "--group",
         "autogluon",
         "python3",
-        str(_script_path("train_ml_boundary_verifier.py")),
-        str(corpus_candidates_path),
-        "--split-manifest-csv",
-        str(split_manifest_path),
+        _script_ref("train_ml_boundary_verifier.py"),
+        str(corpus_candidates_path.parent),
+        "--model-run-id",
+        model_dir.name,
         "--mode",
         mode,
-        "--output-dir",
-        str(model_dir),
     ]
     if restart:
         train_command.append("--overwrite")
-    console.print(f"Run Train verifier: {' '.join(train_command)}")
+    _print_compact_command("Train verifier", train_command)
     _run_command(train_command)
     training_metadata = None
     training_metadata_path = model_dir / TRAINING_METADATA_FILENAME
@@ -1034,18 +1041,14 @@ def _run_training_and_evaluation(
         "--group",
         "autogluon",
         "python3",
-        str(_script_path("evaluate_ml_boundary_verifier.py")),
-        str(corpus_candidates_path),
-        "--model-dir",
-        str(model_dir),
-        "--split-manifest-csv",
-        str(split_manifest_path),
-        "--output-dir",
-        str(eval_dir),
+        _script_ref("evaluate_ml_boundary_verifier.py"),
+        str(corpus_candidates_path.parent),
+        "--model-run-id",
+        model_dir.name,
     ]
     if restart:
         evaluate_command.append("--overwrite")
-    console.print(f"Run Evaluate verifier: {' '.join(evaluate_command)}")
+    _print_compact_command("Evaluate verifier", evaluate_command)
     _run_command(evaluate_command)
     metrics_path = eval_dir / EVALUATION_METRICS_FILENAME
     if not metrics_path.is_file():
@@ -1162,19 +1165,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     validate_command = [
         sys.executable,
-        str(_script_path("validate_ml_boundary_dataset.py")),
-        str(corpus_candidates_path),
+        _script_ref("validate_ml_boundary_dataset.py"),
+        str(corpus_workspace),
         "--attrition-json",
-        str(corpus_attrition_path),
+        CORPUS_ATTRITION_FILENAME,
         "--split-manifest-csv",
-        str(split_manifest_path),
+        SPLIT_MANIFEST_FILENAME,
         "--report-json",
-        str(corpus_workspace / VALIDATION_REPORT_FILENAME),
+        VALIDATION_REPORT_FILENAME,
     ]
     if required_heldout_classes:
         validate_command.append("--required-heldout-classes")
         validate_command.extend(required_heldout_classes)
-    console.print(f"Run Validate corpus dataset: {' '.join(validate_command)}")
+    _print_compact_command("Validate corpus dataset", validate_command)
     _run_command(validate_command)
 
     model_dir: Path | None = None

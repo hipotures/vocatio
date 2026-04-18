@@ -11,7 +11,11 @@ from rich.console import Console
 
 from lib.ml_boundary_training_data import load_training_data_bundle
 from lib.pipeline_io import atomic_write_json
+from lib.workspace_dir import resolve_workspace_dir
 from train_ml_boundary_verifier import (
+    DEFAULT_CORPUS_DATASET_FILENAME,
+    DEFAULT_MODEL_ROOT_DIRNAME,
+    DEFAULT_SPLIT_MANIFEST_FILENAME,
     TRAINING_METADATA_FILENAME,
     TRAINING_PLAN_FILENAME,
     load_multimodal_predictor_class,
@@ -23,6 +27,7 @@ console = Console(stderr=True)
 
 METRICS_FILENAME = "metrics.json"
 MODEL_INFERENCE_EVALUATION_MODE = "model_inference_test_split"
+DEFAULT_EVAL_ROOT_DIRNAME = "ml_boundary_eval"
 
 
 def threshold_boundary_probabilities(probs: Sequence[float], threshold: float) -> list[int]:
@@ -450,24 +455,41 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "dataset_path",
-        help="Path to ml_boundary_candidates CSV dataset.",
+        help=(
+            "Path to ml_boundary_candidates.corpus.csv, a corpus workspace directory, "
+            "or a day directory like /data/20260323."
+        ),
+    )
+    parser.add_argument(
+        "--workspace-dir",
+        help="Directory that holds ML boundary artifacts when dataset_path is DAY.",
     )
     parser.add_argument(
         "--model-dir",
-        required=True,
-        help="Directory containing ML boundary model artifacts.",
+        help=(
+            "Directory containing ML boundary model artifacts. "
+            f"Default: {DEFAULT_MODEL_ROOT_DIRNAME}/MODEL_RUN_ID in corpus workspace."
+        ),
     )
     parser.add_argument(
         "--split-manifest-csv",
         help=(
             "Path to ml_boundary_splits CSV. "
-            "Default: use split_manifest_path from training_plan.json."
+            f"Default: {DEFAULT_SPLIT_MANIFEST_FILENAME} in corpus workspace, "
+            "or use split_manifest_path from training_plan.json."
         ),
     )
     parser.add_argument(
         "--output-dir",
-        required=True,
-        help="Directory where evaluation artifacts will be written.",
+        help=(
+            "Directory where evaluation artifacts will be written. "
+            f"Default: {DEFAULT_EVAL_ROOT_DIRNAME}/MODEL_RUN_ID in corpus workspace."
+        ),
+    )
+    parser.add_argument(
+        "--model-run-id",
+        default="run-001",
+        help="Run directory name used when --model-dir/--output-dir are omitted. Default: run-001",
     )
     parser.add_argument(
         "--overwrite",
@@ -475,6 +497,70 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Replace an existing metrics artifact in the output directory.",
     )
     return parser.parse_args(argv)
+
+
+def _resolve_relative_path(base_dir: Path, value: str | None, default_name: str) -> Path:
+    if not value:
+        return base_dir / default_name
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    return base_dir / candidate
+
+
+def _resolve_corpus_context(
+    *,
+    dataset_value: str,
+    workspace_dir_value: str | None,
+    split_manifest_value: str | None,
+    model_dir_value: str | None,
+    output_dir_value: str | None,
+    model_run_id: str,
+) -> tuple[Path, Path | None, Path, Path]:
+    dataset_input_path = Path(dataset_value).expanduser()
+    if dataset_input_path.is_dir():
+        if (dataset_input_path / DEFAULT_CORPUS_DATASET_FILENAME).is_file():
+            corpus_workspace = dataset_input_path.resolve()
+        else:
+            day_dir = dataset_input_path.resolve()
+            workspace_dir = resolve_workspace_dir(day_dir, workspace_dir_value)
+            corpus_workspace = (workspace_dir / "ml_boundary_corpus").resolve()
+        dataset_path = corpus_workspace / DEFAULT_CORPUS_DATASET_FILENAME
+        split_manifest_path = (
+            _resolve_relative_path(corpus_workspace, split_manifest_value, DEFAULT_SPLIT_MANIFEST_FILENAME)
+            if split_manifest_value is not None
+            else None
+        )
+        model_dir = _resolve_relative_path(
+            corpus_workspace,
+            model_dir_value,
+            f"{DEFAULT_MODEL_ROOT_DIRNAME}/{model_run_id}",
+        )
+        output_dir = _resolve_relative_path(
+            corpus_workspace,
+            output_dir_value,
+            f"{DEFAULT_EVAL_ROOT_DIRNAME}/{model_run_id}",
+        )
+        return dataset_path.resolve(), split_manifest_path.resolve() if split_manifest_path else None, model_dir.resolve(), output_dir.resolve()
+
+    dataset_path = dataset_input_path.resolve()
+    base_dir = dataset_path.parent
+    split_manifest_path = (
+        _resolve_relative_path(base_dir, split_manifest_value, DEFAULT_SPLIT_MANIFEST_FILENAME)
+        if split_manifest_value is not None
+        else None
+    )
+    model_dir = _resolve_relative_path(
+        base_dir,
+        model_dir_value,
+        f"{DEFAULT_MODEL_ROOT_DIRNAME}/{model_run_id}",
+    )
+    output_dir = _resolve_relative_path(
+        base_dir,
+        output_dir_value,
+        f"{DEFAULT_EVAL_ROOT_DIRNAME}/{model_run_id}",
+    )
+    return dataset_path, split_manifest_path.resolve() if split_manifest_path else None, model_dir.resolve(), output_dir.resolve()
 
 
 def validate_dataset_contract(dataset_path: Path) -> None:
@@ -486,24 +572,29 @@ def validate_dataset_contract(dataset_path: Path) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    dataset_path = Path(args.dataset_path).expanduser()
+    dataset_path, cli_split_manifest_path, model_dir, output_dir = _resolve_corpus_context(
+        dataset_value=args.dataset_path,
+        workspace_dir_value=args.workspace_dir,
+        split_manifest_value=args.split_manifest_csv,
+        model_dir_value=args.model_dir,
+        output_dir_value=args.output_dir,
+        model_run_id=args.model_run_id,
+    )
     if not dataset_path.is_file():
         raise FileNotFoundError(f"Dataset does not exist: {dataset_path}")
     validate_dataset_contract(dataset_path)
 
-    model_dir = Path(args.model_dir).expanduser()
     if not model_dir.is_dir():
         raise FileNotFoundError(f"Model directory does not exist: {model_dir}")
 
     training_plan, _training_metadata = _load_model_contract(model_dir)
     split_manifest_path = _resolve_split_manifest_path(
-        cli_value=args.split_manifest_csv,
+        cli_value=str(cli_split_manifest_path) if cli_split_manifest_path is not None else None,
         training_plan=training_plan,
     )
     if not split_manifest_path.is_file():
         raise FileNotFoundError(f"Split manifest does not exist: {split_manifest_path}")
 
-    output_dir = Path(args.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     _guard_existing_metrics(output_dir, overwrite=args.overwrite)
 

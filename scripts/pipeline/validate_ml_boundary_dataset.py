@@ -34,6 +34,7 @@ console = Console(stderr=True)
 
 WINDOW_SIZE = 5
 DEFAULT_REPORT_FILENAME = "ml_boundary_validation_report.json"
+DEFAULT_CORPUS_CANDIDATES_FILENAME = "ml_boundary_candidates.corpus.csv"
 FRAME_TIMESTAMP_FIELDS = [f"frame_0{index}_timestamp" for index in range(1, 6)]
 FRAME_PHOTO_ID_FIELDS = [f"frame_0{index}_photo_id" for index in range(1, 6)]
 FRAME_RELPATH_FIELDS = [f"frame_0{index}_relpath" for index in range(1, 6)]
@@ -522,6 +523,31 @@ def _resolve_cli_paths(
     args: argparse.Namespace,
 ) -> tuple[Path, Path, Optional[Path], Optional[Path]]:
     candidate_input_path = Path(args.candidate_csv).expanduser()
+    if candidate_input_path.is_dir() and (candidate_input_path / DEFAULT_CORPUS_CANDIDATES_FILENAME).is_file():
+        corpus_workspace = candidate_input_path.resolve()
+        candidate_csv_path = corpus_workspace / DEFAULT_CORPUS_CANDIDATES_FILENAME
+        attrition_json_path = _resolve_workspace_path(
+            corpus_workspace,
+            args.attrition_json,
+            DEFAULT_ATTRITION_FILENAME,
+        )
+        split_manifest_path = (
+            _resolve_workspace_path(corpus_workspace, args.split_manifest_csv, "ml_boundary_splits.csv")
+            if args.split_manifest_csv
+            else None
+        )
+        report_json_path = _resolve_workspace_path(
+            corpus_workspace,
+            args.report_json,
+            DEFAULT_REPORT_FILENAME,
+        )
+        return (
+            candidate_csv_path.resolve(),
+            attrition_json_path.resolve(),
+            split_manifest_path.resolve() if split_manifest_path is not None else None,
+            report_json_path.resolve(),
+        )
+
     if _looks_like_day_dir(candidate_input_path):
         day_dir = candidate_input_path.resolve()
         workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)

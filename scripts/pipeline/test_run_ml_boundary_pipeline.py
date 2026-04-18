@@ -213,7 +213,10 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
             ]
             _write_day_candidate_artifacts(workspace_dir, rows)
         if "train_ml_boundary_verifier.py" in command_text:
-            model_dir = Path(command_values[command_values.index("--output-dir") + 1])
+            script_index = command_values.index("scripts/pipeline/train_ml_boundary_verifier.py")
+            corpus_dir = Path(command_values[script_index + 1])
+            model_run_id = command_values[command_values.index("--model-run-id") + 1]
+            model_dir = corpus_dir / "ml_boundary_models" / model_run_id
             model_dir.mkdir(parents=True, exist_ok=True)
             (model_dir / "training_metadata.json").write_text(
                 json.dumps(
@@ -226,7 +229,10 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
                 encoding="utf-8",
             )
         if "evaluate_ml_boundary_verifier.py" in command_text:
-            eval_dir = Path(command_values[command_values.index("--output-dir") + 1])
+            script_index = command_values.index("scripts/pipeline/evaluate_ml_boundary_verifier.py")
+            corpus_dir = Path(command_values[script_index + 1])
+            model_run_id = command_values[command_values.index("--model-run-id") + 1]
+            eval_dir = corpus_dir / "ml_boundary_eval" / model_run_id
             eval_dir.mkdir(parents=True, exist_ok=True)
             (eval_dir / "metrics.json").write_text(
                 json.dumps(
@@ -399,10 +405,11 @@ def test_main_passes_corpus_attrition_json_to_corpus_validator(tmp_path: Path, m
     validate_command = next(
         command
         for command in recorded_commands
-        if "validate_ml_boundary_dataset.py" in command[1] and "ml_boundary_candidates.corpus.csv" in " ".join(command)
+        if "validate_ml_boundary_dataset.py" in command[1] and str(workspace_dir / "ml_boundary_corpus") in command
     )
     assert "--attrition-json" in validate_command
-    attrition_path = Path(validate_command[validate_command.index("--attrition-json") + 1])
+    corpus_workspace = workspace_dir / "ml_boundary_corpus"
+    attrition_path = corpus_workspace / validate_command[validate_command.index("--attrition-json") + 1]
     assert attrition_path.name == "ml_boundary_attrition.json"
     payload = json.loads(attrition_path.read_text(encoding="utf-8"))
     assert payload["candidate_count_retained"] == 3
@@ -464,7 +471,10 @@ def test_main_single_day_global_random_is_allowed(tmp_path: Path, monkeypatch) -
                 rows.append(row)
             _write_day_candidate_artifacts(workspace_dir, rows)
         if "train_ml_boundary_verifier.py" in command_text:
-            model_dir = Path(command_values[command_values.index("--output-dir") + 1])
+            script_index = command_values.index("scripts/pipeline/train_ml_boundary_verifier.py")
+            corpus_dir = Path(command_values[script_index + 1])
+            model_run_id = command_values[command_values.index("--model-run-id") + 1]
+            model_dir = corpus_dir / "ml_boundary_models" / model_run_id
             model_dir.mkdir(parents=True, exist_ok=True)
             (model_dir / "training_metadata.json").write_text(
                 json.dumps(
@@ -475,7 +485,10 @@ def test_main_single_day_global_random_is_allowed(tmp_path: Path, monkeypatch) -
                 encoding="utf-8",
             )
         if "evaluate_ml_boundary_verifier.py" in command_text:
-            eval_dir = Path(command_values[command_values.index("--output-dir") + 1])
+            script_index = command_values.index("scripts/pipeline/evaluate_ml_boundary_verifier.py")
+            corpus_dir = Path(command_values[script_index + 1])
+            model_run_id = command_values[command_values.index("--model-run-id") + 1]
+            eval_dir = corpus_dir / "ml_boundary_eval" / model_run_id
             eval_dir.mkdir(parents=True, exist_ok=True)
             (eval_dir / "metrics.json").write_text(
                 json.dumps(
