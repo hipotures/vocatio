@@ -13,6 +13,10 @@ sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 import train_ml_boundary_verifier
 from build_ml_boundary_candidate_dataset import CANDIDATE_ROW_HEADERS
 from lib.ml_boundary_dataset import canonical_candidate_id
+from lib.ml_boundary_training_options import (
+    DEFAULT_TRAINING_PRESET,
+    resolve_training_options,
+)
 from lib.photo_pre_model_annotations import DEFAULT_OUTPUT_DIRNAME
 from train_ml_boundary_verifier import (
     FEATURE_COLUMNS_FILENAME,
@@ -219,6 +223,23 @@ def test_build_training_plan_rejects_unknown_mode() -> None:
         assert "mode must be one of" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_resolve_training_options_uses_current_defaults() -> None:
+    assert DEFAULT_TRAINING_PRESET == "medium_quality"
+    assert resolve_training_options(preset=None, train_minutes=None) == {
+        "training_preset": "medium_quality",
+        "train_minutes": None,
+        "time_limit_seconds": None,
+    }
+
+
+def test_resolve_training_options_converts_minutes_to_seconds() -> None:
+    assert resolve_training_options(preset="best_quality", train_minutes=10) == {
+        "training_preset": "best_quality",
+        "train_minutes": 10.0,
+        "time_limit_seconds": 600,
+    }
 
 
 def test_validate_dataset_contract_rejects_unsupported_extension(tmp_path: Path) -> None:
