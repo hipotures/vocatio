@@ -566,19 +566,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             review_gui.MainWindow,
         )
 
-        with unittest.mock.patch.object(
-            review_gui,
-            "load_manual_prediction_vocatio_config",
-            return_value={},
-        ), unittest.mock.patch.object(
-            review_gui,
-            "load_manual_prediction_joined_rows",
-            return_value=[
-                {"relative_path": "cam/a.jpg", "start_epoch_ms": "1000"},
-                {"relative_path": "cam/z.jpg", "start_epoch_ms": "1000"},
-            ],
-        ):
-            state = window.current_manual_ml_prediction_state()
+        state = window.current_manual_ml_prediction_state()
 
         selected_photos = window.selected_photo_entries()
         left_path, right_path, _, _ = review_gui.determine_selected_preview_paths(
@@ -603,7 +591,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             ["cam/a.jpg", "cam/z.jpg"],
         )
 
-    def test_current_manual_ml_prediction_state_surfaces_resolution_failures_as_error(self):
+    def test_current_manual_ml_prediction_state_is_idle_and_does_not_resolve_on_selection(self):
         display_set = {
             "set_id": "imgset-000001",
             "display_name": "SEG0001",
@@ -650,21 +638,13 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
 
         with unittest.mock.patch.object(
             review_gui,
-            "load_manual_prediction_vocatio_config",
-            return_value={"VLM_WINDOW_SIZE": "2"},
-        ), unittest.mock.patch.object(
-            review_gui,
-            "load_manual_prediction_joined_rows",
-            return_value=[
-                {"relative_path": "cam/a.jpg", "start_epoch_ms": "1000"},
-                {"relative_path": "cam/b.jpg", "start_epoch_ms": "2000"},
-            ],
+            "resolve_manual_prediction_state",
+            side_effect=AssertionError("selection should not resolve manual prediction state"),
         ):
             state = window.current_manual_ml_prediction_state()
 
-        self.assertEqual(state["status"], "error")
-        self.assertEqual(state["error"], "overlap must be smaller than window_size")
-        self.assertEqual(state["resolution_error"], "overlap must be smaller than window_size")
+        self.assertEqual(state["status"], "idle")
+        self.assertEqual(state["selected_photo_keys"], ["source:/src/a.jpg", "source:/src/b.jpg"])
 
     def test_build_image_only_set_info_sections_for_set_returns_named_sections(self):
         diagnostics = {"available": False, "error": ""}

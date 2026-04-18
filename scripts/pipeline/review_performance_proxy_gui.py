@@ -320,17 +320,10 @@ def resolve_manual_prediction_anchor_pair(
     }
 
 
-def resolve_manual_prediction_day_dir(index_path: Path, payload: Mapping[str, Any], source_mode: str) -> Path:
-    day_dir, _workspace_dir = review_index_loader.resolve_day_and_workspace_dir(payload, index_path, source_mode)
-    return day_dir
-
-
 def load_manual_prediction_vocatio_config(
-    index_path: Path,
-    payload: Mapping[str, Any],
-    source_mode: str,
+    day_dir: Path,
 ) -> Dict[str, str]:
-    return load_vocatio_config(resolve_manual_prediction_day_dir(index_path, payload, source_mode))
+    return load_vocatio_config(day_dir)
 
 
 def load_manual_prediction_joined_rows(
@@ -368,12 +361,20 @@ def manual_prediction_selected_photo_keys(
     return selected_photo_keys
 
 
+def build_idle_manual_prediction_state(
+    selected_photos: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    return {
+        "status": "idle",
+        "selected_photo_keys": manual_prediction_selected_photo_keys(selected_photos),
+    }
+
+
 def resolve_manual_prediction_state(
     *,
-    index_path: Path,
+    day_dir: Path,
     workspace_dir: Path,
     payload: Mapping[str, Any],
-    source_mode: str,
     selected_photos: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any]:
     next_state: Dict[str, Any] = {
@@ -382,7 +383,7 @@ def resolve_manual_prediction_state(
     }
     try:
         next_state["window_config"] = resolve_manual_prediction_window_config(
-            load_manual_prediction_vocatio_config(index_path, payload, source_mode)
+            load_manual_prediction_vocatio_config(day_dir)
         )
         next_state["anchor_pair"] = resolve_manual_prediction_anchor_pair(
             selected_photos,
@@ -1686,13 +1687,14 @@ class KeyboardHelpDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, index_path: Path, state_path: Path, payload: Dict, initial_ui_scale: float) -> None:
+    def __init__(self, index_path: Path, state_path: Path, payload: Dict, initial_ui_scale: float, day_dir: Path) -> None:
         super().__init__()
         self.index_path = index_path
         self.state_path = state_path
         self.state_backup_path = state_path.with_suffix(f"{state_path.suffix}.old")
         self.state_tmp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
         self.payload = payload
+        self.day_dir = day_dir
         workspace_value = str(payload.get("workspace_dir", "")).strip()
         if workspace_value:
             workspace_path = Path(workspace_value)
@@ -1804,6 +1806,13 @@ class MainWindow(QMainWindow):
         self.info_layout.setContentsMargins(12, 12, 12, 12)
         self.info_layout.setSpacing(12)
         self.info_content.setLayout(self.info_layout)
+        self.info_content.setStyleSheet(
+            "QWidget#infoSectionCard {"
+            "  background: #fbfbfb;"
+            "  border: 1px solid #cfcfcf;"
+            "  border-radius: 8px;"
+            "}"
+        )
 
         self.info_scroll = QScrollArea()
         self.info_scroll.setWidgetResizable(True)
@@ -2783,6 +2792,15 @@ class MainWindow(QMainWindow):
             return False
         return should_show_manual_ml_prediction(self.selected_photo_entries())
 
+    def manual_prediction_day_dir(self) -> Path:
+        day_dir = getattr(self, "day_dir", None)
+        if isinstance(day_dir, Path):
+            return day_dir
+        day_value = str(self.payload.get("day", "") or "").strip()
+        if day_value:
+            return Path(day_value)
+        raise ValueError("manual prediction day_dir is unavailable")
+
     def current_manual_ml_prediction_state(self) -> Optional[Mapping[str, Any]]:
         selected_photos = self.selected_photo_entries()
         if self.source_mode != review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1 or not should_show_manual_ml_prediction(selected_photos):
@@ -2793,14 +2811,8 @@ class MainWindow(QMainWindow):
         current_keys = []
         if isinstance(current_state, Mapping):
             current_keys = [str(value) for value in current_state.get("selected_photo_keys", [])]
-        if current_keys != selected_photo_keys:
-            self.manual_ml_prediction_state = resolve_manual_prediction_state(
-                index_path=self.index_path,
-                workspace_dir=self.workspace_dir,
-                payload=self.payload,
-                source_mode=self.source_mode,
-                selected_photos=selected_photos,
-            )
+        if current_keys != selected_photo_keys or not isinstance(current_state, Mapping):
+            self.manual_ml_prediction_state = build_idle_manual_prediction_state(selected_photos)
         return self.manual_ml_prediction_state
 
     def current_selection_diagnostics_payload(
@@ -2893,19 +2905,12 @@ class MainWindow(QMainWindow):
         if str(current_state.get("status", "") or "").strip().lower() == "running":
             return
 
-        resolution_state = dict(current_state)
-        if (
-            str(current_state.get("resolution_error", "") or "").strip()
-            or not current_state.get("anchor_pair")
-            or not current_state.get("window_config")
-        ):
-            resolution_state = resolve_manual_prediction_state(
-                index_path=self.index_path,
-                workspace_dir=self.workspace_dir,
-                payload=self.payload,
-                source_mode=self.source_mode,
-                selected_photos=self.selected_photo_entries(),
-            )
+        resolution_state = resolve_manual_prediction_state(
+            day_dir=self.manual_prediction_day_dir(),
+            workspace_dir=self.workspace_dir,
+            payload=self.payload,
+            selected_photos=self.selected_photo_entries(),
+        )
         next_state = dict(resolution_state)
         next_state["status"] = "running"
         next_state["started_at"] = datetime.now(timezone.utc).astimezone().replace(microsecond=0).isoformat()
@@ -3007,6 +3012,7 @@ class MainWindow(QMainWindow):
 
     def build_info_section_widget(self, section: Mapping[str, Any]) -> QWidget:
         card = QWidget()
+        card.setObjectName("infoSectionCard")
         card_layout = QVBoxLayout()
         card_layout.setContentsMargins(10, 10, 10, 10)
         card_layout.setSpacing(6)
@@ -3436,7 +3442,7 @@ def main() -> int:
         return 1
 
     app = QApplication(sys.argv)
-    window = MainWindow(index_path, state_path, payload, detect_ui_scale(app, args.ui_scale))
+    window = MainWindow(index_path, state_path, payload, detect_ui_scale(app, args.ui_scale), day_dir)
     window.show()
     return app.exec()
 
