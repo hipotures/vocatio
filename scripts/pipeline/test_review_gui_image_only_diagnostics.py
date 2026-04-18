@@ -543,6 +543,24 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Type: C", text)
         self.assertIn("Type override: yes", text)
 
+    def test_build_segment_type_override_status_message(self):
+        self.assertEqual(
+            review_gui.build_segment_type_override_status_message("VLM0007", "dance", override_active=True),
+            "Type set to D for set VLM0007",
+        )
+        self.assertEqual(
+            review_gui.build_segment_type_override_status_message("VLM0007", "", override_active=False),
+            "Type reset for set VLM0007",
+        )
+
+    def test_keyboard_help_sections_review_shortcuts_include_type_override_cycle(self):
+        review_section = dict(review_gui.keyboard_help_sections())["Review"]
+
+        self.assertIn(
+            ("Y", "Cycle type override for the current set"),
+            review_section,
+        )
+
     def test_build_image_only_multi_photo_info_text_includes_selected_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_dir = Path(tmp)

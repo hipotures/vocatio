@@ -226,6 +226,7 @@ def keyboard_help_sections() -> List[tuple[str, List[tuple[str, str]]]]:
                 ("S", "Split the current set from the selected photo into a new named set"),
                 ("M", "Merge selected sets into the first selected set"),
                 ("X", "Toggle no_photos_confirmed for the current set"),
+                ("Y", "Cycle type override for the current set"),
                 ("R", "Reset review state"),
             ],
         ),
@@ -323,6 +324,13 @@ def resolve_effective_segment_type(base_type: str, override_type: str) -> tuple[
 def resolve_effective_type_code(base_type: str, override_type: str) -> tuple[str, bool]:
     effective_segment_type, override_active = resolve_effective_segment_type(base_type, override_type)
     return segment_type_to_code(effective_segment_type), override_active
+
+
+def build_segment_type_override_status_message(display_name: str, override_value: str, override_active: bool) -> str:
+    normalized_display_name = str(display_name or "").strip()
+    if override_active:
+        return f"Type set to {segment_type_to_code(override_value)} for set {normalized_display_name}"
+    return f"Type reset for set {normalized_display_name}"
 
 
 def default_review_entry() -> Dict[str, Any]:
@@ -1233,6 +1241,11 @@ class MainWindow(QMainWindow):
         no_photos_action.triggered.connect(self.toggle_no_photos_confirmed_current_set)
         self.addAction(no_photos_action)
 
+        type_override_action = QAction(self)
+        type_override_action.setShortcut(QKeySequence("Y"))
+        type_override_action.triggered.connect(self.cycle_current_set_segment_type_override)
+        self.addAction(type_override_action)
+
         icon_mode_action = QAction(self)
         icon_mode_action.setShortcut(QKeySequence("T"))
         icon_mode_action.triggered.connect(self.toggle_tree_icon_mode)
@@ -1688,6 +1701,30 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"no_photos_confirmed {state_text} for set {display_set['display_name']} in memory, but save failed"
             )
+
+    def cycle_current_set_segment_type_override(self) -> None:
+        item = self.current_top_level_item()
+        if item is None:
+            return
+        display_set = item.data(0, Qt.UserRole)
+        set_id = display_set["set_id"]
+        display_name = str(display_set.get("display_name", "") or set_id)
+        entry = self.review_entry(set_id)
+        override_value = next_segment_type_override(str(entry.get("segment_type_override", "") or ""))
+        override_active = bool(override_value)
+        entry["segment_type_override"] = override_value
+        self.review_state["updated_at"] = self.current_timestamp()
+        self.state_dirty = True
+        self.rebuild_tree_after_state_change(preferred_set_id=set_id)
+        status_message = build_segment_type_override_status_message(
+            display_name,
+            override_value,
+            override_active=override_active,
+        )
+        if self.flush_review_state():
+            self.statusBar().showMessage(status_message)
+        else:
+            self.statusBar().showMessage(f"{status_message} in memory, but save failed")
 
     def reset_review_fonts(self) -> None:
         for set_id, item in self.item_by_set_id.items():
