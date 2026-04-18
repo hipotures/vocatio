@@ -184,13 +184,13 @@ def test_build_candidate_feature_row_includes_pairwise_heuristic_features() -> N
             "time_gap_boost": 0.0,
             "boundary_label": "none",
         },
-        "34": {
-            "dino_cosine_distance": 0.777,
-            "boundary_score": 0.888,
-            "distance_zscore": 1.111,
-            "smoothed_distance_zscore": 1.222,
-            "time_gap_boost": 1.0,
-            "boundary_label": "hard",
+        "23": {
+            "dino_cosine_distance": 0.111,
+            "boundary_score": 0.222,
+            "distance_zscore": 0.333,
+            "smoothed_distance_zscore": 0.444,
+            "time_gap_boost": 0.5,
+            "boundary_label": "soft",
         },
         "45": {
             "dino_cosine_distance": 0.123,
@@ -210,21 +210,29 @@ def test_build_candidate_feature_row_includes_pairwise_heuristic_features() -> N
     )
 
     assert row["heuristic_dino_dist_12"] == 0.101
-    assert row["heuristic_boundary_score_34"] == 0.888
-    assert row["heuristic_distance_zscore_34"] == 1.111
-    assert row["heuristic_time_gap_boost_34"] == 1.0
-    assert row["heuristic_boundary_label_34"] == "hard"
+    assert row["heuristic_dino_dist_23"] == 0.111
+    assert row["heuristic_boundary_score_23"] == 0.222
+    assert row["heuristic_distance_zscore_23"] == 0.333
+    assert row["heuristic_smoothed_distance_zscore_23"] == 0.444
+    assert row["heuristic_time_gap_boost_23"] == 0.5
+    assert row["heuristic_boundary_label_23"] == "soft"
     assert row["heuristic_dino_dist_45"] == 0.123
     assert row["heuristic_boundary_score_45"] == 0.234
     assert row["heuristic_distance_zscore_45"] == -1.0
     assert row["heuristic_smoothed_distance_zscore_45"] == 0.456
     assert row["heuristic_time_gap_boost_45"] == 0.0
     assert row["heuristic_boundary_label_45"] == "none"
-    assert isinstance(row["heuristic_dino_dist_23"], float)
-    assert not math.isfinite(row["heuristic_dino_dist_23"])
-    assert isinstance(row["heuristic_boundary_score_23"], float)
-    assert not math.isfinite(row["heuristic_boundary_score_23"])
-    assert row["heuristic_boundary_label_23"] == CANONICAL_MISSING
+    assert isinstance(row["heuristic_dino_dist_34"], float)
+    assert not math.isfinite(row["heuristic_dino_dist_34"])
+    assert isinstance(row["heuristic_boundary_score_34"], float)
+    assert not math.isfinite(row["heuristic_boundary_score_34"])
+    assert isinstance(row["heuristic_distance_zscore_34"], float)
+    assert not math.isfinite(row["heuristic_distance_zscore_34"])
+    assert isinstance(row["heuristic_smoothed_distance_zscore_34"], float)
+    assert not math.isfinite(row["heuristic_smoothed_distance_zscore_34"])
+    assert isinstance(row["heuristic_time_gap_boost_34"], float)
+    assert not math.isfinite(row["heuristic_time_gap_boost_34"])
+    assert row["heuristic_boundary_label_34"] == CANONICAL_MISSING
 
 
 def test_build_candidate_feature_row_flattens_scalar_descriptor_fields() -> None:
