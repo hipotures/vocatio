@@ -459,6 +459,20 @@ def build_manual_prediction_joined_rows(
     return reduced_rows, left_row_index
 
 
+def normalize_ml_candidate_rows(candidate_rows: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
+    return [
+        dict(
+            row,
+            thumb_path=(
+                str(row.get("thumb_path", "") or "").strip()
+                or str(row.get("image_path", "") or "").strip()
+                or str(row.get("preview_path", "") or "").strip()
+            ),
+        )
+        for row in candidate_rows
+    ]
+
+
 def compute_manual_ml_prediction_result(
     *,
     workspace_dir: Path,
@@ -490,17 +504,7 @@ def compute_manual_ml_prediction_result(
     )
     if candidate_rows is None:
         raise ValueError("manual prediction needs enough surrounding context for ML inference")
-    manual_candidate_rows = [
-        dict(
-            row,
-            thumb_path=(
-                str(row.get("thumb_path", "") or "").strip()
-                or str(row.get("image_path", "") or "").strip()
-                or str(row.get("preview_path", "") or "").strip()
-            ),
-        )
-        for row in candidate_rows
-    ]
+    normalized_candidate_rows = normalize_ml_candidate_rows(candidate_rows)
 
     day_id = str(payload.get("day", "") or "").strip()
     photo_pre_model_dir_value = str(
@@ -509,7 +513,7 @@ def compute_manual_ml_prediction_result(
     photo_pre_model_dir = probe_vlm_boundary.resolve_path(workspace_dir, photo_pre_model_dir_value)
     prediction = probe_vlm_boundary.predict_ml_hint_for_candidate(
         ml_hint_context=ml_hint_context,
-        candidate_row=probe_vlm_boundary._build_ml_candidate_row(manual_candidate_rows, day_id=day_id),
+        candidate_row=probe_vlm_boundary._build_ml_candidate_row(normalized_candidate_rows, day_id=day_id),
         boundary_rows_by_pair=probe_vlm_boundary.read_boundary_scores_by_pair(
             workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME
         ),
@@ -787,9 +791,13 @@ def load_ml_hint_diagnostics(workspace_dir: Path, payload: Mapping[str, Any]) ->
             candidate_rows = probe_vlm_boundary._build_ml_candidate_window_rows(joined_rows, cut_index=cut_index)
             if candidate_rows is None:
                 continue
+            normalized_candidate_rows = normalize_ml_candidate_rows(candidate_rows)
             prediction = probe_vlm_boundary.predict_ml_hint_for_candidate(
                 ml_hint_context=ml_hint_context,
-                candidate_row=probe_vlm_boundary._build_ml_candidate_row(candidate_rows, day_id=day_id),
+                candidate_row=probe_vlm_boundary._build_ml_candidate_row(
+                    normalized_candidate_rows,
+                    day_id=day_id,
+                ),
                 boundary_rows_by_pair=boundary_rows_by_pair,
                 photo_pre_model_dir=photo_pre_model_dir,
             )
