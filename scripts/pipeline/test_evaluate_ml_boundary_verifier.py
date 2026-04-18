@@ -232,7 +232,17 @@ def test_eval_cli_writes_metrics_artifact(tmp_path: Path, monkeypatch) -> None:
         "final_boundary_threshold": 0.5,
         "row_count": 1,
         "segment_type_accuracy": 1.0,
+        "segment_type_correct_count": 1,
+        "segment_type_incorrect_count": 0,
         "boundary_f1": 0.0,
+        "boundary_true_positive_count": 0,
+        "boundary_false_positive_count": 0,
+        "boundary_false_negative_count": 0,
+        "boundary_true_negative_count": 1,
+        "boundary_correct_count": 1,
+        "boundary_incorrect_count": 0,
+        "boundary_truth_positive_count": 0,
+        "boundary_predicted_positive_count": 0,
         "review_cost_metrics": {
             "merge_run_count": 0,
             "split_run_count": 0,
@@ -482,6 +492,11 @@ def test_train_and_eval_cli_integration_writes_metrics(tmp_path: Path, monkeypat
     assert metrics_payload["final_boundary_threshold"] == 0.5
     assert metrics_payload["row_count"] == 1
     assert metrics_payload["model_mode"] == "tabular_plus_thumbnail"
+    assert metrics_payload["segment_type_correct_count"] == 1
+    assert metrics_payload["segment_type_incorrect_count"] == 0
+    assert metrics_payload["boundary_true_negative_count"] == 1
+    assert metrics_payload["boundary_correct_count"] == 1
+    assert metrics_payload["boundary_incorrect_count"] == 0
 
 
 def test_eval_cli_computes_review_cost_per_day_id_sequence(tmp_path: Path, monkeypatch) -> None:

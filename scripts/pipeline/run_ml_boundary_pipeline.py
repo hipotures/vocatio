@@ -39,6 +39,7 @@ CORPUS_ATTRITION_FILENAME = "ml_boundary_attrition.json"
 VALIDATION_REPORT_FILENAME = "ml_boundary_validation_report.json"
 PIPELINE_SUMMARY_FILENAME = "ml_boundary_pipeline_summary.json"
 EVALUATION_METRICS_FILENAME = "metrics.json"
+TRAINING_METADATA_FILENAME = "training_metadata.json"
 SPLIT_MANIFEST_HEADERS = ["candidate_id", "split_name"]
 DEFAULT_SPLIT_STRATEGY = "global_stratified"
 DEFAULT_TRAIN_FRACTION = 0.70
@@ -946,15 +947,49 @@ def _load_json_object(path: Path) -> dict[str, object]:
     return payload
 
 
-def _render_eval_metrics_summary(metrics_payload: dict[str, object]) -> str:
+def _training_split_count(training_metadata: dict[str, object] | None, split_name: str) -> int:
+    if not isinstance(training_metadata, dict):
+        return 0
+    split_counts_by_name = training_metadata.get("split_counts_by_name")
+    if not isinstance(split_counts_by_name, dict):
+        return 0
+    raw_value = split_counts_by_name.get(split_name, 0)
+    try:
+        return int(raw_value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _render_eval_metrics_summary(
+    metrics_payload: dict[str, object],
+    training_metadata: dict[str, object] | None = None,
+) -> str:
     review_cost_metrics = metrics_payload.get("review_cost_metrics")
     if not isinstance(review_cost_metrics, dict):
         raise ValueError("evaluation metrics missing review_cost_metrics object")
+    train_row_count = _training_split_count(training_metadata, "train")
+    validation_row_count = _training_split_count(training_metadata, "validation")
+    test_row_count = _training_split_count(training_metadata, "test")
+    segment_type_accuracy = float(metrics_payload.get("segment_type_accuracy", 0.0) or 0.0)
+    segment_type_correct_count = int(metrics_payload.get("segment_type_correct_count", 0) or 0)
+    segment_type_incorrect_count = int(metrics_payload.get("segment_type_incorrect_count", 0) or 0)
+    boundary_f1 = float(metrics_payload.get("boundary_f1", 0.0) or 0.0)
+    boundary_correct_count = int(metrics_payload.get("boundary_correct_count", 0) or 0)
+    boundary_incorrect_count = int(metrics_payload.get("boundary_incorrect_count", 0) or 0)
+    boundary_true_positive_count = int(metrics_payload.get("boundary_true_positive_count", 0) or 0)
+    boundary_false_positive_count = int(metrics_payload.get("boundary_false_positive_count", 0) or 0)
+    boundary_false_negative_count = int(metrics_payload.get("boundary_false_negative_count", 0) or 0)
+    boundary_true_negative_count = int(metrics_payload.get("boundary_true_negative_count", 0) or 0)
+    estimated_correction_actions = int(review_cost_metrics.get("estimated_correction_actions", 0) or 0)
+    merge_run_count = int(review_cost_metrics.get("merge_run_count", 0) or 0)
+    split_run_count = int(review_cost_metrics.get("split_run_count", 0) or 0)
     return (
-        "Eval metrics:\n"
-        f"segment_type_accuracy={metrics_payload.get('segment_type_accuracy')}\n"
-        f"boundary_f1={metrics_payload.get('boundary_f1')}\n"
-        f"estimated_correction_actions={review_cost_metrics.get('estimated_correction_actions')}"
+        "\n"
+        "Final ML summary:\n"
+        f"Rows: train={train_row_count}, validation={validation_row_count}, test={test_row_count}\n"
+        f"Segment type: accuracy={segment_type_accuracy:.4f}, correct={segment_type_correct_count}, incorrect={segment_type_incorrect_count}\n"
+        f"Boundary: f1={boundary_f1:.4f}, correct={boundary_correct_count}, incorrect={boundary_incorrect_count}, tp={boundary_true_positive_count}, fp={boundary_false_positive_count}, fn={boundary_false_negative_count}, tn={boundary_true_negative_count}\n"
+        f"Review cost: merge_runs={merge_run_count}, split_runs={split_run_count}, estimated_actions={estimated_correction_actions}"
     )
 
 
@@ -966,7 +1001,7 @@ def _run_training_and_evaluation(
     eval_dir: Path,
     mode: str,
     restart: bool,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], dict[str, object] | None]:
     train_command = [
         "uv",
         "run",
@@ -987,6 +1022,10 @@ def _run_training_and_evaluation(
         train_command.append("--overwrite")
     console.print(f"Run Train verifier: {' '.join(train_command)}")
     _run_command(train_command)
+    training_metadata = None
+    training_metadata_path = model_dir / TRAINING_METADATA_FILENAME
+    if training_metadata_path.is_file():
+        training_metadata = _load_json_object(training_metadata_path)
 
     evaluate_command = [
         "uv",
@@ -1012,8 +1051,8 @@ def _run_training_and_evaluation(
     if not metrics_path.is_file():
         raise FileNotFoundError(f"Expected evaluation metrics artifact: {metrics_path}")
     metrics_payload = _load_json_object(metrics_path)
-    console.print(_render_eval_metrics_summary(metrics_payload))
-    return metrics_payload
+    console.print(_render_eval_metrics_summary(metrics_payload, training_metadata))
+    return metrics_payload, training_metadata
 
 
 def _write_pipeline_summary(
@@ -1028,6 +1067,7 @@ def _write_pipeline_summary(
     model_dir: Path | None,
     eval_dir: Path | None,
     evaluation_metrics: dict[str, object] | None,
+    training_metadata: dict[str, object] | None,
     required_heldout_classes: Sequence[str],
     requested_split_strategy: str,
     effective_split_strategy: str,
@@ -1061,6 +1101,8 @@ def _write_pipeline_summary(
         payload["eval_dir"] = str(eval_dir)
     if evaluation_metrics is not None:
         payload["evaluation_metrics"] = evaluation_metrics
+    if training_metadata is not None:
+        payload["training_metadata"] = training_metadata
     if note:
         payload["note"] = note
     atomic_write_json(summary_path, payload)
@@ -1138,10 +1180,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     model_dir: Path | None = None
     eval_dir: Path | None = None
     evaluation_metrics: dict[str, object] | None = None
+    training_metadata: dict[str, object] | None = None
     if not args.prepare_only:
         model_dir = corpus_workspace / "ml_boundary_models" / args.model_run_id
         eval_dir = corpus_workspace / "ml_boundary_eval" / args.model_run_id
-        evaluation_metrics = _run_training_and_evaluation(
+        evaluation_metrics, training_metadata = _run_training_and_evaluation(
             corpus_candidates_path=corpus_candidates_path,
             split_manifest_path=split_manifest_path,
             model_dir=model_dir,
@@ -1162,6 +1205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         model_dir=model_dir,
         eval_dir=eval_dir,
         evaluation_metrics=evaluation_metrics,
+        training_metadata=training_metadata,
         required_heldout_classes=required_heldout_classes,
         requested_split_strategy=split_config.strategy,
         effective_split_strategy=effective_split_strategy,

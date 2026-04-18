@@ -173,6 +173,57 @@ def _compute_accuracy(predicted: Sequence[str], truth: Sequence[str]) -> float:
     return matches / len(truth_values)
 
 
+def _compute_label_match_counts(
+    predicted: Sequence[str],
+    truth: Sequence[str],
+) -> tuple[int, int]:
+    predicted_values = list(predicted)
+    truth_values = list(truth)
+    if len(predicted_values) != len(truth_values):
+        raise ValueError("predicted and truth must have the same length")
+    correct_count = sum(
+        1
+        for predicted_value, truth_value in zip(predicted_values, truth_values)
+        if predicted_value == truth_value
+    )
+    return correct_count, len(truth_values) - correct_count
+
+
+def _compute_binary_confusion_counts(
+    predicted: Sequence[int],
+    truth: Sequence[int],
+) -> dict[str, int]:
+    predicted_values = list(predicted)
+    truth_values = list(truth)
+    if len(predicted_values) != len(truth_values):
+        raise ValueError("predicted and truth must have the same length")
+
+    true_positive = 0
+    false_positive = 0
+    false_negative = 0
+    true_negative = 0
+    for predicted_value, truth_value in zip(predicted_values, truth_values):
+        if predicted_value == 1 and truth_value == 1:
+            true_positive += 1
+        elif predicted_value == 1 and truth_value == 0:
+            false_positive += 1
+        elif predicted_value == 0 and truth_value == 1:
+            false_negative += 1
+        else:
+            true_negative += 1
+
+    return {
+        "true_positive_count": true_positive,
+        "false_positive_count": false_positive,
+        "false_negative_count": false_negative,
+        "true_negative_count": true_negative,
+        "correct_count": true_positive + true_negative,
+        "incorrect_count": false_positive + false_negative,
+        "truth_positive_count": true_positive + false_negative,
+        "predicted_positive_count": true_positive + false_positive,
+    }
+
+
 def _to_plain_list(value: object) -> list[object]:
     if isinstance(value, list):
         return value
@@ -330,6 +381,11 @@ def _build_metrics_payload(
         expected_rows=len(boundary_truth),
     )
     boundary_predictions = threshold_boundary_probabilities(boundary_probabilities, threshold)
+    segment_type_correct_count, segment_type_incorrect_count = _compute_label_match_counts(
+        segment_predictions,
+        segment_truth,
+    )
+    boundary_counts = _compute_binary_confusion_counts(boundary_predictions, boundary_truth)
 
     review_cost_totals = {
         "merge_run_count": 0,
@@ -373,7 +429,17 @@ def _build_metrics_payload(
         "final_boundary_threshold": threshold,
         "row_count": len(boundary_truth),
         "segment_type_accuracy": _compute_accuracy(segment_predictions, segment_truth),
+        "segment_type_correct_count": segment_type_correct_count,
+        "segment_type_incorrect_count": segment_type_incorrect_count,
         "boundary_f1": _compute_boundary_f1(boundary_predictions, boundary_truth),
+        "boundary_true_positive_count": boundary_counts["true_positive_count"],
+        "boundary_false_positive_count": boundary_counts["false_positive_count"],
+        "boundary_false_negative_count": boundary_counts["false_negative_count"],
+        "boundary_true_negative_count": boundary_counts["true_negative_count"],
+        "boundary_correct_count": boundary_counts["correct_count"],
+        "boundary_incorrect_count": boundary_counts["incorrect_count"],
+        "boundary_truth_positive_count": boundary_counts["truth_positive_count"],
+        "boundary_predicted_positive_count": boundary_counts["predicted_positive_count"],
         "review_cost_metrics": review_cost_totals,
     }
 

@@ -16,6 +16,7 @@ from run_ml_boundary_pipeline import (
     SplitConfig,
     _build_corpus_split_rows,
     _build_global_stratified_split_rows,
+    _render_eval_metrics_summary,
     main,
     parse_args,
     resolve_split_config,
@@ -154,6 +155,37 @@ def _full_strata_by_split(
     return grouped
 
 
+def test_render_eval_metrics_summary_uses_human_readable_precision() -> None:
+    rendered = _render_eval_metrics_summary(
+        {
+            "segment_type_accuracy": 0.8478260869565217,
+            "segment_type_correct_count": 39,
+            "segment_type_incorrect_count": 7,
+            "boundary_f1": 0.8163265306122449,
+            "boundary_correct_count": 37,
+            "boundary_incorrect_count": 9,
+            "boundary_true_positive_count": 20,
+            "boundary_false_positive_count": 3,
+            "boundary_false_negative_count": 6,
+            "boundary_true_negative_count": 17,
+            "review_cost_metrics": {
+                "merge_run_count": 4,
+                "split_run_count": 5,
+                "estimated_correction_actions": 9,
+            },
+        },
+        {
+            "split_counts_by_name": {"train": 214, "validation": 46, "test": 46},
+        },
+    )
+
+    assert rendered.startswith("\nFinal ML summary:\n")
+    assert "Rows: train=214, validation=46, test=46" in rendered
+    assert "Segment type: accuracy=0.8478, correct=39, incorrect=7" in rendered
+    assert "Boundary: f1=0.8163, correct=37, incorrect=9, tp=20, fp=3, fn=6, tn=17" in rendered
+    assert "Review cost: merge_runs=4, split_runs=5, estimated_actions=9" in rendered
+
+
 def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, monkeypatch) -> None:
     day_dirs = []
     for day_id in ("20250324", "20250325", "20250326"):
@@ -180,6 +212,19 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
                 _candidate_row(day_id=day_dir.name, segment_type="warmup", boundary="0", offset=3),
             ]
             _write_day_candidate_artifacts(workspace_dir, rows)
+        if "train_ml_boundary_verifier.py" in command_text:
+            model_dir = Path(command_values[command_values.index("--output-dir") + 1])
+            model_dir.mkdir(parents=True, exist_ok=True)
+            (model_dir / "training_metadata.json").write_text(
+                json.dumps(
+                    {
+                        "split_counts_by_name": {"train": 6, "validation": 1, "test": 2},
+                        "missing_annotation_photo_count": 0,
+                        "missing_annotation_candidate_count": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
         if "evaluate_ml_boundary_verifier.py" in command_text:
             eval_dir = Path(command_values[command_values.index("--output-dir") + 1])
             eval_dir.mkdir(parents=True, exist_ok=True)
@@ -187,8 +232,20 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
                 json.dumps(
                     {
                         "segment_type_accuracy": 0.81,
+                        "segment_type_correct_count": 7,
+                        "segment_type_incorrect_count": 2,
                         "boundary_f1": 0.67,
-                        "review_cost_metrics": {"estimated_correction_actions": 9},
+                        "boundary_correct_count": 6,
+                        "boundary_incorrect_count": 3,
+                        "boundary_true_positive_count": 2,
+                        "boundary_false_positive_count": 1,
+                        "boundary_false_negative_count": 2,
+                        "boundary_true_negative_count": 4,
+                        "review_cost_metrics": {
+                            "merge_run_count": 4,
+                            "split_run_count": 5,
+                            "estimated_correction_actions": 9,
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -233,6 +290,11 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
     assert summary_payload["evaluation_metrics"]["segment_type_accuracy"] == 0.81
     assert summary_payload["evaluation_metrics"]["boundary_f1"] == 0.67
     assert summary_payload["evaluation_metrics"]["review_cost_metrics"]["estimated_correction_actions"] == 9
+    assert summary_payload["training_metadata"]["split_counts_by_name"] == {
+        "train": 6,
+        "validation": 1,
+        "test": 2,
+    }
 
     assert any("train_ml_boundary_verifier.py" in " ".join(command) for command in recorded_commands)
     assert any("evaluate_ml_boundary_verifier.py" in " ".join(command) for command in recorded_commands)
@@ -401,6 +463,17 @@ def test_main_single_day_global_random_is_allowed(tmp_path: Path, monkeypatch) -
                 row["candidate_id"] = f"c{index:02d}"
                 rows.append(row)
             _write_day_candidate_artifacts(workspace_dir, rows)
+        if "train_ml_boundary_verifier.py" in command_text:
+            model_dir = Path(command_values[command_values.index("--output-dir") + 1])
+            model_dir.mkdir(parents=True, exist_ok=True)
+            (model_dir / "training_metadata.json").write_text(
+                json.dumps(
+                    {
+                        "split_counts_by_name": {"train": 14, "validation": 3, "test": 3},
+                    }
+                ),
+                encoding="utf-8",
+            )
         if "evaluate_ml_boundary_verifier.py" in command_text:
             eval_dir = Path(command_values[command_values.index("--output-dir") + 1])
             eval_dir.mkdir(parents=True, exist_ok=True)
@@ -408,8 +481,20 @@ def test_main_single_day_global_random_is_allowed(tmp_path: Path, monkeypatch) -
                 json.dumps(
                     {
                         "segment_type_accuracy": 0.75,
+                        "segment_type_correct_count": 15,
+                        "segment_type_incorrect_count": 5,
                         "boundary_f1": 0.5,
-                        "review_cost_metrics": {"estimated_correction_actions": 4},
+                        "boundary_correct_count": 16,
+                        "boundary_incorrect_count": 4,
+                        "boundary_true_positive_count": 2,
+                        "boundary_false_positive_count": 1,
+                        "boundary_false_negative_count": 3,
+                        "boundary_true_negative_count": 14,
+                        "review_cost_metrics": {
+                            "merge_run_count": 1,
+                            "split_run_count": 3,
+                            "estimated_correction_actions": 4,
+                        },
                     }
                 ),
                 encoding="utf-8",
