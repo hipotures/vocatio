@@ -16,6 +16,10 @@ try:
     from lib import review_index_loader
 except ModuleNotFoundError:
     from scripts.pipeline.lib import review_index_loader
+try:
+    import probe_vlm_photo_boundaries as probe_vlm_boundary
+except ModuleNotFoundError:
+    from scripts.pipeline import probe_vlm_photo_boundaries as probe_vlm_boundary
 
 
 def ensure_venv_python() -> None:
@@ -117,6 +121,18 @@ SEGMENT_DIAGNOSTIC_REQUIRED_COLUMNS = frozenset(
         "segment_confidence",
     }
 )
+
+TYPE_CODE_BY_SEGMENT_TYPE = {
+    "performance": "P",
+    "ceremony": "C",
+    "warmup": "W",
+    "dance": "D",
+    "audience": "A",
+    "rehearsal": "R",
+    "other": "O",
+}
+
+SEGMENT_TYPE_OVERRIDE_CYCLE = ("", "dance", "ceremony", "audience", "rehearsal", "other")
 
 
 def parse_args() -> argparse.Namespace:
@@ -283,6 +299,125 @@ def load_image_only_diagnostics(workspace_dir: Path) -> Dict[str, Any]:
     return diagnostics
 
 
+def segment_type_to_code(segment_type: object) -> str:
+    normalized = str(segment_type or "").strip().lower()
+    return TYPE_CODE_BY_SEGMENT_TYPE.get(normalized, "?")
+
+
+def next_segment_type_override(current: str) -> str:
+    normalized = str(current or "").strip().lower()
+    try:
+        index = SEGMENT_TYPE_OVERRIDE_CYCLE.index(normalized)
+    except ValueError:
+        index = 0
+    return SEGMENT_TYPE_OVERRIDE_CYCLE[(index + 1) % len(SEGMENT_TYPE_OVERRIDE_CYCLE)]
+
+
+def resolve_effective_segment_type(base_type: str, override_type: str) -> tuple[str, bool]:
+    normalized_override = str(override_type or "").strip().lower()
+    if normalized_override:
+        return normalized_override, True
+    return str(base_type or "").strip().lower(), False
+
+
+def build_ml_hint_pair_map(payload: Mapping[str, Any]) -> Dict[tuple[str, str], Dict[str, Any]]:
+    pairs = payload.get("ml_hint_pairs")
+    if not isinstance(pairs, list):
+        return {}
+    hint_by_pair: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for item in pairs:
+        if not isinstance(item, Mapping):
+            continue
+        left_relative_path = str(item.get("left_relative_path", "") or "").strip()
+        right_relative_path = str(item.get("right_relative_path", "") or "").strip()
+        if not left_relative_path or not right_relative_path:
+            continue
+        hint_by_pair[(left_relative_path, right_relative_path)] = dict(item)
+    return hint_by_pair
+
+
+def load_ml_hint_diagnostics(workspace_dir: Path, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    ml_diagnostics = {
+        "available": False,
+        "ml_model_run_id": str(payload.get("ml_model_run_id", "") or "").strip(),
+        "ml_hint_by_pair": build_ml_hint_pair_map(payload),
+        "error": str(payload.get("ml_hints_error", "") or "").strip(),
+    }
+    if ml_diagnostics["ml_hint_by_pair"]:
+        ml_diagnostics["available"] = True
+        return ml_diagnostics
+    ml_model_run_id = str(ml_diagnostics["ml_model_run_id"]).strip()
+    if not ml_model_run_id:
+        return ml_diagnostics
+    try:
+        effective_ml_model_run_id, resolved_ml_model_dir = probe_vlm_boundary.resolve_ml_model_run(
+            workspace_dir,
+            ml_model_run_id,
+        )
+        ml_hint_context = probe_vlm_boundary.load_ml_hint_context(
+            ml_model_run_id=effective_ml_model_run_id,
+            ml_model_dir=resolved_ml_model_dir,
+        )
+        if ml_hint_context is None:
+            ml_diagnostics["error"] = "ML model directory is unavailable"
+            return ml_diagnostics
+        embedded_manifest_csv = probe_vlm_boundary.resolve_path(
+            workspace_dir,
+            str(payload.get("embedded_manifest_csv", "") or probe_vlm_boundary.PHOTO_EMBEDDED_MANIFEST_FILENAME),
+        )
+        photo_manifest_csv = probe_vlm_boundary.resolve_path(
+            workspace_dir,
+            str(payload.get("photo_manifest_csv", "") or probe_vlm_boundary.PHOTO_MANIFEST_FILENAME),
+        )
+        image_variant = str(payload.get("vlm_image_variant", "") or probe_vlm_boundary.DEFAULT_IMAGE_VARIANT).strip()
+        joined_rows = probe_vlm_boundary.read_joined_rows(
+            workspace_dir=workspace_dir,
+            embedded_manifest_csv=embedded_manifest_csv,
+            photo_manifest_csv=photo_manifest_csv,
+            image_variant=image_variant,
+        )
+        boundary_rows_by_pair = probe_vlm_boundary.read_boundary_scores_by_pair(
+            workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME
+        )
+        photo_pre_model_dir_value = str(
+            payload.get("photo_pre_model_dir", "") or probe_vlm_boundary.DEFAULT_PHOTO_PRE_MODEL_DIR
+        ).strip()
+        photo_pre_model_dir = probe_vlm_boundary.resolve_path(workspace_dir, photo_pre_model_dir_value)
+        relative_paths = [str(row.get("relative_path", "") or "").strip() for row in joined_rows]
+        pair_hints: Dict[tuple[str, str], Dict[str, Any]] = {}
+        day_id = str(payload.get("day", "") or "").strip()
+        for cut_index in range(len(joined_rows) - 1):
+            left_relative_path = relative_paths[cut_index]
+            right_relative_path = relative_paths[cut_index + 1]
+            if not left_relative_path or not right_relative_path:
+                continue
+            candidate_rows = probe_vlm_boundary._build_ml_candidate_window_rows(joined_rows, cut_index=cut_index)
+            if candidate_rows is None:
+                continue
+            prediction = probe_vlm_boundary.predict_ml_hint_for_candidate(
+                ml_hint_context=ml_hint_context,
+                candidate_row=probe_vlm_boundary._build_ml_candidate_row(candidate_rows, day_id=day_id),
+                boundary_rows_by_pair=boundary_rows_by_pair,
+                photo_pre_model_dir=photo_pre_model_dir,
+            )
+            pair_hints[(left_relative_path, right_relative_path)] = {
+                "left_relative_path": left_relative_path,
+                "right_relative_path": right_relative_path,
+                "boundary_prediction": bool(prediction.boundary_prediction),
+                "boundary_confidence": f"{prediction.boundary_confidence:.2f}",
+                "boundary_positive_probability": f"{prediction.boundary_positive_probability:.2f}",
+                "segment_type_prediction": str(prediction.segment_type_prediction),
+                "segment_type_confidence": f"{prediction.segment_type_confidence:.2f}",
+            }
+        ml_diagnostics["ml_model_run_id"] = effective_ml_model_run_id
+        ml_diagnostics["ml_hint_by_pair"] = pair_hints
+        ml_diagnostics["available"] = bool(pair_hints)
+        return ml_diagnostics
+    except Exception as error:
+        ml_diagnostics["error"] = str(error)
+        return ml_diagnostics
+
+
 def format_value(value: object) -> str:
     text = str(value or "").strip()
     return text if text else "-"
@@ -309,6 +444,28 @@ def format_boundary_section(title: str, boundary_row: Optional[Mapping[str, str]
     return lines
 
 
+def format_ml_hint_section(title: str, ml_hint_row: Optional[Mapping[str, Any]], ml_diagnostics: Mapping[str, Any]) -> List[str]:
+    lines = [title]
+    if ml_hint_row is None:
+        error_text = str(ml_diagnostics.get("error", "") or "").strip()
+        if error_text:
+            lines.append(f"  unavailable: {error_text}")
+        else:
+            lines.append("  missing")
+        return lines
+    boundary_prediction = bool(ml_hint_row.get("boundary_prediction"))
+    lines.extend(
+        [
+            f"  boundary: {'cut' if boundary_prediction else 'no_cut'}",
+            f"  boundary confidence: {format_value(ml_hint_row.get('boundary_confidence'))}",
+            f"  right-side segment: {format_value(ml_hint_row.get('segment_type_prediction'))}",
+            f"  segment confidence: {format_value(ml_hint_row.get('segment_type_confidence'))}",
+            f"  model run: {format_value(ml_diagnostics.get('ml_model_run_id'))}",
+        ]
+    )
+    return lines
+
+
 def build_image_only_set_info_text(
     display_set: Mapping[str, Any],
     diagnostics: Mapping[str, Any],
@@ -318,10 +475,28 @@ def build_image_only_set_info_text(
     photos = list(display_set.get("photos", []))
     base_set_id = str(display_set.get("base_set_id", "") or "")
     segment_row = diagnostics.get("segment_by_set_id", {}).get(base_set_id) if diagnostics.get("available") else None
+    ml_hint_by_pair = diagnostics.get("ml_hint_by_pair", {})
+    ml_diagnostics = diagnostics.get("ml_diagnostics", {})
     first_relative_path = str(photos[0].get("relative_path", "") or "") if photos else ""
     last_relative_path = str(photos[-1].get("relative_path", "") or "") if photos else ""
     left_boundary = diagnostics.get("boundary_by_right_relative_path", {}).get(first_relative_path) if diagnostics.get("available") else None
     right_boundary = diagnostics.get("boundary_by_left_relative_path", {}).get(last_relative_path) if diagnostics.get("available") else None
+    left_ml_hint = None
+    right_ml_hint = None
+    if isinstance(left_boundary, Mapping):
+        left_ml_hint = ml_hint_by_pair.get(
+            (
+                str(left_boundary.get("left_relative_path", "") or "").strip(),
+                str(left_boundary.get("right_relative_path", "") or "").strip(),
+            )
+        )
+    if isinstance(right_boundary, Mapping):
+        right_ml_hint = ml_hint_by_pair.get(
+            (
+                str(right_boundary.get("left_relative_path", "") or "").strip(),
+                str(right_boundary.get("right_relative_path", "") or "").strip(),
+            )
+        )
     internal_boundaries: List[Mapping[str, str]] = []
     if diagnostics.get("available"):
         boundary_by_pair = diagnostics.get("boundary_by_pair", {})
@@ -337,6 +512,8 @@ def build_image_only_set_info_text(
         f"Original performance: {display_set['original_performance_number']}",
         f"Set ID: {display_set['set_id']}",
         f"Base set ID: {display_set['base_set_id']}",
+        f"Type: {format_value(display_set.get('type_code'))}",
+        f"Type override: {'yes' if display_set.get('type_override_active') else 'no'}",
         f"Duplicate: {display_set['duplicate_status']}",
         f"Timeline: {display_set['timeline_status']}",
         f"Photos: {display_set['photo_count']}",
@@ -356,7 +533,11 @@ def build_image_only_set_info_text(
         lines.append("")
         lines.extend(format_boundary_section("Boundary before set", left_boundary))
         lines.append("")
+        lines.extend(format_ml_hint_section("ML hint before set", left_ml_hint, ml_diagnostics))
+        lines.append("")
         lines.extend(format_boundary_section("Boundary after set", right_boundary))
+        lines.append("")
+        lines.extend(format_ml_hint_section("ML hint after set", right_ml_hint, ml_diagnostics))
         lines.append("")
         lines.append("Top internal boundaries")
         if internal_boundaries:
@@ -376,10 +557,30 @@ def build_image_only_photo_info_text(photo: Mapping[str, Any], diagnostics: Mapp
     relative_path = str(photo.get("relative_path", "") or "")
     left_boundary = diagnostics.get("boundary_by_left_relative_path", {}).get(relative_path) if diagnostics.get("available") else None
     right_boundary = diagnostics.get("boundary_by_right_relative_path", {}).get(relative_path) if diagnostics.get("available") else None
+    ml_hint_by_pair = diagnostics.get("ml_hint_by_pair", {})
+    ml_diagnostics = diagnostics.get("ml_diagnostics", {})
+    left_ml_hint = None
+    right_ml_hint = None
+    if isinstance(left_boundary, Mapping):
+        left_ml_hint = ml_hint_by_pair.get(
+            (
+                str(left_boundary.get("left_relative_path", "") or "").strip(),
+                str(left_boundary.get("right_relative_path", "") or "").strip(),
+            )
+        )
+    if isinstance(right_boundary, Mapping):
+        right_ml_hint = ml_hint_by_pair.get(
+            (
+                str(right_boundary.get("left_relative_path", "") or "").strip(),
+                str(right_boundary.get("right_relative_path", "") or "").strip(),
+            )
+        )
     lines = [
         f"Set: {photo['display_name']}",
         f"Original performance: {photo['original_performance_number']}",
         f"Base set: {photo['base_set_id']}",
+        f"Type: {format_value(photo.get('type_code'))}",
+        f"Type override: {'yes' if photo.get('type_override_active') else 'no'}",
         f"Relative path: {format_value(photo.get('relative_path'))}",
         f"File: {photo['filename']}",
         f"Time: {photo['adjusted_start_local']}",
@@ -394,7 +595,11 @@ def build_image_only_photo_info_text(photo: Mapping[str, Any], diagnostics: Mapp
         lines.append("")
         lines.extend(format_boundary_section("Boundary after photo", left_boundary))
         lines.append("")
+        lines.extend(format_ml_hint_section("ML hint after photo", left_ml_hint, ml_diagnostics))
+        lines.append("")
         lines.extend(format_boundary_section("Boundary before photo", right_boundary))
+        lines.append("")
+        lines.extend(format_ml_hint_section("ML hint before photo", right_ml_hint, ml_diagnostics))
     elif diagnostics.get("error"):
         lines.extend(["", f"Diagnostics: {diagnostics['error']}"])
     return "\n".join(lines)
@@ -803,6 +1008,12 @@ class MainWindow(QMainWindow):
             if self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
             else {"available": False, "error": ""}
         )
+        if self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
+            self.image_only_diagnostics["ml_diagnostics"] = load_ml_hint_diagnostics(self.workspace_dir, payload)
+            self.image_only_diagnostics["ml_hint_by_pair"] = self.image_only_diagnostics["ml_diagnostics"].get(
+                "ml_hint_by_pair",
+                {},
+            )
         self.thread_pool = QThreadPool.globalInstance()
         self.icon_cache: Dict[str, QPixmap] = {}
         self.preview_cache: OrderedDict[str, QPixmap] = OrderedDict()
@@ -825,8 +1036,8 @@ class MainWindow(QMainWindow):
         self.resize(1600, 1000)
 
         self.tree = PerformanceTree()
-        self.tree.setColumnCount(6)
-        self.tree.setHeaderLabels(["", "Set", "Photos", "Review", "First", "Len"])
+        self.tree.setColumnCount(7)
+        self.tree.setHeaderLabels(["", "Set", "Type", "Photos", "Review", "First", "Len"])
         self.tree.setUniformRowHeights(True)
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.apply_tree_icon_mode()
@@ -836,10 +1047,12 @@ class MainWindow(QMainWindow):
         tree_header.setSectionResizeMode(1, QHeaderView.Interactive)
         tree_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         tree_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        tree_header.setSectionResizeMode(4, QHeaderView.Stretch)
-        tree_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        tree_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        tree_header.setSectionResizeMode(5, QHeaderView.Stretch)
+        tree_header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
         self.tree.setColumnWidth(0, self.minimum_preview_column_width())
         self.tree.setColumnWidth(1, 120)
+        self.tree.setColumnWidth(2, 48)
         self.tree.itemSelectionChanged.connect(self.on_selection_changed)
         self.tree.itemExpanded.connect(self.on_item_expanded)
         self.tree.previousPerformanceRequested.connect(self.select_previous_set)
@@ -1457,6 +1670,10 @@ class MainWindow(QMainWindow):
         for original in self.raw_performances:
             base_set_id = original.get("set_id") or original["performance_number"]
             original_number = original["performance_number"]
+            original_segment_type = str(original.get("segment_type", "") or "").strip()
+            original_type_code = str(original.get("type_code", "") or "").strip() or segment_type_to_code(
+                original_segment_type
+            )
             photos = list(original["photos"])
             if not photos:
                 display_sets.append(
@@ -1465,6 +1682,8 @@ class MainWindow(QMainWindow):
                         "base_set_id": base_set_id,
                         "display_name": original_number,
                         "original_performance_number": original_number,
+                        "segment_type": original_segment_type,
+                        "type_code": original_type_code,
                         "occurrence_index": original.get("occurrence_index", ""),
                         "duplicate_status": original.get("duplicate_status", "normal"),
                         "timeline_status": original["timeline_status"],
@@ -1520,6 +1739,8 @@ class MainWindow(QMainWindow):
                     photo_entry["base_set_id"] = base_set_id
                     photo_entry["display_set_id"] = segment_ids[segment_number]
                     photo_entry["display_name"] = segment_names[segment_number]
+                    photo_entry["segment_type"] = original_segment_type
+                    photo_entry["type_code"] = original_type_code
                     normalized_photos.append(photo_entry)
                     if photo_entry["proxy_exists"] and not first_proxy_path:
                         first_proxy_path = photo_entry["proxy_path"]
@@ -1536,6 +1757,8 @@ class MainWindow(QMainWindow):
                         "base_set_id": base_set_id,
                         "display_name": segment_names[segment_number],
                         "original_performance_number": original_number,
+                        "segment_type": original_segment_type,
+                        "type_code": original_type_code,
                         "occurrence_index": original.get("occurrence_index", ""),
                         "duplicate_status": original.get("duplicate_status", "normal"),
                         "timeline_status": original["timeline_status"],
@@ -1619,6 +1842,17 @@ class MainWindow(QMainWindow):
             )
             target_set["performance_end_local"] = source_set.get("performance_end_local", target_set["performance_end_local"])
             target_set["timeline_status"] = source_set.get("timeline_status", target_set["timeline_status"])
+            target_segment_type = str(target_set.get("segment_type", "") or "").strip()
+            source_segment_type = str(source_set.get("segment_type", "") or "").strip()
+            if target_segment_type == source_segment_type:
+                merged_segment_type = target_segment_type
+            else:
+                merged_segment_type = ""
+            target_set["segment_type"] = merged_segment_type
+            target_set["type_code"] = segment_type_to_code(merged_segment_type)
+            for photo in target_set["photos"]:
+                photo["segment_type"] = merged_segment_type
+                photo["type_code"] = target_set["type_code"]
             merged_sets.pop(source_index)
         return merged_sets
 
@@ -1632,6 +1866,7 @@ class MainWindow(QMainWindow):
                 [
                     "",
                     display_set["display_name"],
+                    str(display_set.get("type_code", "") or "?"),
                     str(display_set["photo_count"]),
                     str(display_set["review_count"]),
                     self.display_time(first_display_time),
@@ -1660,13 +1895,15 @@ class MainWindow(QMainWindow):
                 muted_red = QColor("#6e2a2a")
                 for column in range(self.tree.columnCount()):
                     item.setBackground(column, muted_red)
-        self.tree.resizeColumnToContents(2)
         self.tree.resizeColumnToContents(3)
-        self.tree.resizeColumnToContents(5)
+        self.tree.resizeColumnToContents(4)
+        self.tree.resizeColumnToContents(6)
         if self.tree.columnWidth(0) < self.minimum_preview_column_width():
             self.tree.setColumnWidth(0, self.minimum_preview_column_width())
         if self.tree.columnWidth(1) < 120:
             self.tree.setColumnWidth(1, 120)
+        if self.tree.columnWidth(2) < 48:
+            self.tree.setColumnWidth(2, 48)
 
     def flush_review_state(self) -> bool:
         payload = dict(self.review_state)
@@ -1749,6 +1986,7 @@ class MainWindow(QMainWindow):
                 [
                     "",
                     photo["filename"],
+                    str(photo.get("type_code", "") or "?"),
                     photo["assignment_status"],
                     photo["stream_id"],
                     self.display_time(photo["adjusted_start_local"]),

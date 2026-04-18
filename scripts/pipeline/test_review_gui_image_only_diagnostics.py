@@ -215,6 +215,92 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             self.assertIn("Boundary before photo", text)
             self.assertIn("score: 0.040000", text)
 
+    def test_build_image_only_photo_info_text_includes_ml_hints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            self.create_workspace_with_diagnostics(workspace_dir)
+            diagnostics = review_gui.load_image_only_diagnostics(workspace_dir)
+            diagnostics["ml_diagnostics"] = {
+                "available": True,
+                "ml_model_run_id": "day-20260323",
+                "ml_hint_by_pair": {
+                    ("cam/b.jpg", "cam/c.jpg"): {
+                        "boundary_prediction": False,
+                        "boundary_confidence": "0.81",
+                        "segment_type_prediction": "dance",
+                        "segment_type_confidence": "0.97",
+                    },
+                    ("cam/a.jpg", "cam/b.jpg"): {
+                        "boundary_prediction": True,
+                        "boundary_confidence": "0.63",
+                        "segment_type_prediction": "ceremony",
+                        "segment_type_confidence": "0.74",
+                    },
+                },
+                "error": "",
+            }
+            diagnostics["ml_hint_by_pair"] = diagnostics["ml_diagnostics"]["ml_hint_by_pair"]
+            photo = {
+                "display_name": "SEG0001",
+                "original_performance_number": "SEG0001",
+                "base_set_id": "imgset-000001",
+                "type_code": "D",
+                "relative_path": "cam/b.jpg",
+                "filename": "b.jpg",
+                "adjusted_start_local": "2026-03-23T10:00:05",
+                "assignment_status": "assigned",
+                "assignment_reason": "",
+                "seconds_to_nearest_boundary": "0.000000",
+                "stream_id": "p-main",
+                "device": "A7R5",
+                "proxy_exists": True,
+            }
+            text = review_gui.build_image_only_photo_info_text(photo, diagnostics)
+            self.assertIn("Type: D", text)
+            self.assertIn("ML hint after photo", text)
+            self.assertIn("boundary: no_cut", text)
+            self.assertIn("right-side segment: dance", text)
+            self.assertIn("ML hint before photo", text)
+            self.assertIn("model run: day-20260323", text)
+
+    def test_next_segment_type_override_cycles_through_supported_values(self):
+        self.assertEqual(review_gui.next_segment_type_override(""), "dance")
+        self.assertEqual(review_gui.next_segment_type_override("dance"), "ceremony")
+        self.assertEqual(review_gui.next_segment_type_override("ceremony"), "audience")
+        self.assertEqual(review_gui.next_segment_type_override("audience"), "rehearsal")
+        self.assertEqual(review_gui.next_segment_type_override("rehearsal"), "other")
+        self.assertEqual(review_gui.next_segment_type_override("other"), "")
+
+    def test_resolve_effective_segment_type_prefers_override_when_present(self):
+        self.assertEqual(review_gui.resolve_effective_segment_type("dance", "ceremony"), ("ceremony", True))
+        self.assertEqual(review_gui.resolve_effective_segment_type("dance", ""), ("dance", False))
+
+    def test_build_image_only_set_info_text_reports_type_override(self):
+        diagnostics = {"available": False, "error": ""}
+        display_set = {
+            "display_name": "VLM0001",
+            "original_performance_number": "VLM0001",
+            "set_id": "vlm-set-0001",
+            "base_set_id": "vlm-set-0001",
+            "duplicate_status": "normal",
+            "timeline_status": "vlm_probe:1_hits",
+            "photo_count": 5,
+            "review_count": 0,
+            "duration_seconds": 10,
+            "max_internal_photo_gap_seconds": 3,
+            "performance_start_local": "2026-03-23T10:00:00",
+            "performance_end_local": "2026-03-23T10:00:10",
+            "first_photo_local": "2026-03-23T10:00:00",
+            "last_photo_local": "2026-03-23T10:00:10",
+            "merged_manually": False,
+            "type_code": "C",
+            "type_override_active": True,
+            "photos": [],
+        }
+        text = review_gui.build_image_only_set_info_text(display_set, diagnostics, no_photos_confirmed=False)
+        self.assertIn("Type: C", text)
+        self.assertIn("Type override: yes", text)
+
     def test_build_image_only_multi_photo_info_text_includes_selected_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_dir = Path(tmp)
