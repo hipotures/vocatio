@@ -372,14 +372,30 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             {
                 "status": "result",
                 "boundary_prediction": True,
-                "boundary_confidence": "0.91",
+                "boundary_confidence": 0.91,
                 "segment_type_prediction": "ceremony",
-                "segment_type_confidence": "0.88",
+                "segment_type_confidence": 0.88,
+                "gap_seconds": 128,
+                "left_relative_path": "cam/a.jpg",
+                "right_relative_path": "cam/d.jpg",
             }
         )
         self.assertIn("Status: result", result_section["body"])
-        self.assertIn("Boundary: cut", result_section["body"])
-        self.assertIn("Right-side segment: ceremony", result_section["body"])
+        self.assertIn("Boundary: cut (0.91)", result_section["body"])
+        self.assertIn("Right-side segment: ceremony (0.88)", result_section["body"])
+        self.assertIn("Gap seconds: 128", result_section["body"])
+        self.assertIn("Anchors: cam/a.jpg -> cam/d.jpg", result_section["body"])
+
+    def test_build_manual_ml_prediction_section_promotes_resolution_errors_from_idle(self):
+        section = review_gui.build_manual_ml_prediction_section(
+            {
+                "status": "idle",
+                "resolution_error": "overlap must be smaller than window_size",
+            }
+        )
+
+        self.assertIn("Status: error", section["body"])
+        self.assertIn("Error: overlap must be smaller than window_size", section["body"])
 
     def test_resolve_manual_prediction_window_config_prefers_vocatio_values(self):
         resolved = review_gui.resolve_manual_prediction_window_config(
@@ -399,6 +415,22 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 "overlap": review_gui.probe_vlm_boundary.DEFAULT_OVERLAP,
             },
         )
+
+    def test_resolve_manual_prediction_window_config_rejects_overlap_greater_or_equal_window_size(self):
+        with self.assertRaisesRegex(ValueError, "overlap must be smaller than window_size"):
+            review_gui.resolve_manual_prediction_window_config(
+                {
+                    "VLM_WINDOW_SIZE": "3",
+                    "VLM_OVERLAP": "3",
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "overlap must be smaller than window_size"):
+            review_gui.resolve_manual_prediction_window_config(
+                {
+                    "VLM_WINDOW_SIZE": "2",
+                }
+            )
 
     def test_resolve_manual_prediction_anchor_pair_sorts_like_gui_and_ignores_interior_rows(self):
         selected_photos = [
@@ -429,6 +461,34 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(resolved["left_row_index"], 0)
         self.assertEqual(resolved["right_row_index"], 3)
         self.assertEqual(resolved["gap_seconds"], 8.0)
+
+    def test_resolve_manual_prediction_anchor_pair_uses_joined_row_order_for_tied_timestamps(self):
+        selected_photos = [
+            {
+                "filename": "z.jpg",
+                "relative_path": "cam/z.jpg",
+                "source_path": "/src/z.jpg",
+                "adjusted_start_local": "2026-03-23T10:00:00",
+            },
+            {
+                "filename": "a.jpg",
+                "relative_path": "cam/a.jpg",
+                "source_path": "/src/a.jpg",
+                "adjusted_start_local": "2026-03-23T10:00:00",
+            },
+        ]
+        joined_rows = [
+            {"relative_path": "cam/z.jpg", "start_epoch_ms": "1000"},
+            {"relative_path": "cam/a.jpg", "start_epoch_ms": "1000"},
+        ]
+
+        resolved = review_gui.resolve_manual_prediction_anchor_pair(selected_photos, joined_rows)
+
+        self.assertEqual(resolved["left_relative_path"], "cam/z.jpg")
+        self.assertEqual(resolved["right_relative_path"], "cam/a.jpg")
+        self.assertEqual(resolved["left_row_index"], 0)
+        self.assertEqual(resolved["right_row_index"], 1)
+        self.assertEqual(resolved["gap_seconds"], 0.0)
 
     def test_manual_ml_prediction_state_order_matches_preview_and_export_for_tied_timestamps(self):
         display_set = {
@@ -522,6 +582,69 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             [photo["relative_path"] for photo in diagnostics["multi_photo_diagnostics"]["selected_photos"]],
             ["cam/a.jpg", "cam/z.jpg"],
         )
+
+    def test_current_manual_ml_prediction_state_surfaces_resolution_failures_as_error(self):
+        display_set = {
+            "set_id": "imgset-000001",
+            "display_name": "SEG0001",
+        }
+        photo_a = {
+            "filename": "a.jpg",
+            "relative_path": "cam/a.jpg",
+            "source_path": "/src/a.jpg",
+            "adjusted_start_local": "2026-03-23T10:00:00",
+            "display_set_id": "imgset-000001",
+            "display_name": "SEG0001",
+        }
+        photo_b = {
+            "filename": "b.jpg",
+            "relative_path": "cam/b.jpg",
+            "source_path": "/src/b.jpg",
+            "adjusted_start_local": "2026-03-23T10:00:05",
+            "display_set_id": "imgset-000001",
+            "display_name": "SEG0001",
+        }
+        set_item = FakeRestoreItem(display_set)
+        photo_item_a = FakeRestoreItem(photo_a, parent=set_item)
+        photo_item_b = FakeRestoreItem(photo_b, parent=set_item)
+        set_item.addChild(photo_item_a)
+        set_item.addChild(photo_item_b)
+        tree = FakeRestoreTree(current_item=photo_item_a, selected_items=[photo_item_a, photo_item_b])
+        tree.set_top_level_items([set_item])
+
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.tree = tree
+        window.index_path = Path("/tmp/performance_proxy_index.json")
+        window.workspace_dir = Path("/tmp")
+        window.payload = {
+            "day": "20260323",
+            "workspace_dir": "/tmp",
+        }
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        window.manual_ml_prediction_state = None
+        window.selected_photo_entries = review_gui.MainWindow.selected_photo_entries.__get__(window, review_gui.MainWindow)
+        window.current_manual_ml_prediction_state = review_gui.MainWindow.current_manual_ml_prediction_state.__get__(
+            window,
+            review_gui.MainWindow,
+        )
+
+        with unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_vocatio_config",
+            return_value={"VLM_WINDOW_SIZE": "2"},
+        ), unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_joined_rows",
+            return_value=[
+                {"relative_path": "cam/a.jpg", "start_epoch_ms": "1000"},
+                {"relative_path": "cam/b.jpg", "start_epoch_ms": "2000"},
+            ],
+        ):
+            state = window.current_manual_ml_prediction_state()
+
+        self.assertEqual(state["status"], "error")
+        self.assertEqual(state["error"], "overlap must be smaller than window_size")
+        self.assertEqual(state["resolution_error"], "overlap must be smaller than window_size")
 
     def test_build_image_only_set_info_sections_for_set_returns_named_sections(self):
         diagnostics = {"available": False, "error": ""}
@@ -743,6 +866,24 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
         self.assertIn("Status: running", sections[2]["body"])
 
+    def test_format_manual_ml_prediction_result_text_renders_prediction_details(self):
+        text = review_gui.format_manual_ml_prediction_result_text(
+            {
+                "boundary_prediction": True,
+                "boundary_confidence": 0.84,
+                "segment_type_prediction": "dance",
+                "segment_type_confidence": 0.93,
+                "gap_seconds": 128,
+                "left_relative_path": "cam/a.jpg",
+                "right_relative_path": "cam/d.jpg",
+            }
+        )
+
+        self.assertIn("Boundary: cut (0.84)", text)
+        self.assertIn("Right-side segment: dance (0.93)", text)
+        self.assertIn("Gap seconds: 128", text)
+        self.assertIn("Anchors: cam/a.jpg -> cam/d.jpg", text)
+
     def test_render_info_sections_rebuilds_scroll_container(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
         container = QWidget()
@@ -808,6 +949,194 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
 
         clipboard.setText.assert_called_once_with("boundary: cut")
         status_bar.showMessage.assert_called_once_with("Copied Boundary diagnostics")
+
+    def test_build_info_section_widget_disables_manual_prediction_button_while_running(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.run_manual_ml_prediction = Mock()
+        section = review_gui.build_manual_ml_prediction_section(
+            {
+                "status": "running",
+                "started_at": "2026-04-19T12:34:56",
+            }
+        )
+
+        widget = window.build_info_section_widget(section)
+        self.addCleanup(widget.deleteLater)
+        widget.show()
+        TEST_QT_APP.processEvents()
+
+        buttons = widget.findChildren(QPushButton)
+        self.assertEqual([button.text() for button in buttons], ["Manual ML prediction", "Running..."])
+        self.assertFalse(buttons[1].isEnabled())
+
+    def test_run_manual_ml_prediction_success_path_updates_result_state(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.workspace_dir = Path("/tmp/workspace")
+        window.payload = {
+            "day": "20260323",
+            "ml_model_run_id": "ml-run-001",
+            "photo_pre_model_dir": "photo-pre",
+        }
+        window.index_path = Path("/tmp/performance_proxy_index.json")
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        window.manual_ml_prediction_state = {
+            "status": "idle",
+            "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+            "window_config": {"window_size": 7, "overlap": 3},
+            "anchor_pair": {
+                "left_relative_path": "cam/left.jpg",
+                "right_relative_path": "cam/right.jpg",
+                "left_row_index": 2,
+                "right_row_index": 4,
+                "gap_seconds": 8.0,
+            },
+        }
+        window.selected_photo_entries = Mock(
+            return_value=[
+                {"relative_path": "cam/left.jpg", "source_path": "/src/left.jpg"},
+                {"relative_path": "cam/right.jpg", "source_path": "/src/right.jpg"},
+            ]
+        )
+        window.current_manual_ml_prediction_state = Mock(return_value=window.manual_ml_prediction_state)
+        window.refresh_current_info_dock = Mock()
+
+        full_joined_rows = [
+            {"relative_path": "cam/pre1.jpg", "start_epoch_ms": "1000"},
+            {"relative_path": "cam/pre2.jpg", "start_epoch_ms": "2000"},
+            {"relative_path": "cam/left.jpg", "start_epoch_ms": "3000"},
+            {"relative_path": "cam/interior.jpg", "start_epoch_ms": "5000"},
+            {"relative_path": "cam/right.jpg", "start_epoch_ms": "11000"},
+            {"relative_path": "cam/post1.jpg", "start_epoch_ms": "12000"},
+        ]
+        candidate_rows = [
+            full_joined_rows[0],
+            full_joined_rows[1],
+            full_joined_rows[2],
+            full_joined_rows[4],
+            full_joined_rows[5],
+        ]
+
+        with unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_joined_rows",
+            return_value=full_joined_rows,
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "resolve_ml_model_run",
+            return_value=("ml-run-001", Path("/tmp/model-run")),
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "load_ml_hint_context",
+            return_value="ml-context",
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "read_boundary_scores_by_pair",
+            return_value={},
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "resolve_path",
+            return_value=Path("/tmp/photo-pre"),
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "_build_ml_candidate_window_rows",
+            return_value=candidate_rows,
+        ) as build_candidate_rows, unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "_build_ml_candidate_row",
+            return_value={"candidate": "row"},
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "predict_ml_hint_for_candidate",
+            return_value=review_gui.probe_vlm_boundary.MlHintPrediction(
+                boundary_prediction=True,
+                boundary_confidence=0.91,
+                boundary_positive_probability=0.91,
+                segment_type_prediction="ceremony",
+                segment_type_confidence=0.88,
+            ),
+        ), unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
+            window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(
+                window,
+                review_gui.MainWindow,
+            )
+            window.run_manual_ml_prediction()
+
+        reduced_rows = build_candidate_rows.call_args.kwargs["joined_rows"]
+        self.assertEqual(
+            [row["relative_path"] for row in reduced_rows],
+            [
+                "cam/pre1.jpg",
+                "cam/pre2.jpg",
+                "cam/left.jpg",
+                "cam/right.jpg",
+                "cam/post1.jpg",
+            ],
+        )
+        self.assertEqual(build_candidate_rows.call_args.kwargs["cut_index"], 2)
+        self.assertEqual(window.manual_ml_prediction_state["status"], "result")
+        self.assertIn("Boundary: cut (0.91)", window.manual_ml_prediction_state["result_text"])
+        self.assertIn("Anchors: cam/left.jpg -> cam/right.jpg", window.manual_ml_prediction_state["result_text"])
+        self.assertEqual(window.refresh_current_info_dock.call_count, 2)
+
+    def test_run_manual_ml_prediction_error_path_updates_error_state(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.workspace_dir = Path("/tmp/workspace")
+        window.payload = {
+            "day": "20260323",
+            "ml_model_run_id": "ml-run-001",
+        }
+        window.index_path = Path("/tmp/performance_proxy_index.json")
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        window.manual_ml_prediction_state = {
+            "status": "idle",
+            "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+            "window_config": {"window_size": 7, "overlap": 3},
+            "anchor_pair": {
+                "left_relative_path": "cam/left.jpg",
+                "right_relative_path": "cam/right.jpg",
+                "left_row_index": 2,
+                "right_row_index": 4,
+                "gap_seconds": 8.0,
+            },
+        }
+        window.selected_photo_entries = Mock(
+            return_value=[
+                {"relative_path": "cam/left.jpg", "source_path": "/src/left.jpg"},
+                {"relative_path": "cam/right.jpg", "source_path": "/src/right.jpg"},
+            ]
+        )
+        window.current_manual_ml_prediction_state = Mock(return_value=window.manual_ml_prediction_state)
+        window.refresh_current_info_dock = Mock()
+
+        with unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_joined_rows",
+            return_value=[
+                {"relative_path": "cam/pre1.jpg", "start_epoch_ms": "1000"},
+                {"relative_path": "cam/pre2.jpg", "start_epoch_ms": "2000"},
+                {"relative_path": "cam/left.jpg", "start_epoch_ms": "3000"},
+                {"relative_path": "cam/interior.jpg", "start_epoch_ms": "5000"},
+                {"relative_path": "cam/right.jpg", "start_epoch_ms": "11000"},
+                {"relative_path": "cam/post1.jpg", "start_epoch_ms": "12000"},
+            ],
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "resolve_ml_model_run",
+            return_value=("ml-run-001", Path("/tmp/model-run")),
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "load_ml_hint_context",
+            side_effect=ValueError("predictor metadata is unreadable"),
+        ), unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
+            window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(
+                window,
+                review_gui.MainWindow,
+            )
+            window.run_manual_ml_prediction()
+
+        self.assertEqual(window.manual_ml_prediction_state["status"], "error")
+        self.assertEqual(window.manual_ml_prediction_state["error"], "predictor metadata is unreadable")
+        self.assertEqual(window.refresh_current_info_dock.call_count, 2)
 
     def test_toggle_no_photos_confirmed_current_set_rerenders_current_info_dock(self):
         display_set = {

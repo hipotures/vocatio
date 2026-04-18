@@ -265,6 +265,9 @@ def resolve_manual_prediction_window_config(vocatio_config: Mapping[str, str]) -
     if configured_overlap:
         overlap = probe_vlm_boundary.non_negative_int_arg(configured_overlap)
 
+    if overlap >= window_size:
+        raise ValueError("overlap must be smaller than window_size")
+
     return {
         "window_size": window_size,
         "overlap": overlap,
@@ -298,6 +301,9 @@ def resolve_manual_prediction_anchor_pair(
 
     left_row_index = joined_row_index_by_relative_path[left_relative_path]
     right_row_index = joined_row_index_by_relative_path[right_relative_path]
+    if left_row_index > right_row_index:
+        left_relative_path, right_relative_path = right_relative_path, left_relative_path
+        left_row_index, right_row_index = right_row_index, left_row_index
     left_row = joined_rows[left_row_index]
     right_row = joined_rows[right_row_index]
     left_start_epoch_ms = int(str(left_row.get("start_epoch_ms", "") or "").strip())
@@ -346,6 +352,125 @@ def load_manual_prediction_joined_rows(
         photo_manifest_csv=photo_manifest_csv,
         image_variant=image_variant,
     )
+
+
+def format_manual_prediction_score(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    try:
+        return f"{float(text):.2f}"
+    except (TypeError, ValueError):
+        return text
+
+
+def format_manual_prediction_gap_seconds(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    try:
+        numeric = float(text)
+    except (TypeError, ValueError):
+        return text
+    if numeric.is_integer():
+        return str(int(numeric))
+    return f"{numeric:.3f}".rstrip("0").rstrip(".")
+
+
+def format_manual_ml_prediction_result_text(result: Mapping[str, Any]) -> str:
+    boundary_prediction = bool(result.get("boundary_prediction"))
+    return join_info_section_lines(
+        [
+            f"Boundary: {'cut' if boundary_prediction else 'no_cut'} ({format_manual_prediction_score(result.get('boundary_confidence'))})",
+            (
+                "Right-side segment: "
+                f"{format_value(result.get('segment_type_prediction'))} "
+                f"({format_manual_prediction_score(result.get('segment_type_confidence'))})"
+            ),
+            f"Gap seconds: {format_manual_prediction_gap_seconds(result.get('gap_seconds'))}",
+            (
+                "Anchors: "
+                f"{format_value(result.get('left_relative_path'))} -> {format_value(result.get('right_relative_path'))}"
+            ),
+        ]
+    )
+
+
+def build_manual_prediction_joined_rows(
+    joined_rows: Sequence[Mapping[str, Any]],
+    anchor_pair: Mapping[str, Any],
+) -> tuple[List[Mapping[str, Any]], int]:
+    left_row_index = int(anchor_pair.get("left_row_index", -1))
+    right_row_index = int(anchor_pair.get("right_row_index", -1))
+    if left_row_index < 0 or right_row_index < 0:
+        raise ValueError("manual prediction anchor rows are unavailable")
+    if left_row_index >= right_row_index:
+        raise ValueError("manual prediction anchors must be ordered by joined rows")
+    if right_row_index >= len(joined_rows):
+        raise ValueError("manual prediction anchor rows are outside the joined manifest")
+    reduced_rows = list(joined_rows[: left_row_index + 1]) + list(joined_rows[right_row_index:])
+    return reduced_rows, left_row_index
+
+
+def compute_manual_ml_prediction_result(
+    *,
+    workspace_dir: Path,
+    payload: Mapping[str, Any],
+    joined_rows: Sequence[Mapping[str, Any]],
+    anchor_pair: Mapping[str, Any],
+    window_config: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if not window_config:
+        raise ValueError("manual prediction window config is unavailable")
+    requested_ml_model_run_id = str(payload.get("ml_model_run_id", "") or "").strip()
+    if not requested_ml_model_run_id:
+        raise ValueError("ML model run is unavailable")
+    effective_ml_model_run_id, resolved_ml_model_dir = probe_vlm_boundary.resolve_ml_model_run(
+        workspace_dir,
+        requested_ml_model_run_id,
+    )
+    ml_hint_context = probe_vlm_boundary.load_ml_hint_context(
+        ml_model_run_id=effective_ml_model_run_id,
+        ml_model_dir=resolved_ml_model_dir,
+    )
+    if ml_hint_context is None:
+        raise ValueError("ML model directory is unavailable")
+
+    reduced_rows, cut_index = build_manual_prediction_joined_rows(joined_rows, anchor_pair)
+    candidate_rows = probe_vlm_boundary._build_ml_candidate_window_rows(
+        joined_rows=reduced_rows,
+        cut_index=cut_index,
+    )
+    if candidate_rows is None:
+        raise ValueError("manual prediction needs enough surrounding context for ML inference")
+
+    day_id = str(payload.get("day", "") or "").strip()
+    photo_pre_model_dir_value = str(
+        payload.get("photo_pre_model_dir", "") or probe_vlm_boundary.DEFAULT_PHOTO_PRE_MODEL_DIR
+    ).strip()
+    photo_pre_model_dir = probe_vlm_boundary.resolve_path(workspace_dir, photo_pre_model_dir_value)
+    prediction = probe_vlm_boundary.predict_ml_hint_for_candidate(
+        ml_hint_context=ml_hint_context,
+        candidate_row=probe_vlm_boundary._build_ml_candidate_row(candidate_rows, day_id=day_id),
+        boundary_rows_by_pair=probe_vlm_boundary.read_boundary_scores_by_pair(
+            workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME
+        ),
+        photo_pre_model_dir=photo_pre_model_dir,
+    )
+    result = {
+        "ml_model_run_id": effective_ml_model_run_id,
+        "boundary_prediction": bool(prediction.boundary_prediction),
+        "boundary_confidence": prediction.boundary_confidence,
+        "boundary_positive_probability": prediction.boundary_positive_probability,
+        "segment_type_prediction": str(prediction.segment_type_prediction),
+        "segment_type_confidence": prediction.segment_type_confidence,
+        "gap_seconds": anchor_pair.get("gap_seconds"),
+        "left_relative_path": str(anchor_pair.get("left_relative_path", "") or "").strip(),
+        "right_relative_path": str(anchor_pair.get("right_relative_path", "") or "").strip(),
+        "window_config": dict(window_config),
+    }
+    result["result_text"] = format_manual_ml_prediction_result_text(result)
+    return result
 
 
 def keyboard_help_sections() -> List[tuple[str, List[tuple[str, str]]]]:
@@ -747,33 +872,34 @@ def should_show_manual_ml_prediction(selected_photos: Sequence[Mapping[str, Any]
 
 def build_manual_ml_prediction_section(
     manual_prediction_state: Optional[Mapping[str, Any]],
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     state = dict(manual_prediction_state or {})
     status = str(state.get("status", "") or "idle").strip().lower() or "idle"
+    resolution_error = str(state.get("resolution_error", "") or "").strip()
+    error_text = str(state.get("error", "") or "").strip()
+    if resolution_error and status == "idle":
+        status = "error"
+        error_text = error_text or resolution_error
     lines = [f"Status: {status}"]
     if status == "running":
         lines.append(f"Started: {format_value(state.get('started_at'))}")
     elif status == "error":
-        lines.append(f"Error: {format_value(state.get('error'))}")
+        lines.append(f"Error: {format_value(error_text or resolution_error)}")
     elif status == "result":
-        boundary_prediction = bool(state.get("boundary_prediction"))
-        lines.extend(
-            [
-                f"Boundary: {'cut' if boundary_prediction else 'no_cut'}",
-                f"Boundary confidence: {format_value(state.get('boundary_confidence'))}",
-                f"Right-side segment: {format_value(state.get('segment_type_prediction'))}",
-                f"Segment confidence: {format_value(state.get('segment_type_confidence'))}",
-            ]
-        )
+        result_text = str(state.get("result_text", "") or "").strip()
+        lines.extend(result_text.splitlines() if result_text else format_manual_ml_prediction_result_text(state).splitlines())
     else:
         lines.append("Prediction run not started.")
-    lines.append("Execution hook is pending a later task.")
-    return build_info_section(
+    section = build_info_section(
         "Manual ML prediction",
         "Ephemeral runtime state for manual ML boundary prediction.",
         join_info_section_lines(lines),
         key="manual_ml_prediction",
     )
+    section["action_key"] = "run_manual_ml_prediction"
+    section["action_text"] = "Running..." if status == "running" else "Run manual ML prediction"
+    section["action_enabled"] = status != "running"
+    return section
 
 
 def build_image_only_set_summary_body(
@@ -2622,6 +2748,8 @@ class MainWindow(QMainWindow):
                     load_manual_prediction_joined_rows(self.workspace_dir, self.payload),
                 )
             except Exception as exc:
+                next_state["status"] = "error"
+                next_state["error"] = str(exc)
                 next_state["resolution_error"] = str(exc)
             self.manual_ml_prediction_state = next_state
         return self.manual_ml_prediction_state
@@ -2709,6 +2837,48 @@ class MainWindow(QMainWindow):
             return build_image_only_photo_info_sections(photo, self.image_only_diagnostics)
         return build_default_photo_info_sections(photo)
 
+    def run_manual_ml_prediction(self) -> None:
+        current_state = self.current_manual_ml_prediction_state()
+        if not isinstance(current_state, Mapping):
+            return
+        if str(current_state.get("status", "") or "").strip().lower() == "running":
+            return
+
+        next_state = dict(current_state)
+        next_state["status"] = "running"
+        next_state["started_at"] = datetime.now(timezone.utc).astimezone().replace(microsecond=0).isoformat()
+        next_state.pop("error", None)
+        next_state.pop("result_text", None)
+        self.manual_ml_prediction_state = next_state
+        self.refresh_current_info_dock()
+        QApplication.processEvents()
+
+        try:
+            resolution_error = str(current_state.get("resolution_error", "") or "").strip()
+            if resolution_error:
+                raise ValueError(resolution_error)
+            result = compute_manual_ml_prediction_result(
+                workspace_dir=self.workspace_dir,
+                payload=self.payload,
+                joined_rows=load_manual_prediction_joined_rows(self.workspace_dir, self.payload),
+                anchor_pair=dict(current_state.get("anchor_pair", {}) or {}),
+                window_config=dict(current_state.get("window_config", {}) or {}),
+            )
+        except Exception as exc:
+            error_state = dict(next_state)
+            error_state["status"] = "error"
+            error_state["error"] = str(exc)
+            self.manual_ml_prediction_state = error_state
+        else:
+            result_state = dict(next_state)
+            result_state["status"] = "result"
+            result_state.update(result)
+            result_state.pop("error", None)
+            result_state.pop("resolution_error", None)
+            self.manual_ml_prediction_state = result_state
+
+        self.refresh_current_info_dock()
+
     def refresh_current_info_dock(self) -> None:
         item = self.tree.currentItem()
         if item is None:
@@ -2778,12 +2948,27 @@ class MainWindow(QMainWindow):
         card_layout.setContentsMargins(10, 10, 10, 10)
         card_layout.setSpacing(6)
 
+        header_widget = QWidget()
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+
         title_button = QPushButton(str(section.get("title", "") or ""))
         title_button.setFlat(True)
         title_button.setCursor(Qt.PointingHandCursor)
         title_button.setStyleSheet("text-align: left; font-weight: 700; padding: 0;")
         title_button.clicked.connect(lambda _checked=False, current_section=dict(section): self.copy_info_section_body(current_section))
-        card_layout.addWidget(title_button)
+        header_layout.addWidget(title_button, 1)
+
+        action_key = str(section.get("action_key", "") or "").strip()
+        if action_key == "run_manual_ml_prediction" and hasattr(self, "run_manual_ml_prediction"):
+            action_button = QPushButton(str(section.get("action_text", "") or "Run"))
+            action_button.setEnabled(bool(section.get("action_enabled", True)))
+            action_button.clicked.connect(self.run_manual_ml_prediction)
+            header_layout.addWidget(action_button, 0, Qt.AlignRight)
+
+        header_widget.setLayout(header_layout)
+        card_layout.addWidget(header_widget)
 
         description = str(section.get("description", "") or "").strip()
         if description:
