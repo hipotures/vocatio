@@ -877,7 +877,12 @@ def build_image_only_photo_info_sections(
 def build_image_only_multi_photo_info_sections(
     photos: Sequence[Mapping[str, Any]],
     diagnostics: Mapping[str, Any],
+    *,
+    show_manual_ml_prediction: bool,
+    manual_prediction_state: Optional[Mapping[str, Any]],
 ) -> List[Dict[str, str]]:
+    _ = show_manual_ml_prediction
+    _ = manual_prediction_state
     return [
         build_info_section(
             "Selection summary",
@@ -956,7 +961,14 @@ def build_image_only_photo_info_text(photo: Mapping[str, Any], diagnostics: Mapp
 
 
 def build_image_only_multi_photo_info_text(photos: Sequence[Mapping[str, Any]], diagnostics: Mapping[str, Any]) -> str:
-    return flatten_info_sections_to_plain_text(build_image_only_multi_photo_info_sections(photos, diagnostics))
+    return flatten_info_sections_to_plain_text(
+        build_image_only_multi_photo_info_sections(
+            photos,
+            diagnostics,
+            show_manual_ml_prediction=False,
+            manual_prediction_state=None,
+        )
+    )
 
 
 def build_default_set_info_sections(
@@ -2042,6 +2054,7 @@ class MainWindow(QMainWindow):
         self.review_state["updated_at"] = self.current_timestamp()
         self.state_dirty = True
         self.apply_review_font(item, set_id)
+        self.refresh_current_info_dock()
         state_text = "enabled" if entry["no_photos_confirmed"] else "disabled"
         if self.flush_review_state():
             self.statusBar().showMessage(f"no_photos_confirmed {state_text} for set {display_set['display_name']}")
@@ -2486,6 +2499,53 @@ class MainWindow(QMainWindow):
         if index + 1 < len(self.display_items):
             self.tree.setCurrentItem(self.display_items[index + 1])
 
+    def should_show_manual_ml_prediction(self) -> bool:
+        return False
+
+    def current_manual_ml_prediction_state(self) -> Optional[Mapping[str, Any]]:
+        return None
+
+    def build_current_info_sections(
+        self,
+        item: QTreeWidgetItem,
+        selected_photos: Sequence[Mapping[str, Any]],
+    ) -> List[Dict[str, str]]:
+        if len(selected_photos) >= 2 and self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
+            return build_image_only_multi_photo_info_sections(
+                selected_photos,
+                self.image_only_diagnostics,
+                show_manual_ml_prediction=self.should_show_manual_ml_prediction(),
+                manual_prediction_state=self.current_manual_ml_prediction_state(),
+            )
+        if item.parent() is None:
+            display_set = item.data(0, Qt.UserRole)
+            if self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
+                return build_image_only_set_info_sections(
+                    display_set,
+                    self.image_only_diagnostics,
+                    no_photos_confirmed=bool(self.review_entry(display_set["set_id"]).get("no_photos_confirmed")),
+                    show_manual_ml_prediction=self.should_show_manual_ml_prediction(),
+                    manual_prediction_state=self.current_manual_ml_prediction_state(),
+                )
+            first_photo_text = self.display_time(display_set["first_photo_local"]) if display_set["first_photo_local"] else "-"
+            last_photo_text = self.display_time(display_set["last_photo_local"]) if display_set["last_photo_local"] else "-"
+            return build_default_set_info_sections(
+                display_set,
+                no_photos_confirmed=bool(self.review_entry(display_set["set_id"]).get("no_photos_confirmed")),
+                first_photo_text=first_photo_text,
+                last_photo_text=last_photo_text,
+            )
+        photo = item.data(0, Qt.UserRole)
+        if self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
+            return build_image_only_photo_info_sections(photo, self.image_only_diagnostics)
+        return build_default_photo_info_sections(photo)
+
+    def refresh_current_info_dock(self) -> None:
+        item = self.tree.currentItem()
+        if item is None:
+            return
+        self.render_info_sections(self.build_current_info_sections(item, self.selected_photo_entries()))
+
     def on_selection_changed(self) -> None:
         item = self.tree.currentItem()
         if item is None:
@@ -2496,10 +2556,8 @@ class MainWindow(QMainWindow):
         if top_level_item is not None:
             display_set = top_level_item.data(0, Qt.UserRole)
             self.mark_set_viewed(display_set["set_id"])
+        self.render_info_sections(self.build_current_info_sections(item, selected_photos))
         if len(selected_photos) >= 2 and self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
-            self.render_info_sections(
-                build_image_only_multi_photo_info_sections(selected_photos, self.image_only_diagnostics)
-            )
             current_photo = item.data(0, Qt.UserRole) if item.parent() is not None else selected_photos[0]
             left_path, right_path, left_title, right_title = determine_selected_preview_paths(
                 selected_photos=selected_photos,
@@ -2519,26 +2577,6 @@ class MainWindow(QMainWindow):
             self.right_image_panel.setVisible(
                 should_show_right_preview(view_mode=self.view_mode, selected_photo_count=len(selected_photos))
             )
-            if self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
-                sections = build_image_only_set_info_sections(
-                    display_set,
-                    self.image_only_diagnostics,
-                    no_photos_confirmed=bool(self.review_entry(display_set["set_id"]).get("no_photos_confirmed")),
-                    show_manual_ml_prediction=False,
-                    manual_prediction_state=None,
-                )
-                self.render_info_sections(sections)
-            else:
-                first_photo_text = self.display_time(display_set["first_photo_local"]) if display_set["first_photo_local"] else "-"
-                last_photo_text = self.display_time(display_set["last_photo_local"]) if display_set["last_photo_local"] else "-"
-                self.render_info_sections(
-                    build_default_set_info_sections(
-                        display_set,
-                        no_photos_confirmed=bool(self.review_entry(display_set["set_id"]).get("no_photos_confirmed")),
-                        first_photo_text=first_photo_text,
-                        last_photo_text=last_photo_text,
-                    )
-                )
             self.statusBar().showMessage(
                 f"Set {display_set['display_name']} - {display_set['photo_count']} photos - view {self.view_mode}"
             )
@@ -2548,10 +2586,6 @@ class MainWindow(QMainWindow):
         self.right_image_panel.setVisible(
             should_show_right_preview(view_mode=self.view_mode, selected_photo_count=len(selected_photos))
         )
-        if self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
-            self.render_info_sections(build_image_only_photo_info_sections(photo, self.image_only_diagnostics))
-        else:
-            self.render_info_sections(build_default_photo_info_sections(photo))
         self.statusBar().showMessage(
             f"Set {photo['display_name']} - {photo['filename']} - {photo['assignment_status']}"
         )

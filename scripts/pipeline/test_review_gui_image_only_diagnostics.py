@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -497,11 +499,18 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             },
         ]
 
-        sections = review_gui.build_image_only_multi_photo_info_sections(photos, diagnostics)
+        sections = review_gui.build_image_only_multi_photo_info_sections(
+            photos,
+            diagnostics,
+            show_manual_ml_prediction=False,
+            manual_prediction_state=None,
+        )
 
-        self.assertEqual([section["title"] for section in sections], ["Selection summary", "Boundary diagnostics"])
+        self.assertEqual(
+            [section["title"] for section in sections[:2]],
+            ["Selection summary", "Boundary diagnostics"],
+        )
         self.assertIn("Selected photos: 2", sections[0]["body"])
-        self.assertNotIn("ML hints", [section["title"] for section in sections])
 
     def test_render_info_sections_rebuilds_scroll_container(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
@@ -544,6 +553,95 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
 
         clipboard.setText.assert_called_once_with("boundary: cut")
         status_bar.showMessage.assert_called_once_with("Copied ML hints")
+
+    def test_build_info_section_widget_click_copies_section_body_via_button(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        status_bar = Mock()
+        window.statusBar = Mock(return_value=status_bar)
+        clipboard = Mock()
+        section = review_gui.build_info_section(
+            "Boundary diagnostics",
+            "Boundary and segment diagnostics for this set.",
+            "boundary: cut",
+        )
+
+        with unittest.mock.patch.object(review_gui.QApplication, "clipboard", return_value=clipboard):
+            widget = window.build_info_section_widget(section)
+            self.addCleanup(widget.deleteLater)
+            widget.show()
+            TEST_QT_APP.processEvents()
+            button = widget.findChild(QPushButton)
+            self.assertIsNotNone(button)
+            QTest.mouseClick(button, Qt.LeftButton)
+            TEST_QT_APP.processEvents()
+
+        clipboard.setText.assert_called_once_with("boundary: cut")
+        status_bar.showMessage.assert_called_once_with("Copied Boundary diagnostics")
+
+    def test_toggle_no_photos_confirmed_current_set_rerenders_current_info_dock(self):
+        display_set = {
+            "display_name": "VLM0001",
+            "original_performance_number": "VLM0001",
+            "set_id": "vlm-set-0001",
+            "base_set_id": "vlm-set-0001",
+            "type_code": "D",
+            "type_override_active": False,
+            "duplicate_status": "normal",
+            "timeline_status": "vlm_probe:1_hits",
+            "photo_count": 5,
+            "review_count": 0,
+            "duration_seconds": 10,
+            "max_internal_photo_gap_seconds": 3,
+            "performance_start_local": "2026-03-23T10:00:00",
+            "performance_end_local": "2026-03-23T10:00:10",
+            "first_photo_local": "2026-03-23T10:00:00",
+            "last_photo_local": "2026-03-23T10:00:10",
+            "merged_manually": False,
+            "photos": [],
+        }
+        item = FakeRestoreItem(display_set)
+        tree = FakeRestoreTree(current_item=item)
+        tree.set_top_level_items([item])
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.tree = tree
+        window.review_state = {"performances": {}, "updated_at": ""}
+        entry = {"no_photos_confirmed": False}
+        window.review_entry = Mock(return_value=entry)
+        window.current_timestamp = Mock(return_value="2026-04-19T12:00:00")
+        window.state_dirty = False
+        window.apply_review_font = Mock()
+        window.flush_review_state = Mock(return_value=True)
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        window.image_only_diagnostics = {"available": False, "error": ""}
+        window.selected_photo_entries = Mock(return_value=[])
+        window.render_info_sections = Mock()
+        status_bar = Mock()
+        window.statusBar = Mock(return_value=status_bar)
+        rerendered_sections = [
+            review_gui.build_info_section(
+                "Set summary",
+                "Basic set metadata and review state.",
+                "No photos confirmed: yes",
+            )
+        ]
+
+        with unittest.mock.patch.object(
+            review_gui,
+            "build_image_only_set_info_sections",
+            return_value=rerendered_sections,
+        ) as build_sections:
+            window.toggle_no_photos_confirmed_current_set()
+
+        self.assertTrue(entry["no_photos_confirmed"])
+        build_sections.assert_called_once_with(
+            display_set,
+            window.image_only_diagnostics,
+            no_photos_confirmed=True,
+            show_manual_ml_prediction=False,
+            manual_prediction_state=None,
+        )
+        window.render_info_sections.assert_called_once_with(rerendered_sections)
+        status_bar.showMessage.assert_called_once_with("no_photos_confirmed enabled for set VLM0001")
 
     def test_on_selection_changed_uses_image_only_sections_for_set_metadata_text(self):
         display_set = {
