@@ -295,6 +295,24 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             "vlm_boundary_results.ml-day-20260323-best.csv",
         )
 
+    def test_build_descriptor_field_registry_from_feature_columns_uses_model_contract(self):
+        self.assertEqual(
+            probe._build_descriptor_field_registry_from_feature_columns(
+                [
+                    "gap_12",
+                    "left_headwear_person_1",
+                    "right_headwear_person_1",
+                    "left_dominant_colors_01",
+                    "right_dominant_colors_02",
+                    "left_internal_gap_mean",
+                ]
+            ),
+            {
+                "headwear_person_1": "scalar",
+                "dominant_colors": "multivalue",
+            },
+        )
+
     def test_build_ml_hint_lines_renders_task_language(self):
         lines = probe.build_ml_hint_lines(
             probe.MlHintPrediction(
@@ -409,6 +427,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             segment_type_predictor=FakeSegmentPredictor(),
             boundary_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45"],
             segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45"],
+            descriptor_field_registry={},
         )
         joined_rows = []
         for index, name in enumerate(("a", "b", "c", "d", "e"), start=1):

@@ -31,7 +31,6 @@ from lib.media_manifest import read_media_manifest, select_photo_rows
 from lib.pipeline_io import atomic_write_json
 from lib.photo_pre_model_annotations import (
     DEFAULT_OUTPUT_DIRNAME as DEFAULT_PHOTO_PRE_MODEL_DIRNAME,
-    build_dataset_photo_pre_model_descriptor_field_registry,
     load_photo_pre_model_annotations_by_relative_path,
 )
 from lib.vlm_transport import VlmRequest, build_provider_request_payload, get_vlm_capabilities, run_vlm_request
@@ -147,6 +146,7 @@ class MlHintContext(NamedTuple):
     segment_type_predictor: object
     boundary_feature_columns: list[str]
     segment_type_feature_columns: list[str]
+    descriptor_field_registry: dict[str, str]
 
 
 class MlHintPrediction(NamedTuple):
@@ -720,6 +720,33 @@ def _extract_label_probability(probability_payload: object, predicted_label: str
     raise ValueError("unsupported segment_type probability output format")
 
 
+def _build_descriptor_field_registry_from_feature_columns(
+    feature_columns: Sequence[str],
+) -> dict[str, str]:
+    excluded_side_feature_names = {
+        "left_internal_gap_mean",
+        "right_internal_gap_mean",
+        "left_consistency_score",
+        "right_consistency_score",
+    }
+    registry: dict[str, str] = {}
+    for column_name in feature_columns:
+        if column_name in excluded_side_feature_names:
+            continue
+        if column_name.startswith("left_"):
+            descriptor_name = column_name[len("left_") :]
+        elif column_name.startswith("right_"):
+            descriptor_name = column_name[len("right_") :]
+        else:
+            continue
+        suffix = descriptor_name.rsplit("_", 1)
+        if len(suffix) == 2 and len(suffix[1]) == 2 and suffix[1].isdigit():
+            registry[suffix[0]] = "multivalue"
+            continue
+        registry.setdefault(descriptor_name, "scalar")
+    return registry
+
+
 def load_ml_hint_context(
     *,
     ml_model_run_id: str,
@@ -730,6 +757,11 @@ def load_ml_hint_context(
     training_metadata = _load_required_json(ml_model_dir / TRAINING_METADATA_FILENAME)
     feature_columns_payload = _load_required_json(ml_model_dir / FEATURE_COLUMNS_FILENAME)
     mode = str(training_metadata.get("mode", "tabular_only") or "tabular_only")
+    boundary_feature_columns = [str(value) for value in feature_columns_payload.get("boundary_feature_columns", [])]
+    segment_type_feature_columns = [str(value) for value in feature_columns_payload.get("segment_type_feature_columns", [])]
+    descriptor_field_registry = _build_descriptor_field_registry_from_feature_columns(
+        sorted(set(boundary_feature_columns + segment_type_feature_columns))
+    )
     predictor_class = load_multimodal_predictor_class() if mode == "tabular_plus_thumbnail" else load_tabular_predictor_class()
     if not hasattr(predictor_class, "load"):
         raise ValueError(f"{predictor_class.__name__} does not support load()")
@@ -741,8 +773,9 @@ def load_ml_hint_context(
         model_dir=ml_model_dir,
         boundary_predictor=boundary_predictor,
         segment_type_predictor=segment_type_predictor,
-        boundary_feature_columns=[str(value) for value in feature_columns_payload.get("boundary_feature_columns", [])],
-        segment_type_feature_columns=[str(value) for value in feature_columns_payload.get("segment_type_feature_columns", [])],
+        boundary_feature_columns=boundary_feature_columns,
+        segment_type_feature_columns=segment_type_feature_columns,
+        descriptor_field_registry=descriptor_field_registry,
     )
 
 
@@ -798,9 +831,9 @@ def _load_ml_candidate_descriptors(
     candidate_row: Mapping[str, object],
     *,
     photo_pre_model_dir: Optional[Path],
-) -> tuple[dict[str, dict[str, object]], Optional[dict[str, str]]]:
+) -> dict[str, dict[str, object]]:
     if photo_pre_model_dir is None or not photo_pre_model_dir.exists():
-        return {}, None
+        return {}
     relative_paths = [
         str(candidate_row.get(f"frame_{frame_index:02d}_relpath", "") or "").strip()
         for frame_index in range(1, ML_BOUNDARY_WINDOW_SIZE + 1)
@@ -819,10 +852,7 @@ def _load_ml_candidate_descriptors(
         annotation = annotations_by_relative_path.get(relative_path)
         if annotation is not None:
             descriptors[photo_id] = annotation
-    return (
-        descriptors,
-        build_dataset_photo_pre_model_descriptor_field_registry(annotations_by_relative_path),
-    )
+    return descriptors
 
 
 def _build_ml_candidate_heuristic_features(
@@ -871,7 +901,7 @@ def predict_ml_hint_for_candidate(
     boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
     photo_pre_model_dir: Optional[Path],
 ) -> MlHintPrediction:
-    descriptors, descriptor_field_registry = _load_ml_candidate_descriptors(
+    descriptors = _load_ml_candidate_descriptors(
         candidate_row,
         photo_pre_model_dir=photo_pre_model_dir,
     )
@@ -880,7 +910,7 @@ def predict_ml_hint_for_candidate(
         candidate_row,
         descriptors=descriptors,
         embeddings=None,
-        descriptor_field_registry=descriptor_field_registry,
+        descriptor_field_registry=ml_hint_context.descriptor_field_registry,
         heuristic_features=heuristic_features,
     )
     segment_type_row = _build_predictor_feature_row(
