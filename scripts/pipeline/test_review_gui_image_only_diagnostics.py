@@ -595,7 +595,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertTrue(unviewed_font.italic())
         self.assertFalse(plain_font.italic())
 
-    def test_build_image_only_set_info_text_reports_type_override(self):
+    def test_build_image_only_set_info_text_reports_type_override_yes_and_no(self):
         diagnostics = {"available": False, "error": ""}
         display_set = {
             "display_name": "VLM0001",
@@ -620,6 +620,41 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         text = review_gui.build_image_only_set_info_text(display_set, diagnostics, no_photos_confirmed=False)
         self.assertIn("Type: C", text)
         self.assertIn("Type override: yes", text)
+
+        text = review_gui.build_image_only_set_info_text(
+            {**display_set, "type_override_active": False},
+            diagnostics,
+            no_photos_confirmed=False,
+        )
+        self.assertIn("Type override: no", text)
+
+    def test_build_image_only_photo_info_text_reports_type_override_yes_and_no(self):
+        diagnostics = {"available": False, "error": ""}
+        photo = {
+            "display_name": "VLM0001",
+            "original_performance_number": "VLM0001",
+            "base_set_id": "vlm-set-0001",
+            "type_code": "A",
+            "type_override_active": True,
+            "relative_path": "cam/b.jpg",
+            "filename": "b.jpg",
+            "adjusted_start_local": "2026-03-23T10:00:05",
+            "assignment_status": "assigned",
+            "assignment_reason": "",
+            "seconds_to_nearest_boundary": "0.000000",
+            "stream_id": "p-main",
+            "device": "A7R5",
+            "proxy_exists": True,
+        }
+        text = review_gui.build_image_only_photo_info_text(photo, diagnostics)
+        self.assertIn("Type: A", text)
+        self.assertIn("Type override: yes", text)
+
+        text = review_gui.build_image_only_photo_info_text(
+            {**photo, "type_override_active": False},
+            diagnostics,
+        )
+        self.assertIn("Type override: no", text)
 
     def test_build_segment_type_override_status_message(self):
         self.assertEqual(
