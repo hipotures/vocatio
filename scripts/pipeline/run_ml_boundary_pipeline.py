@@ -35,8 +35,10 @@ console = Console()
 CORPUS_CANDIDATES_FILENAME = "ml_boundary_candidates.corpus.csv"
 DAY_METADATA_FILENAME = "ml_boundary_day_metadata.csv"
 SPLIT_MANIFEST_FILENAME = "ml_boundary_splits.csv"
+CORPUS_ATTRITION_FILENAME = "ml_boundary_attrition.json"
 VALIDATION_REPORT_FILENAME = "ml_boundary_validation_report.json"
 PIPELINE_SUMMARY_FILENAME = "ml_boundary_pipeline_summary.json"
+EVALUATION_METRICS_FILENAME = "metrics.json"
 SPLIT_MANIFEST_HEADERS = ["candidate_id", "split_name"]
 DEFAULT_SPLIT_STRATEGY = "global_stratified"
 DEFAULT_TRAIN_FRACTION = 0.70
@@ -151,6 +153,18 @@ def _run_command(command: Sequence[str]) -> None:
     subprocess.run(list(command), check=True)
 
 
+def _existing_day_candidate_outputs(workspace_dir: Path) -> list[Path]:
+    return [
+        path
+        for path in (
+            workspace_dir / "ml_boundary_candidates.csv",
+            workspace_dir / "ml_boundary_attrition.json",
+            workspace_dir / "ml_boundary_dataset_report.json",
+        )
+        if path.exists()
+    ]
+
+
 def _resolve_days(day_values: Sequence[str]) -> list[Path]:
     day_dirs: list[Path] = []
     for value in day_values:
@@ -162,6 +176,7 @@ def _resolve_days(day_values: Sequence[str]) -> list[Path]:
 
 
 def _prepare_single_day(day_dir: Path, *, restart: bool) -> Path:
+    workspace_dir = resolve_workspace_dir(day_dir, None)
     export_command = [
         sys.executable,
         str(_script_path("export_ml_boundary_reviewed_truth.py")),
@@ -169,6 +184,13 @@ def _prepare_single_day(day_dir: Path, *, restart: bool) -> Path:
     ]
     console.print(f"Run Export reviewed truth: {' '.join(export_command)}")
     _run_command(export_command)
+
+    existing_outputs = _existing_day_candidate_outputs(workspace_dir)
+    if existing_outputs and not restart:
+        raise ValueError(
+            "Existing ML boundary day outputs detected. "
+            f"Use --restart to rebuild them: {', '.join(str(path.name) for path in existing_outputs)}"
+        )
 
     build_command = [
         sys.executable,
@@ -188,7 +210,7 @@ def _prepare_single_day(day_dir: Path, *, restart: bool) -> Path:
     console.print(f"Run Validate day dataset: {' '.join(validate_command)}")
     _run_command(validate_command)
 
-    return resolve_workspace_dir(day_dir, None)
+    return workspace_dir
 
 
 def _resolve_optional_float(
@@ -287,8 +309,6 @@ def _read_candidate_rows(path: Path) -> list[dict[str, str]]:
         if missing:
             raise ValueError(f"{path.name} missing required columns: {', '.join(missing)}")
         rows = [dict(row) for row in reader]
-    if not rows:
-        raise ValueError(f"{path.name} has no candidate rows")
     return rows
 
 
@@ -299,6 +319,11 @@ def _merge_candidate_rows(candidate_csv_paths: Sequence[Path]) -> list[dict[str,
         for path in candidate_csv_paths:
             merged_rows.extend(_read_candidate_rows(path))
             progress.advance(task_id)
+    if not merged_rows:
+        raise ValueError(
+            "No ML boundary candidates were retained. Check each workspace ml_boundary_attrition.json "
+            "for excluded_missing_artifacts and excluded_missing_window counts."
+        )
     merged_rows.sort(
         key=lambda row: (
             str(row.get("day_id", "")),
@@ -339,6 +364,47 @@ def _build_day_metadata_rows(merged_rows: Sequence[dict[str, str]]) -> list[dict
             }
         )
     return metadata_rows
+
+
+def _load_attrition_report(path: Path) -> dict[str, int]:
+    with path.open(encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Attrition report must be a JSON object: {path}")
+
+    required_keys = (
+        "candidate_count_generated",
+        "candidate_count_excluded_missing_window",
+        "candidate_count_excluded_missing_artifacts",
+        "candidate_count_retained",
+        "true_boundary_coverage_before_exclusions",
+        "true_boundary_coverage_after_exclusions",
+    )
+    report: dict[str, int] = {}
+    for key in required_keys:
+        if key not in payload:
+            raise ValueError(f"Attrition report missing required key {key}: {path}")
+        value = payload[key]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"Attrition report key {key} must be an integer: {path}")
+        report[key] = value
+    return report
+
+
+def _build_corpus_attrition_report(day_workspaces: Sequence[Path]) -> dict[str, int]:
+    totals = {
+        "candidate_count_generated": 0,
+        "candidate_count_excluded_missing_window": 0,
+        "candidate_count_excluded_missing_artifacts": 0,
+        "candidate_count_retained": 0,
+        "true_boundary_coverage_before_exclusions": 0,
+        "true_boundary_coverage_after_exclusions": 0,
+    }
+    for workspace_dir in day_workspaces:
+        report = _load_attrition_report(workspace_dir / CORPUS_ATTRITION_FILENAME)
+        for key in totals:
+            totals[key] += report[key]
+    return totals
 
 
 def _validate_corpus_size(merged_rows: Sequence[dict[str, str]]) -> None:
@@ -872,6 +938,26 @@ def _required_classes(
     return sorted(discovered)
 
 
+def _load_json_object(path: Path) -> dict[str, object]:
+    with path.open(encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected JSON object in {path}")
+    return payload
+
+
+def _render_eval_metrics_summary(metrics_payload: dict[str, object]) -> str:
+    review_cost_metrics = metrics_payload.get("review_cost_metrics")
+    if not isinstance(review_cost_metrics, dict):
+        raise ValueError("evaluation metrics missing review_cost_metrics object")
+    return (
+        "Eval metrics:\n"
+        f"segment_type_accuracy={metrics_payload.get('segment_type_accuracy')}\n"
+        f"boundary_f1={metrics_payload.get('boundary_f1')}\n"
+        f"estimated_correction_actions={review_cost_metrics.get('estimated_correction_actions')}"
+    )
+
+
 def _run_training_and_evaluation(
     *,
     corpus_candidates_path: Path,
@@ -880,7 +966,7 @@ def _run_training_and_evaluation(
     eval_dir: Path,
     mode: str,
     restart: bool,
-) -> None:
+) -> dict[str, object]:
     train_command = [
         "uv",
         "run",
@@ -922,6 +1008,12 @@ def _run_training_and_evaluation(
         evaluate_command.append("--overwrite")
     console.print(f"Run Evaluate verifier: {' '.join(evaluate_command)}")
     _run_command(evaluate_command)
+    metrics_path = eval_dir / EVALUATION_METRICS_FILENAME
+    if not metrics_path.is_file():
+        raise FileNotFoundError(f"Expected evaluation metrics artifact: {metrics_path}")
+    metrics_payload = _load_json_object(metrics_path)
+    console.print(_render_eval_metrics_summary(metrics_payload))
+    return metrics_payload
 
 
 def _write_pipeline_summary(
@@ -935,6 +1027,7 @@ def _write_pipeline_summary(
     validation_report_path: Path | None,
     model_dir: Path | None,
     eval_dir: Path | None,
+    evaluation_metrics: dict[str, object] | None,
     required_heldout_classes: Sequence[str],
     requested_split_strategy: str,
     effective_split_strategy: str,
@@ -966,6 +1059,8 @@ def _write_pipeline_summary(
         payload["model_dir"] = str(model_dir)
     if eval_dir is not None:
         payload["eval_dir"] = str(eval_dir)
+    if evaluation_metrics is not None:
+        payload["evaluation_metrics"] = evaluation_metrics
     if note:
         payload["note"] = note
     atomic_write_json(summary_path, payload)
@@ -987,8 +1082,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     corpus_workspace.mkdir(parents=True, exist_ok=True)
 
     candidate_csv_paths = [workspace / "ml_boundary_candidates.csv" for workspace in day_workspaces]
-    merged_rows = _merge_candidate_rows(candidate_csv_paths)
-    _validate_corpus_size(merged_rows)
+    try:
+        merged_rows = _merge_candidate_rows(candidate_csv_paths)
+        _validate_corpus_size(merged_rows)
+    except ValueError as error:
+        console.print(f"[red]Error: {error}[/red]")
+        return 1
     corpus_candidates_path = corpus_workspace / CORPUS_CANDIDATES_FILENAME
     atomic_write_csv(corpus_candidates_path, CANDIDATE_ROW_HEADERS, merged_rows)
     console.print(f"Wrote merged candidate dataset: {corpus_candidates_path}")
@@ -998,6 +1097,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     day_metadata_path = corpus_workspace / DAY_METADATA_FILENAME
     atomic_write_csv(day_metadata_path, day_metadata_headers, day_metadata_rows)
     console.print(f"Wrote day metadata: {day_metadata_path}")
+
+    corpus_attrition_path = corpus_workspace / CORPUS_ATTRITION_FILENAME
+    atomic_write_json(
+        corpus_attrition_path,
+        _build_corpus_attrition_report(day_workspaces),
+    )
+    console.print(f"Wrote corpus attrition: {corpus_attrition_path}")
 
     required_heldout_classes = _required_classes(
         day_metadata_rows,
@@ -1016,6 +1122,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.executable,
         str(_script_path("validate_ml_boundary_dataset.py")),
         str(corpus_candidates_path),
+        "--attrition-json",
+        str(corpus_attrition_path),
         "--split-manifest-csv",
         str(split_manifest_path),
         "--report-json",
@@ -1029,10 +1137,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     model_dir: Path | None = None
     eval_dir: Path | None = None
+    evaluation_metrics: dict[str, object] | None = None
     if not args.prepare_only:
         model_dir = corpus_workspace / "ml_boundary_models" / args.model_run_id
         eval_dir = corpus_workspace / "ml_boundary_eval" / args.model_run_id
-        _run_training_and_evaluation(
+        evaluation_metrics = _run_training_and_evaluation(
             corpus_candidates_path=corpus_candidates_path,
             split_manifest_path=split_manifest_path,
             model_dir=model_dir,
@@ -1052,6 +1161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         validation_report_path=corpus_workspace / VALIDATION_REPORT_FILENAME,
         model_dir=model_dir,
         eval_dir=eval_dir,
+        evaluation_metrics=evaluation_metrics,
         required_heldout_classes=required_heldout_classes,
         requested_split_strategy=split_config.strategy,
         effective_split_strategy=effective_split_strategy,

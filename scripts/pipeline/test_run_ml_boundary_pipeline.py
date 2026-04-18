@@ -1,5 +1,6 @@
 import csv
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -66,6 +67,37 @@ def _write_candidate_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=CANDIDATE_ROW_HEADERS)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _write_day_candidate_artifacts(
+    workspace_dir: Path,
+    rows: list[dict[str, str]],
+    *,
+    generated_count: int | None = None,
+    true_boundary_before: int | None = None,
+    true_boundary_after: int | None = None,
+) -> None:
+    _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+    retained_count = len(rows)
+    if generated_count is None:
+        generated_count = retained_count
+    if true_boundary_before is None:
+        true_boundary_before = sum(1 for row in rows if str(row["boundary"]) == "1")
+    if true_boundary_after is None:
+        true_boundary_after = true_boundary_before
+    (workspace_dir / "ml_boundary_attrition.json").write_text(
+        json.dumps(
+            {
+                "candidate_count_generated": generated_count,
+                "candidate_count_excluded_missing_window": 0,
+                "candidate_count_excluded_missing_artifacts": generated_count - retained_count,
+                "candidate_count_retained": retained_count,
+                "true_boundary_coverage_before_exclusions": true_boundary_before,
+                "true_boundary_coverage_after_exclusions": true_boundary_after,
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _read_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -138,6 +170,7 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
     def _fake_run_command(command):
         command_values = [str(value) for value in command]
         recorded_commands.append(command_values)
+        command_text = " ".join(command_values)
         if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
             day_dir = Path(command_values[2]).resolve()
             workspace_dir = resolve_workspace_dir(day_dir, None)
@@ -146,7 +179,20 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
                 _candidate_row(day_id=day_dir.name, segment_type="ceremony", boundary="1", offset=2),
                 _candidate_row(day_id=day_dir.name, segment_type="warmup", boundary="0", offset=3),
             ]
-            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+            _write_day_candidate_artifacts(workspace_dir, rows)
+        if "evaluate_ml_boundary_verifier.py" in command_text:
+            eval_dir = Path(command_values[command_values.index("--output-dir") + 1])
+            eval_dir.mkdir(parents=True, exist_ok=True)
+            (eval_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "segment_type_accuracy": 0.81,
+                        "boundary_f1": 0.67,
+                        "review_cost_metrics": {"estimated_correction_actions": 9},
+                    }
+                ),
+                encoding="utf-8",
+            )
 
     monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
 
@@ -184,6 +230,9 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
     assert summary_payload["prepare_only"] is False
     assert summary_payload["model_dir"].endswith("ml_boundary_models/run-010")
     assert summary_payload["eval_dir"].endswith("ml_boundary_eval/run-010")
+    assert summary_payload["evaluation_metrics"]["segment_type_accuracy"] == 0.81
+    assert summary_payload["evaluation_metrics"]["boundary_f1"] == 0.67
+    assert summary_payload["evaluation_metrics"]["review_cost_metrics"]["estimated_correction_actions"] == 9
 
     assert any("train_ml_boundary_verifier.py" in " ".join(command) for command in recorded_commands)
     assert any("evaluate_ml_boundary_verifier.py" in " ".join(command) for command in recorded_commands)
@@ -213,7 +262,7 @@ def test_main_prepare_only_skips_train_and_eval(tmp_path: Path, monkeypatch) -> 
                 _candidate_row(day_id=day_dir.name, segment_type="ceremony", boundary="1", offset=2),
                 _candidate_row(day_id=day_dir.name, segment_type="warmup", boundary="0", offset=3),
             ]
-            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+            _write_day_candidate_artifacts(workspace_dir, rows)
 
     monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
 
@@ -231,10 +280,108 @@ def test_main_prepare_only_skips_train_and_eval(tmp_path: Path, monkeypatch) -> 
         (corpus_workspace / "ml_boundary_pipeline_summary.json").read_text(encoding="utf-8")
     )
     assert summary_payload["prepare_only"] is True
-    assert "model_dir" not in summary_payload
-    assert "eval_dir" not in summary_payload
-    assert not any("train_ml_boundary_verifier.py" in " ".join(command) for command in recorded_commands)
-    assert not any("evaluate_ml_boundary_verifier.py" in " ".join(command) for command in recorded_commands)
+
+
+def test_main_returns_short_error_when_no_candidate_rows_are_retained(tmp_path: Path, monkeypatch, capsys) -> None:
+    day_dir = tmp_path / "20250325"
+    workspace_dir = tmp_path / "20250325DWC"
+    day_dir.mkdir(parents=True)
+    workspace_dir.mkdir(parents=True)
+    (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            _write_day_candidate_artifacts(workspace_dir, [], generated_count=5)
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+
+    exit_code = main(
+        [
+            str(day_dir),
+            "--prepare-only",
+        ]
+    )
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "No ML boundary candidates were retained." in output
+    assert "ml_boundary_attrition.json" in output
+
+
+def test_main_passes_corpus_attrition_json_to_corpus_validator(tmp_path: Path, monkeypatch) -> None:
+    day_dir = tmp_path / "20250325"
+    workspace_dir = tmp_path / "20250325DWC"
+    day_dir.mkdir(parents=True)
+    workspace_dir.mkdir(parents=True)
+    (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+
+    recorded_commands: list[list[str]] = []
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        recorded_commands.append(command_values)
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            rows = [
+                _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=1),
+                _candidate_row(day_id="20250325", segment_type="performance", boundary="1", offset=2),
+                _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=3),
+            ]
+            _write_day_candidate_artifacts(workspace_dir, rows)
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+
+    exit_code = main([str(day_dir), "--prepare-only", "--restart"])
+    assert exit_code == 0
+
+    validate_command = next(
+        command
+        for command in recorded_commands
+        if "validate_ml_boundary_dataset.py" in command[1] and "ml_boundary_candidates.corpus.csv" in " ".join(command)
+    )
+    assert "--attrition-json" in validate_command
+    attrition_path = Path(validate_command[validate_command.index("--attrition-json") + 1])
+    assert attrition_path.name == "ml_boundary_attrition.json"
+    payload = json.loads(attrition_path.read_text(encoding="utf-8"))
+    assert payload["candidate_count_retained"] == 3
+
+
+def test_main_surfaces_existing_day_outputs_with_restart_hint(tmp_path: Path, monkeypatch) -> None:
+    day_dir = tmp_path / "20250325"
+    workspace_dir = tmp_path / "20250325DWC"
+    day_dir.mkdir(parents=True)
+    workspace_dir.mkdir(parents=True)
+    (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+
+    for filename in (
+        "ml_boundary_candidates.csv",
+        "ml_boundary_attrition.json",
+        "ml_boundary_dataset_report.json",
+    ):
+        (workspace_dir / filename).write_text("stub\n", encoding="utf-8")
+
+    recorded_commands: list[list[str]] = []
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        recorded_commands.append(command_values)
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            raise subprocess.CalledProcessError(1, command_values)
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+
+    try:
+        main([str(day_dir), "--prepare-only"])
+    except ValueError as exc:
+        message = str(exc)
+        assert "Existing ML boundary day outputs detected" in message
+        assert "--restart" in message
+        assert "ml_boundary_candidates.csv" in message
+    else:
+        raise AssertionError("expected existing day outputs to raise ValueError")
+
+    assert any("export_ml_boundary_reviewed_truth.py" in " ".join(command) for command in recorded_commands)
+    assert not any("build_ml_boundary_candidate_dataset.py" in " ".join(command) for command in recorded_commands)
 
 
 def test_main_single_day_global_random_is_allowed(tmp_path: Path, monkeypatch) -> None:
@@ -246,13 +393,27 @@ def test_main_single_day_global_random_is_allowed(tmp_path: Path, monkeypatch) -
 
     def _fake_run_command(command):
         command_values = [str(value) for value in command]
+        command_text = " ".join(command_values)
         if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
             rows = []
             for index in range(20):
                 row = _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=index + 1)
                 row["candidate_id"] = f"c{index:02d}"
                 rows.append(row)
-            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+            _write_day_candidate_artifacts(workspace_dir, rows)
+        if "evaluate_ml_boundary_verifier.py" in command_text:
+            eval_dir = Path(command_values[command_values.index("--output-dir") + 1])
+            eval_dir.mkdir(parents=True, exist_ok=True)
+            (eval_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "segment_type_accuracy": 0.75,
+                        "boundary_f1": 0.5,
+                        "review_cost_metrics": {"estimated_correction_actions": 4},
+                    }
+                ),
+                encoding="utf-8",
+            )
 
     monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
 
@@ -282,7 +443,7 @@ def test_main_global_random_writes_deterministic_candidate_level_split_manifest(
                 row = _candidate_row(day_id=day_dir.name, segment_type="performance", boundary="0", offset=index + 1)
                 row["candidate_id"] = f"{day_dir.name}-c{index:02d}"
                 rows.append(row)
-            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+            _write_day_candidate_artifacts(workspace_dir, rows)
 
     monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
 
@@ -302,8 +463,8 @@ def test_main_global_random_writes_deterministic_candidate_level_split_manifest(
         "--prepare-only",
     ]
 
-    assert main(cli_args + ["--corpus-workspace", str(first_corpus_workspace)]) == 0
-    assert main(cli_args + ["--corpus-workspace", str(second_corpus_workspace)]) == 0
+    assert main(cli_args + ["--corpus-workspace", str(first_corpus_workspace), "--restart"]) == 0
+    assert main(cli_args + ["--corpus-workspace", str(second_corpus_workspace), "--restart"]) == 0
 
     first_rows = _read_csv_rows(first_corpus_workspace / "ml_boundary_splits.csv")
     second_rows = _read_csv_rows(second_corpus_workspace / "ml_boundary_splits.csv")
@@ -405,7 +566,7 @@ def test_main_default_global_stratified_preserves_required_heldout_classes_when_
                     )
                     row["candidate_id"] = f"{day_dir.name}-{segment_type}-{boundary}-c{index:02d}"
                     rows.append(row)
-            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+            _write_day_candidate_artifacts(workspace_dir, rows)
 
     monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
 
@@ -459,7 +620,7 @@ def test_main_global_stratified_keeps_stratified_when_small_strata_still_allow_h
             rare_row = _candidate_row(day_id=day_dir.name, segment_type="ceremony", boundary="1", offset=50)
             rare_row["candidate_id"] = f"{day_dir.name}-rare"
             rows.append(rare_row)
-            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+            _write_day_candidate_artifacts(workspace_dir, rows)
 
     monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
 
@@ -779,7 +940,7 @@ def test_main_default_global_stratified_fails_fast_when_required_heldout_coverag
                 rare_row = _candidate_row(day_id=day_dir.name, segment_type="ceremony", boundary="1", offset=50)
                 rare_row["candidate_id"] = f"{day_dir.name}-ceremony-only"
                 rows.append(rare_row)
-            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+            _write_day_candidate_artifacts(workspace_dir, rows)
 
     monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
 
@@ -852,7 +1013,7 @@ def test_resolve_split_config_reads_vocatio_values(tmp_path: Path) -> None:
     assert split_config.seed == 99
 
 
-def test_main_rejects_corpus_with_fewer_than_three_rows(tmp_path: Path, monkeypatch) -> None:
+def test_main_rejects_corpus_with_fewer_than_three_rows(tmp_path: Path, monkeypatch, capsys) -> None:
     day_dir = tmp_path / "20250325"
     workspace_dir = tmp_path / "20250325DWC"
     day_dir.mkdir(parents=True)
@@ -866,16 +1027,12 @@ def test_main_rejects_corpus_with_fewer_than_three_rows(tmp_path: Path, monkeypa
                 _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=1),
                 _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=2),
             ]
-            _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+            _write_day_candidate_artifacts(workspace_dir, rows)
 
     monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
 
-    try:
-        main([str(day_dir), "--split-strategy", "global_random"])
-    except ValueError as exc:
-        assert (
-            str(exc)
-            == "ML boundary corpus split requires at least three candidate rows to produce train, validation, and test splits"
-        )
-    else:
-        raise AssertionError("Expected main() to reject a corpus smaller than three candidate rows")
+    exit_code = main([str(day_dir), "--split-strategy", "global_random"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "ML boundary corpus split requires at least three candidate rows" in output
