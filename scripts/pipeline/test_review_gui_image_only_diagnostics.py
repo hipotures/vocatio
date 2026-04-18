@@ -659,7 +659,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
     def test_build_segment_type_override_status_message(self):
         self.assertEqual(
             review_gui.build_segment_type_override_status_message("VLM0007", "dance", override_active=True),
-            "Type set to D for set VLM0007",
+            "Type set to D (dance) for set VLM0007",
         )
         self.assertEqual(
             review_gui.build_segment_type_override_status_message("VLM0007", "", override_active=False),
@@ -703,8 +703,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
 
     def test_cycle_current_set_segment_type_override_updates_state_and_snapshots_selection_state(self):
         for flush_result, expected_message in (
-            (True, "Type set to D for set VLM0007"),
-            (False, "Type set to D for set VLM0007 in memory, but save failed"),
+            (True, "Type set to D (dance) for set VLM0007"),
+            (False, "Type set to D (dance) for set VLM0007 in memory, but save failed"),
         ):
             with self.subTest(flush_result=flush_result):
                 parent_item = FakeRestoreItem({"set_id": "set-a", "display_name": "VLM0007"})
@@ -921,7 +921,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "/src/stream-2/shared.jpg",
         )
         self.assertEqual(window.review_state["performances"]["set-b"]["segment_type_override"], "dance")
-        status_bar.showMessage.assert_called_once_with("Type set to D for set SET-B")
+        status_bar.showMessage.assert_called_once_with("Type set to D (dance) for set SET-B")
 
     def test_cycle_current_set_segment_type_override_only_populates_sets_with_selected_children(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
@@ -1027,7 +1027,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertFalse(window.item_by_set_id["set-b"].isExpanded())
         self.assertFalse(window.item_by_set_id["set-c"].isExpanded())
         self.assertEqual(window.review_state["performances"]["set-a"]["segment_type_override"], "dance")
-        status_bar.showMessage.assert_called_once_with("Type set to D for set SET-A")
+        status_bar.showMessage.assert_called_once_with("Type set to D (dance) for set SET-A")
 
     def test_install_actions_registers_y_shortcut(self):
         created_actions = []

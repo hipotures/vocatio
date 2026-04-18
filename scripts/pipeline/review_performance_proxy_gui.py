@@ -321,6 +321,14 @@ def segment_type_to_code(segment_type: object) -> str:
     return TYPE_CODE_BY_SEGMENT_TYPE.get(normalized, "?")
 
 
+def format_segment_type_status_label(segment_type: object) -> str:
+    normalized = str(segment_type or "").strip().lower()
+    code = segment_type_to_code(normalized)
+    if not normalized:
+        return code
+    return f"{code} ({normalized})"
+
+
 def next_segment_type_override(current: str) -> str:
     normalized = str(current or "").strip().lower()
     try:
@@ -345,7 +353,7 @@ def resolve_effective_type_code(base_type: str, override_type: str) -> tuple[str
 def build_segment_type_override_status_message(display_name: str, override_value: str, override_active: bool) -> str:
     normalized_display_name = str(display_name or "").strip()
     if override_active:
-        return f"Type set to {segment_type_to_code(override_value)} for set {normalized_display_name}"
+        return f"Type set to {format_segment_type_status_label(override_value)} for set {normalized_display_name}"
     return f"Type reset for set {normalized_display_name}"
 
 
