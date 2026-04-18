@@ -354,8 +354,51 @@ def load_manual_prediction_joined_rows(
     )
 
 
+def manual_prediction_selected_photo_keys(
+    selected_photos: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    selected_photo_keys: List[str] = []
+    seen_keys: set[str] = set()
+    for photo in selected_photos:
+        key = photo_identity_key(photo)
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        selected_photo_keys.append(key)
+    return selected_photo_keys
+
+
+def resolve_manual_prediction_state(
+    *,
+    index_path: Path,
+    workspace_dir: Path,
+    payload: Mapping[str, Any],
+    source_mode: str,
+    selected_photos: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    next_state: Dict[str, Any] = {
+        "status": "idle",
+        "selected_photo_keys": manual_prediction_selected_photo_keys(selected_photos),
+    }
+    try:
+        next_state["window_config"] = resolve_manual_prediction_window_config(
+            load_manual_prediction_vocatio_config(index_path, payload, source_mode)
+        )
+        next_state["anchor_pair"] = resolve_manual_prediction_anchor_pair(
+            selected_photos,
+            load_manual_prediction_joined_rows(workspace_dir, payload),
+        )
+    except Exception as exc:
+        next_state["status"] = "error"
+        next_state["error"] = str(exc)
+        next_state["resolution_error"] = str(exc)
+    return next_state
+
+
 def format_manual_prediction_score(value: object) -> str:
-    text = str(value or "").strip()
+    if value is None:
+        return "-"
+    text = str(value).strip()
     if not text:
         return "-"
     try:
@@ -365,13 +408,17 @@ def format_manual_prediction_score(value: object) -> str:
 
 
 def format_manual_prediction_gap_seconds(value: object) -> str:
-    text = str(value or "").strip()
+    if value is None:
+        return "-"
+    text = str(value).strip()
     if not text:
         return "-"
     try:
         numeric = float(text)
     except (TypeError, ValueError):
         return text
+    if numeric == 0.0:
+        return "0.0"
     if numeric.is_integer():
         return str(int(numeric))
     return f"{numeric:.3f}".rstrip("0").rstrip(".")
@@ -443,6 +490,17 @@ def compute_manual_ml_prediction_result(
     )
     if candidate_rows is None:
         raise ValueError("manual prediction needs enough surrounding context for ML inference")
+    manual_candidate_rows = [
+        dict(
+            row,
+            thumb_path=(
+                str(row.get("thumb_path", "") or "").strip()
+                or str(row.get("image_path", "") or "").strip()
+                or str(row.get("preview_path", "") or "").strip()
+            ),
+        )
+        for row in candidate_rows
+    ]
 
     day_id = str(payload.get("day", "") or "").strip()
     photo_pre_model_dir_value = str(
@@ -451,7 +509,7 @@ def compute_manual_ml_prediction_result(
     photo_pre_model_dir = probe_vlm_boundary.resolve_path(workspace_dir, photo_pre_model_dir_value)
     prediction = probe_vlm_boundary.predict_ml_hint_for_candidate(
         ml_hint_context=ml_hint_context,
-        candidate_row=probe_vlm_boundary._build_ml_candidate_row(candidate_rows, day_id=day_id),
+        candidate_row=probe_vlm_boundary._build_ml_candidate_row(manual_candidate_rows, day_id=day_id),
         boundary_rows_by_pair=probe_vlm_boundary.read_boundary_scores_by_pair(
             workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME
         ),
@@ -2722,36 +2780,19 @@ class MainWindow(QMainWindow):
         if self.source_mode != review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1 or not should_show_manual_ml_prediction(selected_photos):
             self.manual_ml_prediction_state = None
             return None
-        selected_photo_keys: List[str] = []
-        seen_keys: set[str] = set()
-        for photo in selected_photos:
-            key = photo_identity_key(photo)
-            if not key or key in seen_keys:
-                continue
-            seen_keys.add(key)
-            selected_photo_keys.append(key)
+        selected_photo_keys = manual_prediction_selected_photo_keys(selected_photos)
         current_state = getattr(self, "manual_ml_prediction_state", None)
         current_keys = []
         if isinstance(current_state, Mapping):
             current_keys = [str(value) for value in current_state.get("selected_photo_keys", [])]
         if current_keys != selected_photo_keys:
-            next_state: Dict[str, Any] = {
-                "status": "idle",
-                "selected_photo_keys": list(selected_photo_keys),
-            }
-            try:
-                next_state["window_config"] = resolve_manual_prediction_window_config(
-                    load_manual_prediction_vocatio_config(self.index_path, self.payload, self.source_mode)
-                )
-                next_state["anchor_pair"] = resolve_manual_prediction_anchor_pair(
-                    selected_photos,
-                    load_manual_prediction_joined_rows(self.workspace_dir, self.payload),
-                )
-            except Exception as exc:
-                next_state["status"] = "error"
-                next_state["error"] = str(exc)
-                next_state["resolution_error"] = str(exc)
-            self.manual_ml_prediction_state = next_state
+            self.manual_ml_prediction_state = resolve_manual_prediction_state(
+                index_path=self.index_path,
+                workspace_dir=self.workspace_dir,
+                payload=self.payload,
+                source_mode=self.source_mode,
+                selected_photos=selected_photos,
+            )
         return self.manual_ml_prediction_state
 
     def current_selection_diagnostics_payload(
@@ -2844,25 +2885,39 @@ class MainWindow(QMainWindow):
         if str(current_state.get("status", "") or "").strip().lower() == "running":
             return
 
-        next_state = dict(current_state)
+        resolution_state = dict(current_state)
+        if (
+            str(current_state.get("resolution_error", "") or "").strip()
+            or not current_state.get("anchor_pair")
+            or not current_state.get("window_config")
+        ):
+            resolution_state = resolve_manual_prediction_state(
+                index_path=self.index_path,
+                workspace_dir=self.workspace_dir,
+                payload=self.payload,
+                source_mode=self.source_mode,
+                selected_photos=self.selected_photo_entries(),
+            )
+        next_state = dict(resolution_state)
         next_state["status"] = "running"
         next_state["started_at"] = datetime.now(timezone.utc).astimezone().replace(microsecond=0).isoformat()
         next_state.pop("error", None)
         next_state.pop("result_text", None)
+        next_state.pop("resolution_error", None)
         self.manual_ml_prediction_state = next_state
         self.refresh_current_info_dock()
         QApplication.processEvents()
 
         try:
-            resolution_error = str(current_state.get("resolution_error", "") or "").strip()
+            resolution_error = str(resolution_state.get("resolution_error", "") or "").strip()
             if resolution_error:
                 raise ValueError(resolution_error)
             result = compute_manual_ml_prediction_result(
                 workspace_dir=self.workspace_dir,
                 payload=self.payload,
                 joined_rows=load_manual_prediction_joined_rows(self.workspace_dir, self.payload),
-                anchor_pair=dict(current_state.get("anchor_pair", {}) or {}),
-                window_config=dict(current_state.get("window_config", {}) or {}),
+                anchor_pair=dict(resolution_state.get("anchor_pair", {}) or {}),
+                window_config=dict(resolution_state.get("window_config", {}) or {}),
             )
         except Exception as exc:
             error_state = dict(next_state)

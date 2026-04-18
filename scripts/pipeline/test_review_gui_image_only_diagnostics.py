@@ -397,6 +397,26 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Status: error", section["body"])
         self.assertIn("Error: overlap must be smaller than window_size", section["body"])
 
+    def test_manual_ml_prediction_formatters_preserve_zero_values(self):
+        self.assertEqual(review_gui.format_manual_prediction_score(0.0), "0.00")
+        self.assertEqual(review_gui.format_manual_prediction_gap_seconds(0.0), "0.0")
+
+        result_text = review_gui.format_manual_ml_prediction_result_text(
+            {
+                "boundary_prediction": False,
+                "boundary_confidence": 0.0,
+                "segment_type_prediction": "ceremony",
+                "segment_type_confidence": 0.0,
+                "gap_seconds": 0.0,
+                "left_relative_path": "cam/a.jpg",
+                "right_relative_path": "cam/b.jpg",
+            }
+        )
+
+        self.assertIn("Boundary: no_cut (0.00)", result_text)
+        self.assertIn("Right-side segment: ceremony (0.00)", result_text)
+        self.assertIn("Gap seconds: 0.0", result_text)
+
     def test_resolve_manual_prediction_window_config_prefers_vocatio_values(self):
         resolved = review_gui.resolve_manual_prediction_window_config(
             {
@@ -1137,6 +1157,151 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(window.manual_ml_prediction_state["status"], "error")
         self.assertEqual(window.manual_ml_prediction_state["error"], "predictor metadata is unreadable")
         self.assertEqual(window.refresh_current_info_dock.call_count, 2)
+
+    def test_run_manual_ml_prediction_recomputes_same_selection_after_resolution_error(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.workspace_dir = Path("/tmp/workspace")
+        window.payload = {
+            "day": "20260323",
+            "ml_model_run_id": "ml-run-001",
+        }
+        window.index_path = Path("/tmp/performance_proxy_index.json")
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        window.manual_ml_prediction_state = {
+            "status": "error",
+            "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+            "resolution_error": "overlap must be smaller than window_size",
+            "error": "overlap must be smaller than window_size",
+        }
+        window.selected_photo_entries = Mock(
+            return_value=[
+                {
+                    "relative_path": "cam/left.jpg",
+                    "source_path": "/src/left.jpg",
+                    "adjusted_start_local": "2026-03-23T10:00:00",
+                },
+                {
+                    "relative_path": "cam/right.jpg",
+                    "source_path": "/src/right.jpg",
+                    "adjusted_start_local": "2026-03-23T10:00:05",
+                },
+            ]
+        )
+        window.current_manual_ml_prediction_state = Mock(return_value=window.manual_ml_prediction_state)
+        window.refresh_current_info_dock = Mock()
+
+        with unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_vocatio_config",
+            return_value={},
+        ), unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_joined_rows",
+            return_value=[
+                {"relative_path": "cam/left.jpg", "start_epoch_ms": "1000"},
+                {"relative_path": "cam/right.jpg", "start_epoch_ms": "2000"},
+            ],
+        ), unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_prediction_anchor_pair",
+            return_value={
+                "left_relative_path": "cam/left.jpg",
+                "right_relative_path": "cam/right.jpg",
+                "left_row_index": 0,
+                "right_row_index": 1,
+                "gap_seconds": 1.0,
+            },
+        ), unittest.mock.patch.object(
+            review_gui,
+            "compute_manual_ml_prediction_result",
+            return_value={
+                "boundary_prediction": True,
+                "boundary_confidence": 0.91,
+                "boundary_positive_probability": 0.91,
+                "segment_type_prediction": "ceremony",
+                "segment_type_confidence": 0.88,
+                "gap_seconds": 1.0,
+                "left_relative_path": "cam/left.jpg",
+                "right_relative_path": "cam/right.jpg",
+                "result_text": "Boundary: cut (0.91)",
+            },
+        ) as compute_result, unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
+            window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(
+                window,
+                review_gui.MainWindow,
+            )
+            window.run_manual_ml_prediction()
+
+        compute_result.assert_called_once()
+        self.assertEqual(window.manual_ml_prediction_state["status"], "result")
+        self.assertNotIn("resolution_error", window.manual_ml_prediction_state)
+        self.assertEqual(window.refresh_current_info_dock.call_count, 2)
+
+    def test_compute_manual_ml_prediction_result_uses_image_paths_for_manual_thumbnail_columns(self):
+        joined_rows = [
+            {"relative_path": "cam/pre1.jpg", "start_epoch_ms": "1000", "image_path": "/tmp/pre1.jpg"},
+            {"relative_path": "cam/pre2.jpg", "start_epoch_ms": "2000", "image_path": "/tmp/pre2.jpg"},
+            {"relative_path": "cam/left.jpg", "start_epoch_ms": "3000", "image_path": "/tmp/left.jpg"},
+            {"relative_path": "cam/right.jpg", "start_epoch_ms": "4000", "image_path": "/tmp/right.jpg"},
+            {"relative_path": "cam/post1.jpg", "start_epoch_ms": "5000", "image_path": "/tmp/post1.jpg"},
+        ]
+        captured_candidate_rows: list[dict[str, object]] = []
+
+        def capture_prediction(**kwargs):
+            candidate_row = dict(kwargs["candidate_row"])
+            captured_candidate_rows.append(candidate_row)
+            return review_gui.probe_vlm_boundary.MlHintPrediction(
+                boundary_prediction=False,
+                boundary_confidence=0.73,
+                boundary_positive_probability=0.27,
+                segment_type_prediction="ceremony",
+                segment_type_confidence=0.66,
+            )
+
+        with unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "resolve_ml_model_run",
+            return_value=("ml-run-001", Path("/tmp/model-run")),
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "load_ml_hint_context",
+            return_value=Mock(mode="tabular_plus_thumbnail"),
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "read_boundary_scores_by_pair",
+            return_value={},
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "resolve_path",
+            return_value=Path("/tmp/photo-pre"),
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "predict_ml_hint_for_candidate",
+            side_effect=capture_prediction,
+        ):
+            review_gui.compute_manual_ml_prediction_result(
+                workspace_dir=Path("/tmp/workspace"),
+                payload={
+                    "day": "20260323",
+                    "ml_model_run_id": "ml-run-001",
+                    "photo_pre_model_dir": "photo-pre",
+                },
+                joined_rows=joined_rows,
+                anchor_pair={
+                    "left_relative_path": "cam/left.jpg",
+                    "right_relative_path": "cam/right.jpg",
+                    "left_row_index": 2,
+                    "right_row_index": 3,
+                    "gap_seconds": 1.0,
+                },
+                window_config={"window_size": 7, "overlap": 3},
+            )
+
+        self.assertEqual(len(captured_candidate_rows), 1)
+        candidate_row = captured_candidate_rows[0]
+        self.assertEqual(candidate_row["frame_01_thumb_path"], "/tmp/pre1.jpg")
+        self.assertEqual(candidate_row["frame_03_thumb_path"], "/tmp/left.jpg")
+        self.assertEqual(candidate_row["frame_05_thumb_path"], "/tmp/post1.jpg")
 
     def test_toggle_no_photos_confirmed_current_set_rerenders_current_info_dock(self):
         display_set = {
