@@ -1620,6 +1620,32 @@ class MainWindow(QMainWindow):
             selected_keys.append(key)
         return selected_keys
 
+    def selected_photo_identity_keys_by_set(self) -> Dict[str, List[str]]:
+        selected_keys_by_set: Dict[str, List[str]] = {}
+        seen_keys_by_set: Dict[str, set[str]] = {}
+        for item in self.tree.selectedItems():
+            parent = item.parent()
+            if parent is None:
+                continue
+            display_set = parent.data(0, Qt.UserRole)
+            if not display_set:
+                continue
+            set_id = str(display_set.get("set_id", "") or "")
+            if not set_id:
+                continue
+            photo = item.data(0, Qt.UserRole)
+            if not isinstance(photo, dict):
+                continue
+            key = photo_identity_key(photo)
+            if not key:
+                continue
+            seen_keys = seen_keys_by_set.setdefault(set_id, set())
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            selected_keys_by_set.setdefault(set_id, []).append(key)
+        return selected_keys_by_set
+
     def export_selected_photos_json(self) -> None:
         photos = self.selected_photo_entries()
         if not photos:
@@ -1741,7 +1767,7 @@ class MainWindow(QMainWindow):
             return
         preferred_filename = ""
         preferred_photo_key = ""
-        selected_photo_keys = self.selected_photo_identity_keys()
+        selected_photo_keys_by_set = self.selected_photo_identity_keys_by_set()
         item = current_item
         selected_set_ids = self.selected_top_level_set_ids()
         selection_order_ids = [set_id for set_id in self.selection_order_ids if set_id in selected_set_ids]
@@ -1767,7 +1793,7 @@ class MainWindow(QMainWindow):
             preferred_set_id=set_id,
             preferred_filename=preferred_filename,
             preferred_photo_key=preferred_photo_key,
-            selected_photo_keys=selected_photo_keys,
+            selected_photo_keys_by_set=selected_photo_keys_by_set,
             selected_set_ids=selected_set_ids,
             selection_order_ids=selection_order_ids,
         )
@@ -2501,7 +2527,7 @@ class MainWindow(QMainWindow):
         preferred_set_id: str = "",
         preferred_filename: str = "",
         preferred_photo_key: str = "",
-        selected_photo_keys: Optional[Sequence[str]] = None,
+        selected_photo_keys_by_set: Optional[Mapping[str, Sequence[str]]] = None,
         selected_set_ids: Optional[Sequence[str]] = None,
         selection_order_ids: Optional[Sequence[str]] = None,
     ) -> None:
@@ -2549,21 +2575,25 @@ class MainWindow(QMainWindow):
                     if set_id not in restored_order:
                         restored_order.append(set_id)
                 self.selection_order_ids = restored_order
-            if selected_photo_keys is not None:
-                selected_photo_key_set = {key for key in selected_photo_keys if key}
-                if selected_photo_key_set:
-                    for item in self.display_items:
-                        self.populate_children(item)
-                        restored_child = False
-                        for index in range(item.childCount()):
-                            child = item.child(index)
-                            photo = child.data(0, Qt.UserRole)
-                            if photo_identity_key(photo) not in selected_photo_key_set:
-                                continue
-                            child.setSelected(True)
-                            restored_child = True
-                        if restored_child:
-                            item.setExpanded(True)
+            if selected_photo_keys_by_set is not None:
+                for set_id, selected_photo_keys in selected_photo_keys_by_set.items():
+                    selected_photo_key_set = {key for key in selected_photo_keys if key}
+                    if not selected_photo_key_set:
+                        continue
+                    item = self.item_by_set_id.get(set_id)
+                    if item is None:
+                        continue
+                    self.populate_children(item)
+                    restored_child = False
+                    for index in range(item.childCount()):
+                        child = item.child(index)
+                        photo = child.data(0, Qt.UserRole)
+                        if photo_identity_key(photo) not in selected_photo_key_set:
+                            continue
+                        child.setSelected(True)
+                        restored_child = True
+                    if restored_child:
+                        item.setExpanded(True)
         finally:
             self.tree.blockSignals(previous_blocked)
         if self.tree.currentItem() is not None:
