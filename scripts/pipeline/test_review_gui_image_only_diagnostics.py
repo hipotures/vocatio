@@ -344,16 +344,17 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         sections = review_gui.build_image_only_set_info_sections(
             display_set,
             diagnostics,
-            no_photos_confirmed=False,
+            no_photos_confirmed=True,
             show_manual_ml_prediction=False,
             manual_prediction_state=None,
         )
 
-        self.assertEqual(len(sections), 1)
+        self.assertGreaterEqual(len(sections), 1)
         self.assertEqual(sections[0]["key"], "set_summary")
         self.assertEqual(sections[0]["title"], "Set summary")
         self.assertEqual(sections[0]["description"], "Basic set metadata and review state.")
         self.assertIn("Type: D", sections[0]["body"])
+        self.assertIn("No photos confirmed: yes", sections[0]["body"])
 
     def test_build_copy_status_message_uses_section_title(self):
         self.assertEqual(
@@ -364,6 +365,61 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             review_gui.build_info_section_copy_status_message("  ML hints  "),
             "Copied ML hints",
         )
+
+    def test_on_selection_changed_uses_image_only_sections_for_set_metadata_text(self):
+        display_set = {
+            "display_name": "VLM0001",
+            "original_performance_number": "VLM0001",
+            "set_id": "vlm-set-0001",
+            "photo_count": 5,
+        }
+        parent_item = FakeRestoreItem(display_set)
+        tree = FakeRestoreTree(current_item=parent_item)
+        tree.set_top_level_items([parent_item])
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.tree = tree
+        window.update_selection_order = Mock()
+        window.selected_photo_entries = Mock(return_value=[])
+        window.current_top_level_item = Mock(return_value=parent_item)
+        window.mark_set_viewed = Mock()
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        window.meta_label = Mock()
+        window.right_image_panel = Mock()
+        window.view_mode = "single"
+        window.image_only_diagnostics = {"available": False, "error": ""}
+        window.review_entry = Mock(return_value={"no_photos_confirmed": True})
+        status_bar = Mock()
+        window.statusBar = Mock(return_value=status_bar)
+        window.show_display_set = Mock()
+
+        with unittest.mock.patch.object(
+            review_gui,
+            "build_image_only_set_info_sections",
+            return_value=[
+                review_gui.build_info_section(
+                    "Set summary",
+                    "Basic set metadata and review state.",
+                    "No photos confirmed: yes",
+                )
+            ],
+        ) as build_sections, unittest.mock.patch.object(
+            review_gui,
+            "build_image_only_set_info_text",
+            side_effect=AssertionError("live set metadata path should use sections"),
+        ):
+            window.on_selection_changed()
+
+        build_sections.assert_called_once_with(
+            display_set,
+            window.image_only_diagnostics,
+            no_photos_confirmed=True,
+            show_manual_ml_prediction=False,
+            manual_prediction_state=None,
+        )
+        window.meta_label.setText.assert_called_once_with("No photos confirmed: yes")
+        window.mark_set_viewed.assert_called_once_with("vlm-set-0001")
+        status_bar.showMessage.assert_called_once_with("Set VLM0001 - 5 photos - view single")
+        window.show_display_set.assert_called_once_with(display_set)
 
     def test_build_image_only_set_info_text_includes_boundary_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:

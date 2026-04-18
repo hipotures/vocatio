@@ -565,6 +565,15 @@ def build_info_section_copy_status_message(title: str) -> str:
     return f"Copied {str(title or '').strip()}"
 
 
+def flatten_info_sections_to_plain_text(sections: Sequence[Mapping[str, Any]]) -> str:
+    bodies = []
+    for section in sections:
+        body = str(section.get("body", "") or "").strip()
+        if body:
+            bodies.append(body)
+    return "\n\n".join(bodies)
+
+
 def build_image_only_set_info_text(
     display_set: Mapping[str, Any],
     diagnostics: Mapping[str, Any],
@@ -2276,12 +2285,15 @@ class MainWindow(QMainWindow):
                 should_show_right_preview(view_mode=self.view_mode, selected_photo_count=len(selected_photos))
             )
             if self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
+                sections = build_image_only_set_info_sections(
+                    display_set,
+                    self.image_only_diagnostics,
+                    no_photos_confirmed=bool(self.review_entry(display_set["set_id"]).get("no_photos_confirmed")),
+                    show_manual_ml_prediction=False,
+                    manual_prediction_state=None,
+                )
                 self.meta_label.setText(
-                    build_image_only_set_info_text(
-                        display_set,
-                        self.image_only_diagnostics,
-                        no_photos_confirmed=bool(self.review_entry(display_set["set_id"]).get("no_photos_confirmed")),
-                    )
+                    flatten_info_sections_to_plain_text(sections)
                 )
             else:
                 first_photo_text = self.display_time(display_set["first_photo_local"]) if display_set["first_photo_local"] else "-"
