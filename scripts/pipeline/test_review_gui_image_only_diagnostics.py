@@ -275,6 +275,33 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(review_gui.resolve_effective_segment_type("dance", "ceremony"), ("ceremony", True))
         self.assertEqual(review_gui.resolve_effective_segment_type("dance", ""), ("dance", False))
 
+    def test_resolve_effective_type_code_prefers_override_when_present(self):
+        self.assertEqual(review_gui.resolve_effective_type_code("dance", "ceremony"), ("C", True))
+        self.assertEqual(review_gui.resolve_effective_type_code("dance", ""), ("D", False))
+
+    def test_build_review_row_font_italicizes_overridden_rows_without_relying_on_bold(self):
+        viewed_font = review_gui.build_review_row_font(
+            review_gui.QFont(),
+            is_viewed=True,
+            type_override_active=True,
+        )
+        unviewed_font = review_gui.build_review_row_font(
+            review_gui.QFont(),
+            is_viewed=False,
+            type_override_active=True,
+        )
+        plain_font = review_gui.build_review_row_font(
+            review_gui.QFont(),
+            is_viewed=False,
+            type_override_active=False,
+        )
+
+        self.assertFalse(viewed_font.bold())
+        self.assertTrue(viewed_font.italic())
+        self.assertTrue(unviewed_font.bold())
+        self.assertTrue(unviewed_font.italic())
+        self.assertFalse(plain_font.italic())
+
     def test_build_image_only_set_info_text_reports_type_override(self):
         diagnostics = {"available": False, "error": ""}
         display_set = {

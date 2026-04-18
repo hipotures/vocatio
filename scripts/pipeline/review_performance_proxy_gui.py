@@ -320,6 +320,19 @@ def resolve_effective_segment_type(base_type: str, override_type: str) -> tuple[
     return str(base_type or "").strip().lower(), False
 
 
+def resolve_effective_type_code(base_type: str, override_type: str) -> tuple[str, bool]:
+    effective_segment_type, override_active = resolve_effective_segment_type(base_type, override_type)
+    return segment_type_to_code(effective_segment_type), override_active
+
+
+def build_review_row_font(base_font: QFont, *, is_viewed: bool, type_override_active: bool) -> QFont:
+    font = QFont(base_font)
+    font.setBold(not is_viewed)
+    font.setWeight(QFont.Normal if is_viewed else QFont.Bold)
+    font.setItalic(bool(type_override_active))
+    return font
+
+
 def build_ml_hint_pair_map(payload: Mapping[str, Any]) -> Dict[tuple[str, str], Dict[str, Any]]:
     pairs = payload.get("ml_hint_pairs")
     if not isinstance(pairs, list):
@@ -1615,10 +1628,11 @@ class MainWindow(QMainWindow):
         display_name = display_set.get("display_name", item.text(1))
         is_viewed = bool(entry.get("viewed"))
         item.setText(1, display_name)
-        font = QFont(QApplication.font())
-        font.setBold(not is_viewed)
-        font.setWeight(QFont.Normal if is_viewed else QFont.Bold)
-        font.setItalic(False)
+        font = build_review_row_font(
+            QApplication.font(),
+            is_viewed=is_viewed,
+            type_override_active=bool(display_set.get("type_override_active")),
+        )
         foreground = QColor("#777777") if bool(entry.get("no_photos_confirmed")) else QColor("#000000")
         for column in range(self.tree.columnCount()):
             item.setFont(column, font)
