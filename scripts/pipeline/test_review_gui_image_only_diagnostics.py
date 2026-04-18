@@ -706,12 +706,13 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     preferred_set_id="set-a",
                     preferred_filename="b.jpg",
                     preferred_photo_key="source:/src/stream-2/b.jpg",
+                    selected_photo_keys=["source:/src/stream-2/b.jpg"],
                     selected_set_ids=["set-b", "set-a"],
                     selection_order_ids=["set-b", "set-a"],
                 )
                 status_bar.showMessage.assert_called_once_with(expected_message)
 
-    def test_rebuild_tree_after_state_change_restores_selection_order_and_current_child_by_stable_key(self):
+    def test_rebuild_tree_after_state_change_restores_selection_order_and_selected_children_by_stable_key(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
         window.selection_order_ids = []
         window.migrate_split_state_keys = Mock()
@@ -767,6 +768,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             preferred_set_id="set-b",
             preferred_filename="shared.jpg",
             preferred_photo_key="source:/src/stream-2/shared.jpg",
+            selected_photo_keys=[
+                "source:/src/stream-1/shared.jpg",
+                "source:/src/stream-2/shared.jpg",
+            ],
             selected_set_ids=["set-b", "set-a"],
             selection_order_ids=["set-b", "set-a"],
         )
@@ -782,8 +787,104 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             tree.currentItem().data(0, review_gui.Qt.UserRole)["source_path"],
             "/src/stream-2/shared.jpg",
         )
+        selected_child_paths = sorted(
+            item.data(0, review_gui.Qt.UserRole)["source_path"]
+            for item in tree.selectedItems()
+            if item.parent() is not None
+        )
+        self.assertEqual(
+            selected_child_paths,
+            ["/src/stream-1/shared.jpg", "/src/stream-2/shared.jpg"],
+        )
         self.assertTrue(window.item_by_set_id["set-b"].isExpanded())
         window.on_selection_changed.assert_called_once_with()
+
+    def test_cycle_current_set_segment_type_override_restores_selected_child_rows_after_rebuild(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.review_state = {"performances": {}}
+        window.state_dirty = False
+        window.current_timestamp = Mock(return_value="2026-04-18T12:34:56Z")
+        window.flush_review_state = Mock(return_value=True)
+        status_bar = Mock()
+        window.statusBar = Mock(return_value=status_bar)
+        window.selection_order_ids = ["set-b", "set-a"]
+        window.migrate_split_state_keys = Mock()
+        window.rebuild_display_sets = Mock()
+        window.migrate_review_state_keys = Mock()
+        window.preload_set_images = Mock()
+        window.apply_view_mode = Mock()
+        window.on_selection_changed = Mock()
+        tree = FakeRestoreTree()
+        window.tree = tree
+
+        children_by_set = {
+            "set-a": [
+                {
+                    "filename": "alpha.jpg",
+                    "source_path": "/src/alpha.jpg",
+                }
+            ],
+            "set-b": [
+                {
+                    "filename": "shared.jpg",
+                    "source_path": "/src/stream-1/shared.jpg",
+                    "stream_id": "stream-1",
+                },
+                {
+                    "filename": "shared.jpg",
+                    "source_path": "/src/stream-2/shared.jpg",
+                    "stream_id": "stream-2",
+                },
+            ],
+        }
+
+        def build_tree() -> None:
+            item_a = FakeRestoreItem({"set_id": "set-a", "display_name": "SET-A"})
+            item_b = FakeRestoreItem({"set_id": "set-b", "display_name": "SET-B"})
+            window.item_by_set_id = {
+                "set-a": item_a,
+                "set-b": item_b,
+            }
+            window.display_items = [item_a, item_b]
+            tree.set_top_level_items(window.display_items)
+
+        def populate_children(item: FakeRestoreItem) -> None:
+            if item.childCount() > 0:
+                return
+            for photo in children_by_set[item.data(0, review_gui.Qt.UserRole)["set_id"]]:
+                item.addChild(FakeRestoreItem(photo, parent=item))
+
+        window.build_tree = build_tree
+        window.populate_children = populate_children
+
+        build_tree()
+        parent_a = window.item_by_set_id["set-a"]
+        parent_b = window.item_by_set_id["set-b"]
+        populate_children(parent_b)
+        first_child = parent_b.child(0)
+        second_child = parent_b.child(1)
+        first_child.setSelected(True)
+        second_child.setSelected(True)
+        parent_a.setSelected(True)
+        tree.setCurrentItem(second_child)
+
+        window.cycle_current_set_segment_type_override()
+
+        selected_child_paths = sorted(
+            item.data(0, review_gui.Qt.UserRole)["source_path"]
+            for item in tree.selectedItems()
+            if item.parent() is not None
+        )
+        self.assertEqual(
+            selected_child_paths,
+            ["/src/stream-1/shared.jpg", "/src/stream-2/shared.jpg"],
+        )
+        self.assertEqual(
+            tree.currentItem().data(0, review_gui.Qt.UserRole)["source_path"],
+            "/src/stream-2/shared.jpg",
+        )
+        self.assertEqual(window.review_state["performances"]["set-b"]["segment_type_override"], "dance")
+        status_bar.showMessage.assert_called_once_with("Type set to D for set SET-B")
 
     def test_install_actions_registers_y_shortcut(self):
         created_actions = []
