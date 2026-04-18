@@ -578,6 +578,9 @@ def test_train_cli_report_falls_back_to_model_type_when_best_model_missing(
     rendered = rendered_console.export_text()
     assert captured.out == ""
     assert captured.err == ""
+    assert "===" not in rendered
+    assert "Train predictor: Segment type" in rendered
+    assert "Train predictor: Boundary" in rendered
     assert "Segment type: best_model=FakeMultiModalPredictor" in rendered
     assert "validation_macro_f1=0.79" in rendered
     assert "Boundary: best_model=FakeMultiModalPredictor" in rendered
@@ -640,6 +643,9 @@ def test_train_cli_report_uses_model_best_when_present(
     rendered = rendered_console.export_text()
     assert captured.out == ""
     assert captured.err == ""
+    assert "===" not in rendered
+    assert "Train predictor: Segment type" in rendered
+    assert "Train predictor: Boundary" in rendered
     assert "Segment type: best_model=segment_type_winner" in rendered
     assert "validation_macro_f1=0.83" in rendered
     assert "Boundary: best_model=boundary_winner" in rendered

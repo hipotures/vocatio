@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Sequence
 
 from rich.console import Console, Group
+from rich.rule import Rule
 from rich.text import Text
 
 from lib.ml_boundary_metrics import predictor_metric_spec
@@ -393,17 +394,13 @@ def _train_predictors(
         predictor_name = predictor_plan["name"]
         metric_spec = predictor_metric_spec(predictor_name)
         predictor_output_dir = output_dir / f"{predictor_name}_model"
-        console.print("")
         console.print(
-            Text(
-                (
-                    "=== "
+            Rule(
+                title=(
                     f"Train predictor: {metric_spec.console_label} "
-                    f"({predictor_plan['problem_type']}, eval_metric={metric_spec.training_eval_metric})"
-                    " ==="
-                ),
-                no_wrap=False,
-                overflow="fold",
+                    f"({predictor_plan['problem_type']}, "
+                    f"eval_metric={metric_spec.training_eval_metric})"
+                )
             )
         )
         predictor = _fit_predictor(
