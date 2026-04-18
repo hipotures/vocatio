@@ -102,6 +102,7 @@ def test_load_photo_pre_model_data_by_relative_path_reads_payload_data_only(tmp_
 
     assert annotations == {
         "cam/a.hif": {
+            "people_count": "no_visible_people",
             "upper_garment": "top",
             "dominant_colors": ["white", "purple"],
         }
@@ -159,6 +160,68 @@ def test_build_candidate_feature_row_uses_non_central_gap_median_for_outlier_fla
     assert row["gap_34"] == 4.0
     assert row["gap_45"] == 10.0
     assert row["gap_is_local_outlier"] == 1
+
+
+def test_build_candidate_feature_row_includes_pairwise_heuristic_features() -> None:
+    numeric_missing = -1.0
+    candidate = {
+        "frame_01_timestamp": "0",
+        "frame_02_timestamp": "5",
+        "frame_03_timestamp": "10",
+        "frame_04_timestamp": "40",
+        "frame_05_timestamp": "45",
+        "frame_01_photo_id": "p1",
+        "frame_02_photo_id": "p2",
+        "frame_03_photo_id": "p3",
+        "frame_04_photo_id": "p4",
+        "frame_05_photo_id": "p5",
+    }
+    heuristic_features = {
+        "12": {
+            "dino_cosine_distance": 0.101,
+            "boundary_score": 0.202,
+            "distance_zscore": 0.303,
+            "smoothed_distance_zscore": 0.404,
+            "time_gap_boost": 0.0,
+            "boundary_label": "none",
+        },
+        "23": {
+            "dino_cosine_distance": 0.111,
+            "boundary_score": 0.222,
+            "distance_zscore": 0.333,
+            "smoothed_distance_zscore": 0.444,
+            "time_gap_boost": 0.0,
+            "boundary_label": "none",
+        },
+        "34": {
+            "dino_cosine_distance": 0.777,
+            "boundary_score": 0.888,
+            "distance_zscore": 1.111,
+            "smoothed_distance_zscore": 1.222,
+            "time_gap_boost": 1.0,
+            "boundary_label": "hard",
+        },
+    }
+
+    row = build_candidate_feature_row(
+        candidate,
+        descriptors={},
+        embeddings=None,
+        heuristic_features=heuristic_features,
+    )
+
+    assert row["heuristic_dino_dist_12"] == 0.101
+    assert row["heuristic_boundary_score_34"] == 0.888
+    assert row["heuristic_distance_zscore_34"] == 1.111
+    assert row["heuristic_smoothed_distance_zscore_23"] == 0.444
+    assert row["heuristic_time_gap_boost_34"] == 1.0
+    assert row["heuristic_boundary_label_34"] == "hard"
+    assert row["heuristic_dino_dist_45"] == numeric_missing
+    assert row["heuristic_boundary_score_45"] == numeric_missing
+    assert row["heuristic_distance_zscore_45"] == numeric_missing
+    assert row["heuristic_smoothed_distance_zscore_45"] == numeric_missing
+    assert row["heuristic_time_gap_boost_45"] == numeric_missing
+    assert row["heuristic_boundary_label_45"] == CANONICAL_MISSING
 
 
 def test_build_candidate_feature_row_flattens_scalar_descriptor_fields() -> None:

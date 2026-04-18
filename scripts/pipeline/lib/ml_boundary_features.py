@@ -13,8 +13,10 @@ from lib.photo_pre_model_annotations import (
 
 GAP_OUTLIER_K = 3.0
 CANONICAL_MISSING = "__missing__"
+HEURISTIC_NUMERIC_MISSING = -1.0
 DESCRIPTOR_LIST_DELIMITERS = (",", ";", "|", "/")
 DESCRIPTOR_MAX_VALUES_PER_FIELD = 5
+HEURISTIC_PAIR_NAMES = ("12", "23", "34", "45")
 CANONICAL_COSTUME_TYPE_VOCABULARY = frozenset(
     {
         "ballgown",
@@ -273,11 +275,67 @@ def _require_embedding(
     return embeddings[photo_id]
 
 
+def _normalize_heuristic_float(value: object) -> float:
+    if value is None:
+        return HEURISTIC_NUMERIC_MISSING
+    if isinstance(value, bool):
+        raise ValueError("heuristic values must be numeric or null")
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return HEURISTIC_NUMERIC_MISSING
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("heuristic values must be numeric or null") from exc
+    if not math.isfinite(normalized):
+        raise ValueError("heuristic values must be finite")
+    return normalized
+
+
+def _normalize_heuristic_label(value: object) -> str:
+    return normalize_descriptor_value(value)
+
+
+def build_heuristic_feature_block(
+    heuristic_features: Mapping[str, Mapping[str, object]] | None,
+) -> dict[str, float | str]:
+    row: dict[str, float | str] = {}
+    for pair_name in HEURISTIC_PAIR_NAMES:
+        pair_features: Mapping[str, object]
+        if heuristic_features is None:
+            pair_features = {}
+        else:
+            pair_features = heuristic_features.get(pair_name, {})
+            if not isinstance(pair_features, MappingABC):
+                raise ValueError(f"heuristic feature row for {pair_name} must be a mapping")
+        row[f"heuristic_dino_dist_{pair_name}"] = _normalize_heuristic_float(
+            pair_features.get("dino_cosine_distance")
+        )
+        row[f"heuristic_boundary_score_{pair_name}"] = _normalize_heuristic_float(
+            pair_features.get("boundary_score")
+        )
+        row[f"heuristic_distance_zscore_{pair_name}"] = _normalize_heuristic_float(
+            pair_features.get("distance_zscore")
+        )
+        row[f"heuristic_smoothed_distance_zscore_{pair_name}"] = _normalize_heuristic_float(
+            pair_features.get("smoothed_distance_zscore")
+        )
+        row[f"heuristic_time_gap_boost_{pair_name}"] = _normalize_heuristic_float(
+            pair_features.get("time_gap_boost")
+        )
+        row[f"heuristic_boundary_label_{pair_name}"] = _normalize_heuristic_label(
+            pair_features.get("boundary_label")
+        )
+    return row
+
+
 def build_candidate_feature_row(
     candidate: Mapping[str, object],
     descriptors: Mapping[str, object],
     embeddings: Mapping[str, Sequence[float]] | None,
     descriptor_field_registry: Mapping[str, str] | None = None,
+    heuristic_features: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict[str, float | int | str]:
 
     timestamps = [
@@ -314,6 +372,7 @@ def build_candidate_feature_row(
         "max_gap_in_window": max(gaps),
         "gap_variance": float(pvariance(gaps)),
     }
+    row.update(build_heuristic_feature_block(heuristic_features))
 
     left_photo_ids = [
         _require_photo_id(candidate, "frame_01_photo_id"),
