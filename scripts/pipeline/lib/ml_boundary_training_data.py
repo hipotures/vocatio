@@ -4,7 +4,6 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
-from build_photo_segments import PHOTO_BOUNDARY_SCORE_FILENAME, read_boundary_scores
 from lib.ml_boundary_features import build_candidate_feature_row
 from lib.photo_pre_model_annotations import (
     DEFAULT_OUTPUT_DIRNAME,
@@ -31,10 +30,15 @@ REQUIRED_DERIVED_FEATURE_SOURCE_COLUMNS = tuple(
         f"frame_{frame_index:02d}_photo_id"
         for frame_index in range(1, 6)
     ]
+    + [
+        f"frame_{frame_index:02d}_relpath"
+        for frame_index in range(1, 6)
+    ]
 )
 NON_MODEL_FEATURE_COLUMNS = frozenset(REQUIRED_BASE_COLUMNS + ("split_name",))
 SPLIT_MANIFEST_VALUE_COLUMNS = ("split_name",)
 ALLOWED_SPLIT_NAMES = ("train", "validation", "test")
+PHOTO_BOUNDARY_SCORE_FILENAME = "photo_boundary_scores.csv"
 HEURISTIC_PAIR_JOIN_COLUMNS = (
     ("12", "frame_01_relpath", "frame_02_relpath"),
     ("23", "frame_02_relpath", "frame_03_relpath"),
@@ -48,6 +52,11 @@ HEURISTIC_VALUE_COLUMNS = (
     "smoothed_distance_zscore",
     "time_gap_boost",
     "boundary_label",
+)
+REQUIRED_HEURISTIC_SCORE_COLUMNS = (
+    "left_relative_path",
+    "right_relative_path",
+    *HEURISTIC_VALUE_COLUMNS,
 )
 
 
@@ -527,14 +536,28 @@ def _load_heuristic_records(
     if boundary_scores_path is None:
         return {}
     heuristic_rows_by_pair: dict[tuple[str, str], dict[str, str]] = {}
-    for row in read_boundary_scores(boundary_scores_path):
-        pair_key = (row["left_relative_path"], row["right_relative_path"])
-        if pair_key in heuristic_rows_by_pair:
-            raise ValueError(
-                "photo_boundary_scores.csv contains duplicate adjacent pair rows for "
-                f"{pair_key[0]} -> {pair_key[1]}"
-            )
-        heuristic_rows_by_pair[pair_key] = row
+    with boundary_scores_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        _require_columns(
+            list(reader.fieldnames or []),
+            required_columns=REQUIRED_HEURISTIC_SCORE_COLUMNS,
+            resource_name=boundary_scores_path.name,
+        )
+        rows = [dict(row) for row in reader]
+    for row in rows:
+        left_relative_path = str(row.get("left_relative_path", "")).strip()
+        right_relative_path = str(row.get("right_relative_path", "")).strip()
+        if left_relative_path == "" or right_relative_path == "":
+            continue
+        pair_key = (left_relative_path, right_relative_path)
+        heuristic_rows_by_pair[pair_key] = {
+            "left_relative_path": left_relative_path,
+            "right_relative_path": right_relative_path,
+            **{
+                column_name: str(row.get(column_name, "")).strip()
+                for column_name in HEURISTIC_VALUE_COLUMNS
+            },
+        }
     return heuristic_rows_by_pair
 
 

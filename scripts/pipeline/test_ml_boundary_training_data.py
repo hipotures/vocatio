@@ -328,6 +328,33 @@ def test_load_training_data_bundle_requires_thumbnail_columns_for_thumbnail_mode
         )
 
 
+def test_load_training_data_bundle_requires_relpath_columns_for_heuristic_joins(
+    tmp_path: Path,
+) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    row = _candidate_row(day_id="20250324", segment_type="performance", boundary="0")
+    missing_column = "frame_05_relpath"
+    row.pop(missing_column)
+    headers = [header for header in CANDIDATE_ROW_HEADERS if header != missing_column]
+    with dataset_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers)
+        writer.writeheader()
+        writer.writerow(row)
+    _write_split_manifest(
+        split_manifest_path,
+        [{"day_id": "20250324", "split_name": "train"}],
+    )
+
+    with pytest.raises(ValueError, match=f"missing required columns: {missing_column}"):
+        load_training_data_bundle(
+            dataset_path,
+            split_manifest_path=split_manifest_path,
+            mode="tabular_only",
+            require_train_validation=False,
+        )
+
+
 def test_load_training_data_bundle_rejects_missing_labels(tmp_path: Path) -> None:
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
@@ -453,6 +480,23 @@ def test_load_training_data_bundle_joins_heuristic_boundary_scores_and_counts_mi
         boundary_scores_path,
         [
             {
+                "left_relative_path": "cam/20250324-p3.jpg",
+                "right_relative_path": "cam/20250324-p4.jpg",
+                "left_start_local": "2025-03-24T10:00:03",
+                "right_start_local": "2025-03-24T10:00:04",
+                "left_start_epoch_ms": "3000",
+                "right_start_epoch_ms": "4000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.103000",
+                "distance_zscore": "0.203000",
+                "smoothed_distance_zscore": "0.303000",
+                "time_gap_boost": "0.200000",
+                "boundary_score": "0.123000",
+                "boundary_label": "hard",
+                "boundary_reason": "center-cut",
+                "model_source": "bootstrap_heuristic",
+            },
+            {
                 "left_relative_path": "cam/20250324-p1.jpg",
                 "right_relative_path": "cam/20250324-p2.jpg",
                 "left_start_local": "2025-03-24T10:00:01",
@@ -467,40 +511,6 @@ def test_load_training_data_bundle_joins_heuristic_boundary_scores_and_counts_mi
                 "boundary_score": "0.401000",
                 "boundary_label": "none",
                 "boundary_reason": "baseline",
-                "model_source": "bootstrap_heuristic",
-            },
-            {
-                "left_relative_path": "cam/20250324-p2.jpg",
-                "right_relative_path": "cam/20250324-p3.jpg",
-                "left_start_local": "2025-03-24T10:00:02",
-                "right_start_local": "2025-03-24T10:00:03",
-                "left_start_epoch_ms": "2000",
-                "right_start_epoch_ms": "3000",
-                "time_gap_seconds": "1.000000",
-                "dino_cosine_distance": "0.102000",
-                "distance_zscore": "0.202000",
-                "smoothed_distance_zscore": "0.302000",
-                "time_gap_boost": "0.100000",
-                "boundary_score": "0.802000",
-                "boundary_label": "soft",
-                "boundary_reason": "lifted",
-                "model_source": "bootstrap_heuristic",
-            },
-            {
-                "left_relative_path": "cam/20250324-p3.jpg",
-                "right_relative_path": "cam/20250324-p4.jpg",
-                "left_start_local": "2025-03-24T10:00:03",
-                "right_start_local": "2025-03-24T10:00:04",
-                "left_start_epoch_ms": "3000",
-                "right_start_epoch_ms": "4000",
-                "time_gap_seconds": "1.000000",
-                "dino_cosine_distance": "0.103000",
-                "distance_zscore": "0.203000",
-                "smoothed_distance_zscore": "0.303000",
-                "time_gap_boost": "0.200000",
-                "boundary_score": "0.803000",
-                "boundary_label": "hard",
-                "boundary_reason": "center-cut",
                 "model_source": "bootstrap_heuristic",
             },
             {
@@ -520,6 +530,23 @@ def test_load_training_data_bundle_joins_heuristic_boundary_scores_and_counts_mi
                 "boundary_reason": "settled",
                 "model_source": "bootstrap_heuristic",
             },
+            {
+                "left_relative_path": "cam/20250324-p2.jpg",
+                "right_relative_path": "cam/20250324-p3.jpg",
+                "left_start_local": "2025-03-24T10:00:02",
+                "right_start_local": "2025-03-24T10:00:03",
+                "left_start_epoch_ms": "2000",
+                "right_start_epoch_ms": "3000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.102000",
+                "distance_zscore": "0.202000",
+                "smoothed_distance_zscore": "0.302000",
+                "time_gap_boost": "0.100000",
+                "boundary_score": "0.222000",
+                "boundary_label": "soft",
+                "boundary_reason": "lifted",
+                "model_source": "bootstrap_heuristic",
+            },
         ],
     )
 
@@ -529,8 +556,13 @@ def test_load_training_data_bundle_joins_heuristic_boundary_scores_and_counts_mi
         mode="tabular_only",
     )
 
+    assert "heuristic_dino_dist_12" in bundle.shared_feature_columns
+    assert "heuristic_boundary_score_23" in bundle.shared_feature_columns
+    assert "heuristic_boundary_label_34" in bundle.shared_feature_columns
+    assert "heuristic_dino_dist_12" in bundle.segment_type.feature_columns
+    assert "heuristic_boundary_score_23" in bundle.boundary.feature_columns
     assert bundle.train_rows["heuristic_dino_dist_12"].tolist() == [0.101]
-    assert bundle.train_rows["heuristic_boundary_score_23"].tolist() == [0.802]
+    assert bundle.train_rows["heuristic_boundary_score_23"].tolist() == [0.222]
     assert bundle.train_rows["heuristic_smoothed_distance_zscore_34"].tolist() == [0.303]
     assert bundle.train_rows["heuristic_time_gap_boost_45"].tolist() == [0.3]
     assert bundle.train_rows["heuristic_boundary_label_34"].tolist() == ["hard"]
