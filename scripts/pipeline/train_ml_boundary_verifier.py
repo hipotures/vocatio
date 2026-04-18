@@ -409,6 +409,8 @@ def _build_training_metadata_payload(
         "time_limit_seconds": training_options["time_limit_seconds"],
         "missing_annotation_photo_count": training_bundle.missing_annotation_photo_count,
         "missing_annotation_candidate_count": training_bundle.missing_annotation_candidate_count,
+        "missing_heuristic_pair_count": training_bundle.missing_heuristic_pair_count,
+        "missing_heuristic_candidate_count": training_bundle.missing_heuristic_candidate_count,
         "artifacts": {
             name: str(path)
             for name, path in artifact_paths.items()
@@ -488,6 +490,7 @@ def _build_training_report_payload(
         "image_feature_count": len(training_bundle.image_feature_columns),
         "missing_annotation_photo_count": training_bundle.missing_annotation_photo_count,
         "missing_annotation_candidate_count": training_bundle.missing_annotation_candidate_count,
+        "heuristic_boundary_coverage": _heuristic_boundary_coverage_payload(training_bundle),
         "segment_type": _report_predictor_payload(training_summary, "segment_type"),
         "boundary": _report_predictor_payload(training_summary, "boundary"),
         "artifact_paths": {
@@ -510,6 +513,22 @@ def _descriptor_annotation_coverage_console_line(training_bundle: TrainingDataBu
         "Descriptor annotation coverage: "
         f"missing annotations for {coverage['missing_annotation_photo_count']} photos "
         f"across {coverage['missing_annotation_candidate_count']} candidates."
+    )
+
+
+def _heuristic_boundary_coverage_payload(training_bundle: TrainingDataBundle) -> dict[str, int]:
+    return {
+        "missing_pair_count": training_bundle.missing_heuristic_pair_count,
+        "missing_candidate_count": training_bundle.missing_heuristic_candidate_count,
+    }
+
+
+def _heuristic_boundary_coverage_console_line(training_bundle: TrainingDataBundle) -> str:
+    coverage = _heuristic_boundary_coverage_payload(training_bundle)
+    return (
+        "Heuristic coverage: "
+        f"missing_pairs={coverage['missing_pair_count']}, "
+        f"missing_candidates={coverage['missing_candidate_count']}"
     )
 
 
@@ -581,6 +600,7 @@ def _final_console_block(
             f"photos={training_bundle.missing_annotation_photo_count}, "
             f"candidates={training_bundle.missing_annotation_candidate_count}"
         ),
+        _heuristic_boundary_coverage_console_line(training_bundle),
         f"Report: {artifact_paths['training_report']}",
     ]
     return Group(*(Text(line, no_wrap=False, overflow="fold") for line in lines))

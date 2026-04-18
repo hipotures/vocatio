@@ -374,6 +374,8 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "time_limit_seconds": None,
         "missing_annotation_photo_count": 15,
         "missing_annotation_candidate_count": 3,
+        "missing_heuristic_pair_count": 12,
+        "missing_heuristic_candidate_count": 3,
         "artifacts": {
             "training_plan": str(output_dir / TRAINING_PLAN_FILENAME),
             "training_metadata": str(output_dir / TRAINING_METADATA_FILENAME),
@@ -430,6 +432,10 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "image_feature_count": 0,
         "missing_annotation_photo_count": 15,
         "missing_annotation_candidate_count": 3,
+        "heuristic_boundary_coverage": {
+            "missing_pair_count": 12,
+            "missing_candidate_count": 3,
+        },
         "segment_type": {
             "best_model": "segment_type_best",
             "validation_metric": "macro_f1",
@@ -496,6 +502,9 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert "Missing annotations:" in rendered
     assert f"photos={training_report['missing_annotation_photo_count']}" in rendered
     assert f"candidates={training_report['missing_annotation_candidate_count']}" in rendered
+    assert "Heuristic coverage:" in rendered
+    assert "missing_pairs=12" in rendered
+    assert "missing_candidates=3" in rendered
     assert "training_report.json" in rendered
     assert TRAINING_REPORT_FILENAME in rendered
     assert len(rendered_lines) > 7
@@ -504,7 +513,8 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert rendered.index("Segment type:") < rendered.index("Boundary:")
     assert rendered.index("Boundary:") < rendered.index("Feature counts:")
     assert rendered.index("Feature counts:") < rendered.index("Missing annotations:")
-    assert rendered.index("Missing annotations:") < rendered.index("Report:")
+    assert rendered.index("Missing annotations:") < rendered.index("Heuristic coverage:")
+    assert rendered.index("Heuristic coverage:") < rendered.index("Report:")
 
 
 def test_train_cli_applies_explicit_training_options(monkeypatch, tmp_path: Path) -> None:
