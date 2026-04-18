@@ -1,5 +1,6 @@
 import csv
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -323,6 +324,63 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             },
         )
 
+    def test_should_show_manual_ml_prediction_requires_exactly_two_selected_photos(self):
+        self.assertFalse(review_gui.should_show_manual_ml_prediction([]))
+        self.assertFalse(review_gui.should_show_manual_ml_prediction([{"relative_path": "cam/a.jpg"}]))
+        self.assertTrue(
+            review_gui.should_show_manual_ml_prediction(
+                [
+                    {"relative_path": "cam/a.jpg"},
+                    {"relative_path": "cam/b.jpg"},
+                ]
+            )
+        )
+        self.assertFalse(
+            review_gui.should_show_manual_ml_prediction(
+                [
+                    {"relative_path": "cam/a.jpg"},
+                    {"relative_path": "cam/b.jpg"},
+                    {"relative_path": "cam/c.jpg"},
+                ]
+            )
+        )
+
+    def test_build_manual_ml_prediction_section_supports_idle_running_error_and_result_states(self):
+        idle_section = review_gui.build_manual_ml_prediction_section(None)
+        self.assertEqual(idle_section["title"], "Manual ML prediction")
+        self.assertIn("Status: idle", idle_section["body"])
+
+        running_section = review_gui.build_manual_ml_prediction_section(
+            {
+                "status": "running",
+                "started_at": "2026-04-19T12:34:56",
+            }
+        )
+        self.assertIn("Status: running", running_section["body"])
+        self.assertIn("Started: 2026-04-19T12:34:56", running_section["body"])
+
+        error_section = review_gui.build_manual_ml_prediction_section(
+            {
+                "status": "error",
+                "error": "Model artifacts are unavailable",
+            }
+        )
+        self.assertIn("Status: error", error_section["body"])
+        self.assertIn("Error: Model artifacts are unavailable", error_section["body"])
+
+        result_section = review_gui.build_manual_ml_prediction_section(
+            {
+                "status": "result",
+                "boundary_prediction": True,
+                "boundary_confidence": "0.91",
+                "segment_type_prediction": "ceremony",
+                "segment_type_confidence": "0.88",
+            }
+        )
+        self.assertIn("Status: result", result_section["body"])
+        self.assertIn("Boundary: cut", result_section["body"])
+        self.assertIn("Right-side segment: ceremony", result_section["body"])
+
     def test_build_image_only_set_info_sections_for_set_returns_named_sections(self):
         diagnostics = {"available": False, "error": ""}
         display_set = {
@@ -393,7 +451,6 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 },
                 "error": "",
             }
-            diagnostics["ml_hint_by_pair"] = diagnostics["ml_diagnostics"]["ml_hint_by_pair"]
             display_set = {
                 "display_name": "SEG0001",
                 "original_performance_number": "SEG0001",
@@ -511,6 +568,38 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             ["Selection summary", "Boundary diagnostics"],
         )
         self.assertIn("Selected photos: 2", sections[0]["body"])
+
+    def test_build_image_only_multi_photo_info_sections_includes_manual_ml_prediction_section_when_enabled(self):
+        diagnostics = {"available": False, "error": ""}
+        photos = [
+            {
+                "adjusted_start_local": "2026-03-23T10:00:00",
+                "relative_path": "cam/a.jpg",
+                "filename": "a.jpg",
+                "assignment_status": "assigned",
+                "assignment_reason": "",
+            },
+            {
+                "adjusted_start_local": "2026-03-23T10:00:05",
+                "relative_path": "cam/b.jpg",
+                "filename": "b.jpg",
+                "assignment_status": "assigned",
+                "assignment_reason": "",
+            },
+        ]
+
+        sections = review_gui.build_image_only_multi_photo_info_sections(
+            photos,
+            diagnostics,
+            show_manual_ml_prediction=True,
+            manual_prediction_state={"status": "running", "started_at": "2026-04-19T12:34:56"},
+        )
+
+        self.assertEqual(
+            [section["title"] for section in sections],
+            ["Selection summary", "Boundary diagnostics", "Manual ML prediction"],
+        )
+        self.assertIn("Status: running", sections[2]["body"])
 
     def test_render_info_sections_rebuilds_scroll_container(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
@@ -710,6 +799,66 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         status_bar.showMessage.assert_called_once_with("Set VLM0001 - 5 photos - view single")
         window.show_display_set.assert_called_once_with(display_set)
 
+    def test_export_selected_photos_json_writes_selection_diagnostics_when_info_dock_is_hidden(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            output_path = workspace_dir / "selection.json"
+            display_set = {
+                "display_name": "SEG0001",
+                "set_id": "imgset-000001",
+            }
+            selected_photos = [
+                {
+                    "filename": "a.jpg",
+                    "relative_path": "cam/a.jpg",
+                    "stream_id": "stream-a",
+                    "source_path": "/src/a.jpg",
+                    "adjusted_start_local": "2026-03-23T10:00:00",
+                    "display_set_id": "imgset-000001",
+                    "display_name": "SEG0001",
+                },
+                {
+                    "filename": "b.jpg",
+                    "relative_path": "cam/b.jpg",
+                    "stream_id": "stream-b",
+                    "source_path": "/src/b.jpg",
+                    "adjusted_start_local": "2026-03-23T10:00:05",
+                    "display_set_id": "imgset-000001",
+                    "display_name": "SEG0001",
+                },
+            ]
+            current_photo = dict(selected_photos[1])
+            set_item = FakeRestoreItem(display_set)
+            photo_item = FakeRestoreItem(current_photo, parent=set_item)
+            window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+            window.workspace_dir = workspace_dir
+            window.payload = {"day": "20260323"}
+            window.index_path = workspace_dir / "performance_proxy_index.json"
+            window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+            window.image_only_diagnostics = {"available": False, "error": "missing diagnostics"}
+            window.selected_photo_entries = Mock(return_value=selected_photos)
+            window.current_timestamp = Mock(return_value="2026-04-19T12:34:56")
+            window.tree = FakeRestoreTree(current_item=photo_item)
+            window.current_top_level_item = Mock(return_value=set_item)
+            window.info_dock = Mock()
+            window.info_dock.isVisible.return_value = False
+            status_bar = Mock()
+            window.statusBar = Mock(return_value=status_bar)
+
+            with unittest.mock.patch.object(
+                review_gui.QInputDialog,
+                "getText",
+                return_value=(str(output_path), True),
+            ):
+                window.export_selected_photos_json()
+
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertIn("selection_diagnostics", payload)
+            self.assertEqual(payload["selection_diagnostics"]["mode"], "multi_photo")
+            self.assertEqual(payload["selection_diagnostics"]["summary"]["selected_photo_count"], 2)
+            self.assertEqual(payload["selection_diagnostics"]["summary"]["current_set_id"], "imgset-000001")
+            status_bar.showMessage.assert_called_once_with(f"Saved 2 photos to {output_path}")
+
     def test_build_image_only_set_info_text_includes_boundary_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_dir = Path(tmp)
@@ -822,7 +971,6 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 },
                 "error": "",
             }
-            diagnostics["ml_hint_by_pair"] = diagnostics["ml_diagnostics"]["ml_hint_by_pair"]
             photo = {
                 "display_name": "SEG0001",
                 "original_performance_number": "SEG0001",
@@ -845,6 +993,49 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             self.assertIn("right-side segment: dance", text)
             self.assertIn("ML hint before photo", text)
             self.assertIn("model run: day-20260323", text)
+
+    def test_build_image_only_photo_ml_hints_body_uses_canonical_ml_hint_lookup(self):
+        diagnostics = {
+            "available": True,
+            "error": "",
+            "boundary_by_left_relative_path": {
+                "cam/b.jpg": {
+                    "left_relative_path": "cam/b.jpg",
+                    "right_relative_path": "cam/c.jpg",
+                }
+            },
+            "boundary_by_right_relative_path": {},
+            "ml_diagnostics": {
+                "available": True,
+                "ml_model_run_id": "day-20260323",
+                "ml_hint_by_pair": {
+                    ("cam/b.jpg", "cam/c.jpg"): {
+                        "boundary_prediction": False,
+                        "boundary_confidence": "0.81",
+                        "segment_type_prediction": "dance",
+                        "segment_type_confidence": "0.97",
+                    }
+                },
+                "error": "",
+            },
+            "ml_hint_by_pair": {
+                ("cam/b.jpg", "cam/c.jpg"): {
+                    "boundary_prediction": True,
+                    "boundary_confidence": "0.10",
+                    "segment_type_prediction": "wrong",
+                    "segment_type_confidence": "0.20",
+                }
+            },
+        }
+        photo = {
+            "relative_path": "cam/b.jpg",
+        }
+
+        body = review_gui.build_image_only_photo_ml_hints_body(photo, diagnostics)
+
+        self.assertIn("boundary: no_cut", body)
+        self.assertIn("right-side segment: dance", body)
+        self.assertNotIn("right-side segment: wrong", body)
 
     def test_next_segment_type_override_cycles_through_supported_values(self):
         self.assertEqual(review_gui.next_segment_type_override(""), "dance")

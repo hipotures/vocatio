@@ -605,6 +605,51 @@ def should_include_ml_hints_section(
     return bool(ml_diagnostics.get("available"))
 
 
+def ml_hint_diagnostics(diagnostics: Mapping[str, Any]) -> Mapping[str, Any]:
+    value = diagnostics.get("ml_diagnostics", {})
+    return value if isinstance(value, Mapping) else {}
+
+
+def ml_hint_lookup_by_pair(diagnostics: Mapping[str, Any]) -> Mapping[tuple[str, str], Mapping[str, Any]]:
+    hints = ml_hint_diagnostics(diagnostics).get("ml_hint_by_pair", {})
+    return hints if isinstance(hints, Mapping) else {}
+
+
+def should_show_manual_ml_prediction(selected_photos: Sequence[Mapping[str, Any]]) -> bool:
+    return len(selected_photos) == 2
+
+
+def build_manual_ml_prediction_section(
+    manual_prediction_state: Optional[Mapping[str, Any]],
+) -> Dict[str, str]:
+    state = dict(manual_prediction_state or {})
+    status = str(state.get("status", "") or "idle").strip().lower() or "idle"
+    lines = [f"Status: {status}"]
+    if status == "running":
+        lines.append(f"Started: {format_value(state.get('started_at'))}")
+    elif status == "error":
+        lines.append(f"Error: {format_value(state.get('error'))}")
+    elif status == "result":
+        boundary_prediction = bool(state.get("boundary_prediction"))
+        lines.extend(
+            [
+                f"Boundary: {'cut' if boundary_prediction else 'no_cut'}",
+                f"Boundary confidence: {format_value(state.get('boundary_confidence'))}",
+                f"Right-side segment: {format_value(state.get('segment_type_prediction'))}",
+                f"Segment confidence: {format_value(state.get('segment_type_confidence'))}",
+            ]
+        )
+    else:
+        lines.append("Prediction run not started.")
+    lines.append("Execution hook is pending a later task.")
+    return build_info_section(
+        "Manual ML prediction",
+        "Ephemeral runtime state for manual ML boundary prediction.",
+        join_info_section_lines(lines),
+        key="manual_ml_prediction",
+    )
+
+
 def build_image_only_set_summary_body(
     display_set: Mapping[str, Any],
     *,
@@ -683,8 +728,8 @@ def build_image_only_set_ml_hints_body(
     last_relative_path = str(photos[-1].get("relative_path", "") or "") if photos else ""
     left_boundary = diagnostics.get("boundary_by_right_relative_path", {}).get(first_relative_path) if diagnostics.get("available") else None
     right_boundary = diagnostics.get("boundary_by_left_relative_path", {}).get(last_relative_path) if diagnostics.get("available") else None
-    ml_hint_by_pair = diagnostics.get("ml_hint_by_pair", {})
-    ml_diagnostics = diagnostics.get("ml_diagnostics", {})
+    ml_diagnostics = ml_hint_diagnostics(diagnostics)
+    ml_hint_by_pair = ml_hint_lookup_by_pair(diagnostics)
     left_ml_hint = None
     right_ml_hint = None
     if isinstance(left_boundary, Mapping):
@@ -752,8 +797,8 @@ def build_image_only_photo_ml_hints_body(
     relative_path = str(photo.get("relative_path", "") or "")
     left_boundary = diagnostics.get("boundary_by_left_relative_path", {}).get(relative_path) if diagnostics.get("available") else None
     right_boundary = diagnostics.get("boundary_by_right_relative_path", {}).get(relative_path) if diagnostics.get("available") else None
-    ml_hint_by_pair = diagnostics.get("ml_hint_by_pair", {})
-    ml_diagnostics = diagnostics.get("ml_diagnostics", {})
+    ml_diagnostics = ml_hint_diagnostics(diagnostics)
+    ml_hint_by_pair = ml_hint_lookup_by_pair(diagnostics)
     left_ml_hint = None
     right_ml_hint = None
     if isinstance(left_boundary, Mapping):
@@ -881,9 +926,7 @@ def build_image_only_multi_photo_info_sections(
     show_manual_ml_prediction: bool,
     manual_prediction_state: Optional[Mapping[str, Any]],
 ) -> List[Dict[str, str]]:
-    _ = show_manual_ml_prediction
-    _ = manual_prediction_state
-    return [
+    sections = [
         build_info_section(
             "Selection summary",
             "Overview of the current photo selection.",
@@ -897,6 +940,9 @@ def build_image_only_multi_photo_info_sections(
             key="boundary_diagnostics",
         ),
     ]
+    if show_manual_ml_prediction:
+        sections.append(build_manual_ml_prediction_section(manual_prediction_state))
+    return sections
 
 
 def build_image_only_set_info_text(
@@ -924,8 +970,6 @@ def build_image_only_set_info_sections(
     show_manual_ml_prediction: bool,
     manual_prediction_state: Optional[Mapping[str, Any]],
 ) -> List[Dict[str, str]]:
-    _ = show_manual_ml_prediction
-    _ = manual_prediction_state
     sections = [
         build_info_section(
             "Set summary",
@@ -953,6 +997,8 @@ def build_image_only_set_info_sections(
                 key="ml_hints",
             )
         )
+    if show_manual_ml_prediction:
+        sections.append(build_manual_ml_prediction_section(manual_prediction_state))
     return sections
 
 
@@ -1381,10 +1427,7 @@ class MainWindow(QMainWindow):
         )
         if self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
             self.image_only_diagnostics["ml_diagnostics"] = load_ml_hint_diagnostics(self.workspace_dir, payload)
-            self.image_only_diagnostics["ml_hint_by_pair"] = self.image_only_diagnostics["ml_diagnostics"].get(
-                "ml_hint_by_pair",
-                {},
-            )
+        self.manual_ml_prediction_state: Optional[Dict[str, Any]] = None
         self.thread_pool = QThreadPool.globalInstance()
         self.icon_cache: Dict[str, QPixmap] = {}
         self.preview_cache: OrderedDict[str, QPixmap] = OrderedDict()
@@ -1968,47 +2011,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Export Selection", "Filename cannot be empty.")
             return
         output_path = resolve_selection_output_path(self.workspace_dir, filename)
-        selection_diagnostics = None
-        if self.info_dock.isVisible():
-            current_item = self.tree.currentItem()
-            if current_item is not None:
-                if len(photos) >= 2:
-                    mode = "multi_photo"
-                    display_set = self.current_top_level_item().data(0, Qt.UserRole) if self.current_top_level_item() else None
-                    current_photo = current_item.data(0, Qt.UserRole) if current_item.parent() is not None else None
-                    current_display_name = (
-                        str(display_set.get("display_name", "") or "")
-                        if isinstance(display_set, dict)
-                        else str((photos[0].get("display_name", "") if photos else "") or "")
-                    )
-                    current_set_id = (
-                        str(display_set.get("set_id", "") or "")
-                        if isinstance(display_set, dict)
-                        else str((photos[0].get("display_set_id", "") if photos else "") or "")
-                    )
-                elif current_item.parent() is None:
-                    mode = "set"
-                    display_set = current_item.data(0, Qt.UserRole)
-                    current_photo = None
-                    current_display_name = str(display_set.get("display_name", "") or "")
-                    current_set_id = str(display_set.get("set_id", "") or "")
-                else:
-                    mode = "single_photo"
-                    display_set = self.current_top_level_item().data(0, Qt.UserRole) if self.current_top_level_item() else None
-                    current_photo = current_item.data(0, Qt.UserRole)
-                    current_display_name = str(current_photo.get("display_name", "") or "")
-                    current_set_id = str(current_photo.get("display_set_id", "") or "")
-                selection_diagnostics = build_selection_diagnostics_payload(
-                    mode=mode,
-                    current_display_name=current_display_name,
-                    current_set_id=current_set_id,
-                    selected_photos=photos,
-                    display_set=display_set if isinstance(display_set, dict) else None,
-                    current_photo=current_photo if isinstance(current_photo, dict) else None,
-                    diagnostics=self.image_only_diagnostics
-                    if self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
-                    else {"available": False, "error": ""},
-                )
+        selection_diagnostics = self.current_selection_diagnostics_payload(photos)
         payload = build_photo_selection_payload(
             day=str(self.payload.get("day", "")),
             source_index_json=self.index_path,
@@ -2500,10 +2503,73 @@ class MainWindow(QMainWindow):
             self.tree.setCurrentItem(self.display_items[index + 1])
 
     def should_show_manual_ml_prediction(self) -> bool:
-        return False
+        if self.source_mode != review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
+            self.manual_ml_prediction_state = None
+            return False
+        return should_show_manual_ml_prediction(self.selected_photo_entries())
 
     def current_manual_ml_prediction_state(self) -> Optional[Mapping[str, Any]]:
-        return None
+        if not self.should_show_manual_ml_prediction():
+            self.manual_ml_prediction_state = None
+            return None
+        selected_photo_keys = self.selected_photo_identity_keys()
+        current_state = getattr(self, "manual_ml_prediction_state", None)
+        current_keys = []
+        if isinstance(current_state, Mapping):
+            current_keys = [str(value) for value in current_state.get("selected_photo_keys", [])]
+        if current_keys != selected_photo_keys:
+            self.manual_ml_prediction_state = {
+                "status": "idle",
+                "selected_photo_keys": list(selected_photo_keys),
+            }
+        return self.manual_ml_prediction_state
+
+    def current_selection_diagnostics_payload(
+        self,
+        selected_photos: Sequence[Mapping[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        current_item = self.tree.currentItem()
+        if current_item is None:
+            return None
+        if len(selected_photos) >= 2:
+            mode = "multi_photo"
+            top_level_item = self.current_top_level_item()
+            display_set = top_level_item.data(0, Qt.UserRole) if top_level_item is not None else None
+            current_photo = current_item.data(0, Qt.UserRole) if current_item.parent() is not None else None
+            current_display_name = (
+                str(display_set.get("display_name", "") or "")
+                if isinstance(display_set, dict)
+                else str((selected_photos[0].get("display_name", "") if selected_photos else "") or "")
+            )
+            current_set_id = (
+                str(display_set.get("set_id", "") or "")
+                if isinstance(display_set, dict)
+                else str((selected_photos[0].get("display_set_id", "") if selected_photos else "") or "")
+            )
+        elif current_item.parent() is None:
+            mode = "set"
+            display_set = current_item.data(0, Qt.UserRole)
+            current_photo = None
+            current_display_name = str(display_set.get("display_name", "") or "") if isinstance(display_set, dict) else ""
+            current_set_id = str(display_set.get("set_id", "") or "") if isinstance(display_set, dict) else ""
+        else:
+            mode = "single_photo"
+            top_level_item = self.current_top_level_item()
+            display_set = top_level_item.data(0, Qt.UserRole) if top_level_item is not None else None
+            current_photo = current_item.data(0, Qt.UserRole)
+            current_display_name = str(current_photo.get("display_name", "") or "") if isinstance(current_photo, dict) else ""
+            current_set_id = str(current_photo.get("display_set_id", "") or "") if isinstance(current_photo, dict) else ""
+        return build_selection_diagnostics_payload(
+            mode=mode,
+            current_display_name=current_display_name,
+            current_set_id=current_set_id,
+            selected_photos=selected_photos,
+            display_set=display_set if isinstance(display_set, dict) else None,
+            current_photo=current_photo if isinstance(current_photo, dict) else None,
+            diagnostics=self.image_only_diagnostics
+            if self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+            else {"available": False, "error": ""},
+        )
 
     def build_current_info_sections(
         self,
