@@ -325,6 +325,32 @@ def resolve_effective_type_code(base_type: str, override_type: str) -> tuple[str
     return segment_type_to_code(effective_segment_type), override_active
 
 
+def default_review_entry() -> Dict[str, Any]:
+    return {
+        "viewed": False,
+        "first_viewed_at": "",
+        "last_viewed_at": "",
+        "view_count": 0,
+        "no_photos_confirmed": False,
+        "segment_type_override": "",
+    }
+
+
+def apply_segment_type_override_to_display_set(display_set: Dict[str, Any], entry: Mapping[str, Any]) -> None:
+    effective_segment_type, override_active = resolve_effective_segment_type(
+        str(display_set.get("segment_type", "") or ""),
+        str(entry.get("segment_type_override", "") or ""),
+    )
+    type_code = segment_type_to_code(effective_segment_type)
+    display_set["segment_type"] = effective_segment_type
+    display_set["type_code"] = type_code
+    display_set["type_override_active"] = override_active
+    for photo in display_set.get("photos", []):
+        photo["segment_type"] = effective_segment_type
+        photo["type_code"] = type_code
+        photo["type_override_active"] = override_active
+
+
 def resolve_merged_segment_type(target_type: object, source_type: object) -> str:
     normalized_target = str(target_type or "").strip().lower()
     normalized_source = str(source_type or "").strip().lower()
@@ -1408,6 +1434,9 @@ class MainWindow(QMainWindow):
         target["viewed"] = bool(target.get("viewed")) or bool(source.get("viewed"))
         target["view_count"] = max(int(target.get("view_count") or 0), int(source.get("view_count") or 0))
         target["no_photos_confirmed"] = bool(target.get("no_photos_confirmed")) or bool(source.get("no_photos_confirmed"))
+        target_override = str(target.get("segment_type_override", "") or "").strip().lower()
+        source_override = str(source.get("segment_type_override", "") or "").strip().lower()
+        target["segment_type_override"] = target_override or source_override
         first_values = [value for value in [target.get("first_viewed_at", ""), source.get("first_viewed_at", "")] if value]
         last_values = [value for value in [target.get("last_viewed_at", ""), source.get("last_viewed_at", "")] if value]
         target["first_viewed_at"] = min(first_values) if first_values else ""
@@ -1434,13 +1463,7 @@ class MainWindow(QMainWindow):
                 changed = True
             target = migrated.setdefault(
                 mapped_key,
-                {
-                    "viewed": False,
-                    "first_viewed_at": "",
-                    "last_viewed_at": "",
-                    "view_count": 0,
-                    "no_photos_confirmed": False,
-                },
+                default_review_entry(),
             )
             migrated[mapped_key] = self.merge_review_entries(target, value)
         if changed:
@@ -1452,15 +1475,10 @@ class MainWindow(QMainWindow):
         performances = self.review_state.setdefault("performances", {})
         entry = performances.get(set_id)
         if not isinstance(entry, dict):
-            entry = {
-                "viewed": False,
-                "first_viewed_at": "",
-                "last_viewed_at": "",
-                "view_count": 0,
-                "no_photos_confirmed": False,
-            }
+            entry = default_review_entry()
             performances[set_id] = entry
         entry.setdefault("no_photos_confirmed", False)
+        entry.setdefault("segment_type_override", "")
         return entry
 
     def split_specs_for_original(self, original_set_id: str) -> List[Dict]:
@@ -1702,33 +1720,33 @@ class MainWindow(QMainWindow):
             )
             photos = list(original["photos"])
             if not photos:
-                display_sets.append(
-                    {
-                        "set_id": base_set_id,
-                        "base_set_id": base_set_id,
-                        "display_name": original_number,
-                        "original_performance_number": original_number,
-                        "segment_type": original_segment_type,
-                        "type_code": original_type_code,
-                        "occurrence_index": original.get("occurrence_index", ""),
-                        "duplicate_status": original.get("duplicate_status", "normal"),
-                        "timeline_status": original["timeline_status"],
-                        "performance_start_local": original["performance_start_local"],
-                        "performance_end_local": original["performance_end_local"],
-                        "photo_count": 0,
-                        "review_count": 0,
-                        "first_photo_local": "",
-                        "last_photo_local": "",
-                        "duration_seconds": 0,
-                        "max_internal_photo_gap_seconds": 0,
-                        "gap_boundary_filenames": [],
-                        "first_proxy_path": "",
-                        "last_proxy_path": "",
-                        "first_source_path": "",
-                        "last_source_path": "",
-                        "photos": [],
-                    }
-                )
+                display_set = {
+                    "set_id": base_set_id,
+                    "base_set_id": base_set_id,
+                    "display_name": original_number,
+                    "original_performance_number": original_number,
+                    "segment_type": original_segment_type,
+                    "type_code": original_type_code,
+                    "occurrence_index": original.get("occurrence_index", ""),
+                    "duplicate_status": original.get("duplicate_status", "normal"),
+                    "timeline_status": original["timeline_status"],
+                    "performance_start_local": original["performance_start_local"],
+                    "performance_end_local": original["performance_end_local"],
+                    "photo_count": 0,
+                    "review_count": 0,
+                    "first_photo_local": "",
+                    "last_photo_local": "",
+                    "duration_seconds": 0,
+                    "max_internal_photo_gap_seconds": 0,
+                    "gap_boundary_filenames": [],
+                    "first_proxy_path": "",
+                    "last_proxy_path": "",
+                    "first_source_path": "",
+                    "last_source_path": "",
+                    "photos": [],
+                }
+                apply_segment_type_override_to_display_set(display_set, self.review_entry(base_set_id))
+                display_sets.append(display_set)
                 continue
 
             photo_index = {photo["filename"]: index for index, photo in enumerate(photos)}
@@ -1777,37 +1795,37 @@ class MainWindow(QMainWindow):
                 if max_gap_seconds <= PHOTO_GAP_THRESHOLD_SECONDS:
                     gap_boundary_filenames = []
 
-                display_sets.append(
-                    {
-                        "set_id": segment_ids[segment_number],
-                        "base_set_id": base_set_id,
-                        "display_name": segment_names[segment_number],
-                        "original_performance_number": original_number,
-                        "segment_type": original_segment_type,
-                        "type_code": original_type_code,
-                        "occurrence_index": original.get("occurrence_index", ""),
-                        "duplicate_status": original.get("duplicate_status", "normal"),
-                        "timeline_status": original["timeline_status"],
-                        "performance_start_local": original["performance_start_local"],
-                        "performance_end_local": original["performance_end_local"],
-                        "photo_count": len(normalized_photos),
-                        "review_count": sum(1 for photo in normalized_photos if photo["assignment_status"] == "review"),
-                        "first_photo_local": normalized_photos[0]["adjusted_start_local"],
-                        "last_photo_local": normalized_photos[-1]["adjusted_start_local"],
-                        "duration_seconds": self.duration_seconds(
-                            normalized_photos[0]["adjusted_start_local"],
-                            normalized_photos[-1]["adjusted_start_local"],
-                        ),
-                        "max_internal_photo_gap_seconds": max_gap_seconds,
-                        "gap_boundary_filenames": gap_boundary_filenames,
-                        "merged_manually": False,
-                        "first_proxy_path": first_proxy_path,
-                        "last_proxy_path": last_proxy_path,
-                        "first_source_path": normalized_photos[0]["source_path"],
-                        "last_source_path": normalized_photos[-1]["source_path"],
-                        "photos": normalized_photos,
-                    }
-                )
+                display_set = {
+                    "set_id": segment_ids[segment_number],
+                    "base_set_id": base_set_id,
+                    "display_name": segment_names[segment_number],
+                    "original_performance_number": original_number,
+                    "segment_type": original_segment_type,
+                    "type_code": original_type_code,
+                    "occurrence_index": original.get("occurrence_index", ""),
+                    "duplicate_status": original.get("duplicate_status", "normal"),
+                    "timeline_status": original["timeline_status"],
+                    "performance_start_local": original["performance_start_local"],
+                    "performance_end_local": original["performance_end_local"],
+                    "photo_count": len(normalized_photos),
+                    "review_count": sum(1 for photo in normalized_photos if photo["assignment_status"] == "review"),
+                    "first_photo_local": normalized_photos[0]["adjusted_start_local"],
+                    "last_photo_local": normalized_photos[-1]["adjusted_start_local"],
+                    "duration_seconds": self.duration_seconds(
+                        normalized_photos[0]["adjusted_start_local"],
+                        normalized_photos[-1]["adjusted_start_local"],
+                    ),
+                    "max_internal_photo_gap_seconds": max_gap_seconds,
+                    "gap_boundary_filenames": gap_boundary_filenames,
+                    "merged_manually": False,
+                    "first_proxy_path": first_proxy_path,
+                    "last_proxy_path": last_proxy_path,
+                    "first_source_path": normalized_photos[0]["source_path"],
+                    "last_source_path": normalized_photos[-1]["source_path"],
+                    "photos": normalized_photos,
+                }
+                apply_segment_type_override_to_display_set(display_set, self.review_entry(segment_ids[segment_number]))
+                display_sets.append(display_set)
         self.display_sets = self.apply_display_set_merges(display_sets)
 
     def apply_display_set_merges(self, display_sets: List[Dict]) -> List[Dict]:
@@ -1872,11 +1890,14 @@ class MainWindow(QMainWindow):
                 target_set.get("segment_type", ""),
                 source_set.get("segment_type", ""),
             )
+            merged_override_active = bool(target_set.get("type_override_active")) or bool(source_set.get("type_override_active"))
             target_set["segment_type"] = merged_segment_type
             target_set["type_code"] = segment_type_to_code(merged_segment_type)
+            target_set["type_override_active"] = merged_override_active
             for photo in target_set["photos"]:
                 photo["segment_type"] = merged_segment_type
                 photo["type_code"] = target_set["type_code"]
+                photo["type_override_active"] = merged_override_active
             merged_sets.pop(source_index)
         return merged_sets
 

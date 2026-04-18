@@ -162,6 +162,41 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "photos": [photo],
         }
 
+    def build_raw_performance(self, set_id: str, segment_type: str) -> dict:
+        normalized_segment_type = str(segment_type or "").strip().lower()
+        type_code = review_gui.segment_type_to_code(normalized_segment_type)
+        return {
+            "set_id": set_id,
+            "performance_number": "SEG0001",
+            "segment_type": normalized_segment_type,
+            "type_code": type_code,
+            "occurrence_index": "",
+            "duplicate_status": "normal",
+            "timeline_status": "image_only",
+            "performance_start_local": "2026-03-23T10:00:00",
+            "performance_end_local": "2026-03-23T10:00:05",
+            "photos": [
+                {
+                    "filename": "a.jpg",
+                    "relative_path": "cam/a.jpg",
+                    "adjusted_start_local": "2026-03-23T10:00:00",
+                    "assignment_status": "assigned",
+                    "source_path": "/src/a.jpg",
+                    "proxy_exists": True,
+                    "proxy_path": "/proxy/a.jpg",
+                },
+                {
+                    "filename": "b.jpg",
+                    "relative_path": "cam/b.jpg",
+                    "adjusted_start_local": "2026-03-23T10:00:05",
+                    "assignment_status": "review",
+                    "source_path": "/src/b.jpg",
+                    "proxy_exists": True,
+                    "proxy_path": "/proxy/b.jpg",
+                },
+            ],
+        }
+
     def test_load_image_only_diagnostics_builds_boundary_and_segment_maps(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_dir = Path(tmp)
@@ -325,6 +360,51 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
     def test_resolve_effective_type_code_prefers_override_when_present(self):
         self.assertEqual(review_gui.resolve_effective_type_code("dance", "ceremony"), ("C", True))
         self.assertEqual(review_gui.resolve_effective_type_code("dance", ""), ("D", False))
+
+    def test_review_entry_initializes_segment_type_override(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.review_state = {"performances": {}}
+
+        entry = window.review_entry("set-a")
+
+        self.assertIn("segment_type_override", entry)
+        self.assertEqual(entry["segment_type_override"], "")
+        self.assertEqual(window.review_state["performances"]["set-a"]["segment_type_override"], "")
+
+    def test_rebuild_display_sets_applies_persisted_segment_type_override_to_set_and_photos(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.review_state = {
+            "performances": {
+                "set-a": {
+                    "viewed": False,
+                    "first_viewed_at": "",
+                    "last_viewed_at": "",
+                    "view_count": 0,
+                    "no_photos_confirmed": False,
+                    "segment_type_override": "ceremony",
+                }
+            },
+            "splits": {},
+            "merges": [],
+        }
+        window.raw_performances = [self.build_raw_performance("set-a", "dance")]
+
+        window.rebuild_display_sets()
+
+        self.assertEqual(len(window.display_sets), 1)
+        display_set = window.display_sets[0]
+        self.assertEqual(display_set["segment_type"], "ceremony")
+        self.assertEqual(display_set["type_code"], "C")
+        self.assertTrue(display_set["type_override_active"])
+        self.assertEqual(
+            [photo["segment_type"] for photo in display_set["photos"]],
+            ["ceremony", "ceremony"],
+        )
+        self.assertEqual([photo["type_code"] for photo in display_set["photos"]], ["C", "C"])
+        self.assertEqual(
+            [photo["type_override_active"] for photo in display_set["photos"]],
+            [True, True],
+        )
 
     def test_apply_display_set_merges_keeps_known_type_when_merging_known_and_empty(self):
         window = self.build_merge_test_window([{"target_set_id": "set-a", "source_set_id": "set-b"}])
