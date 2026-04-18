@@ -147,9 +147,113 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
             )
             self.assertEqual(run_row_count, 1)
             self.assertEqual(payload["performance_count"], 2)
+            self.assertEqual(payload["ml_model_run_id"], "")
             self.assertEqual([photo["relative_path"] for photo in payload["performances"][0]["photos"]], ["cam/a.hif", "cam/b.hif"])
             self.assertEqual([photo["relative_path"] for photo in payload["performances"][1]["photos"]], ["cam/c.hif", "cam/d.hif"])
             self.assertEqual(payload["performances"][0]["photos"][0]["proxy_path"], "embedded_jpg/preview/cam/a.jpg")
+
+    def test_build_gui_index_for_run_derives_segment_type_and_type_code_from_vlm_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            day_dir = Path(tmp) / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
+            photo_manifest_csv = workspace_dir / "media_manifest.csv"
+            embedded_manifest_csv = workspace_dir / "photo_embedded_manifest.csv"
+            thumb_dir = workspace_dir / "embedded_jpg" / "thumb" / "cam"
+            preview_dir = workspace_dir / "embedded_jpg" / "preview" / "cam"
+            thumb_dir.mkdir(parents=True)
+            preview_dir.mkdir(parents=True)
+            for name in ("a", "b", "c", "d"):
+                (thumb_dir / f"{name}.jpg").write_bytes(f"jpg-{name}".encode("utf-8"))
+                (preview_dir / f"{name}.jpg").write_bytes(f"preview-{name}".encode("utf-8"))
+            with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
+                writer.writeheader()
+                for index, name in enumerate(("a", "b", "c", "d")):
+                    writer.writerow(
+                        {
+                            "day": day_dir.name,
+                            "stream_id": "cam",
+                            "device": "cam",
+                            "media_type": "photo",
+                            "source_root": str(day_dir),
+                            "source_dir": str(day_dir / "cam"),
+                            "source_rel_dir": "cam",
+                            "path": str(day_dir / "cam" / f"{name}.hif"),
+                            "relative_path": f"cam/{name}.hif",
+                            "media_id": f"cam/{name}.hif",
+                            "photo_id": f"cam/{name}.hif",
+                            "filename": f"{name}.hif",
+                            "extension": ".hif",
+                            "capture_time_local": f"2026-03-23T10:00:0{index}",
+                            "capture_subsec": "000",
+                            "photo_order_index": str(index),
+                            "start_local": f"2026-03-23T10:00:0{index}",
+                            "start_epoch_ms": str(1000 + index * 1000),
+                            "timestamp_source": "test",
+                            "metadata_status": "ok",
+                        }
+                    )
+            with embedded_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["relative_path", "thumb_path", "preview_path"])
+                writer.writeheader()
+                for name in ("a", "b", "c", "d"):
+                    writer.writerow(
+                        {
+                            "relative_path": f"cam/{name}.hif",
+                            "thumb_path": f"embedded_jpg/thumb/cam/{name}.jpg",
+                            "preview_path": f"embedded_jpg/preview/cam/{name}.jpg",
+                        }
+                    )
+            with output_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=builder.probe.OUTPUT_HEADERS)
+                writer.writeheader()
+                row = {header: "" for header in builder.probe.OUTPUT_HEADERS}
+                row["run_id"] = "vlm-20260414053012"
+                row["generated_at"] = "2026-04-14T05:30:12+02:00"
+                row["image_variant"] = "thumb"
+                row["decision"] = "cut_after_2"
+                row["cut_left_relative_path"] = "cam/b.hif"
+                row["cut_right_relative_path"] = "cam/c.hif"
+                row["reason"] = "boundary"
+                row["response_status"] = "ok"
+                row["relative_paths_json"] = json.dumps(["cam/a.hif", "cam/b.hif", "cam/c.hif", "cam/d.hif"])
+                row["raw_response"] = json.dumps(
+                    {
+                        "boundary_after_frame": "frame_02",
+                        "left_segment_type": "dance",
+                        "right_segment_type": "ceremony",
+                        "frame_notes": {
+                            "frame_01": "a",
+                            "frame_02": "b",
+                            "frame_03": "c",
+                            "frame_04": "d",
+                            "frame_05": "e",
+                        },
+                        "primary_evidence": ["x"],
+                        "summary": "y",
+                    }
+                )
+                writer.writerow(row)
+            run_metadata = {
+                "run_id": "vlm-20260414053012",
+                "args": {"image_variant": "thumb", "effective_ml_model_run_id": "day-20260323"},
+                "embedded_manifest_csv": str(embedded_manifest_csv),
+                "photo_manifest_csv": str(photo_manifest_csv),
+                "output_csv": str(output_csv),
+            }
+            payload, _ = builder.build_gui_index_for_run(
+                day_dir=day_dir,
+                workspace_dir=workspace_dir,
+                run_metadata=run_metadata,
+                output_csv=output_csv,
+            )
+            self.assertEqual(payload["ml_model_run_id"], "day-20260323")
+            self.assertEqual(payload["performances"][0]["segment_type"], "dance")
+            self.assertEqual(payload["performances"][0]["type_code"], "D")
+            self.assertEqual(payload["performances"][1]["segment_type"], "ceremony")
+            self.assertEqual(payload["performances"][1]["type_code"], "C")
 
     def test_build_gui_index_for_run_keeps_rows_not_sent_to_vlm(self):
         with tempfile.TemporaryDirectory() as tmp:

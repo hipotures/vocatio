@@ -75,6 +75,15 @@ ML_SEGMENT_TYPE_TO_PROMPT_LABEL = {
     "ceremony": "ceremony",
     "warmup": "rehearsal",
 }
+GUI_TYPE_CODE_BY_SEGMENT_TYPE = {
+    "performance": "P",
+    "ceremony": "C",
+    "warmup": "W",
+    "dance": "D",
+    "audience": "A",
+    "rehearsal": "R",
+    "other": "O",
+}
 ML_MODEL_ROOT_DIR_PARTS = ("ml_boundary_corpus", "ml_boundary_models")
 EMBEDDED_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "thumb_path", "preview_path"})
 PHOTO_BOUNDARY_SCORES_REQUIRED_COLUMNS = frozenset(
@@ -1271,6 +1280,39 @@ def extract_json_object_text(raw_response: str) -> str:
     return text[start : end + 1]
 
 
+def extract_segment_types(raw_response: str) -> tuple[str, str]:
+    if not raw_response.strip():
+        return "", ""
+    try:
+        payload = json.loads(extract_json_object_text(raw_response))
+    except Exception:
+        return "", ""
+    left_segment_type = str(payload.get("left_segment_type", "") or "").strip()
+    right_segment_type = str(payload.get("right_segment_type", "") or "").strip()
+    if left_segment_type not in SEGMENT_TYPES:
+        left_segment_type = ""
+    if right_segment_type not in SEGMENT_TYPES:
+        right_segment_type = ""
+    return left_segment_type, right_segment_type
+
+
+def choose_segment_type(candidates: Sequence[str]) -> str:
+    normalized_candidates = [value for value in candidates if value]
+    if not normalized_candidates:
+        return ""
+    counts: Dict[str, int] = {}
+    for value in normalized_candidates:
+        counts[value] = counts.get(value, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return ""
+    return ranked[0][0]
+
+
+def segment_type_to_code(segment_type: str) -> str:
+    return GUI_TYPE_CODE_BY_SEGMENT_TYPE.get(segment_type.strip().lower(), "?")
+
+
 def parse_model_response(
     raw_response: str,
     *,
@@ -1570,6 +1612,7 @@ def build_gui_index_payload(
     result_rows: Sequence[Mapping[str, str]],
 ) -> Dict[str, Any]:
     cut_reasons_by_pair: Dict[tuple[str, str], List[str]] = {}
+    segment_types_by_pair: Dict[tuple[str, str], Dict[str, List[str]]] = {}
     for result_row in result_rows:
         if str(result_row.get("response_status", "")) != "ok":
             continue
@@ -1579,9 +1622,16 @@ def build_gui_index_payload(
             continue
         pair = (left_relative_path, right_relative_path)
         cut_reasons_by_pair.setdefault(pair, []).append(str(result_row.get("reason", "") or "").strip())
+        left_segment_type, right_segment_type = extract_segment_types(str(result_row.get("raw_response", "") or ""))
+        pair_segment_types = segment_types_by_pair.setdefault(pair, {"left": [], "right": []})
+        if left_segment_type:
+            pair_segment_types["left"].append(left_segment_type)
+        if right_segment_type:
+            pair_segment_types["right"].append(right_segment_type)
 
     segments: List[Dict[str, Any]] = []
     current_rows: List[Dict[str, Any]] = []
+    current_left_boundary_pair: Optional[tuple[str, str]] = None
     for row in ordered_rows:
         relative_path = str(row["relative_path"])
         is_new_segment_start = False
@@ -1597,17 +1647,22 @@ def build_gui_index_payload(
             segments.append(
                 {
                     "rows": current_rows,
+                    "left_boundary_pair": current_left_boundary_pair,
+                    "right_boundary_pair": split_pair,
                     "cut_hits": len(reasons),
                     "cut_reasons": reasons,
                 }
             )
             current_rows = [row]
+            current_left_boundary_pair = split_pair
             continue
         current_rows.append(row)
     if current_rows:
         segments.append(
             {
                 "rows": current_rows,
+                "left_boundary_pair": current_left_boundary_pair,
+                "right_boundary_pair": None,
                 "cut_hits": 0,
                 "cut_reasons": [],
             }
@@ -1619,6 +1674,16 @@ def build_gui_index_payload(
         rows = list(segment["rows"])
         if not rows:
             continue
+        segment_type_candidates: List[str] = []
+        left_boundary_pair = segment.get("left_boundary_pair")
+        if isinstance(left_boundary_pair, tuple):
+            pair_segment_types = segment_types_by_pair.get(left_boundary_pair, {})
+            segment_type_candidates.extend(pair_segment_types.get("right", []))
+        right_boundary_pair = segment.get("right_boundary_pair")
+        if isinstance(right_boundary_pair, tuple):
+            pair_segment_types = segment_types_by_pair.get(right_boundary_pair, {})
+            segment_type_candidates.extend(pair_segment_types.get("left", []))
+        segment_type = choose_segment_type(segment_type_candidates)
         photos: List[Dict[str, Any]] = []
         for row in rows:
             photos.append(
@@ -1649,6 +1714,8 @@ def build_gui_index_payload(
                 "duplicate_status": "normal",
                 "performance_start_local": str(rows[0].get("start_local", "") or ""),
                 "performance_end_local": str(rows[-1].get("start_local", "") or ""),
+                "segment_type": segment_type,
+                "type_code": segment_type_to_code(segment_type),
                 "segment_confidence": image_variant,
                 "vlm_boundary_hits": str(int(segment["cut_hits"])),
                 "vlm_boundary_reasons": list(segment["cut_reasons"]),
