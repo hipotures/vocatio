@@ -13,6 +13,7 @@ from rich.rule import Rule
 from rich.text import Text
 
 from lib.ml_boundary_metrics import predictor_metric_spec
+from lib.ml_boundary_training_options import resolve_training_options
 from lib.ml_boundary_training_data import (
     THUMBNAIL_IMAGE_COLUMNS,
     TRAIN_MODES,
@@ -107,6 +108,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Replace existing training artifacts in the output directory.",
     )
+    parser.add_argument(
+        "--preset",
+        help="AutoGluon training preset. Default resolves via ml_boundary_training_options.",
+    )
+    parser.add_argument(
+        "--train-minutes",
+        type=float,
+        help="Optional training time limit in minutes shared across both predictors.",
+    )
     return parser.parse_args(argv)
 
 
@@ -198,6 +208,10 @@ def load_multimodal_predictor_class():
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    training_options = resolve_training_options(
+        preset=args.preset,
+        train_minutes=args.train_minutes,
+    )
     dataset_path, split_manifest_path, output_dir = _resolve_corpus_context(
         dataset_value=args.dataset_path,
         workspace_dir_value=args.workspace_dir,
@@ -228,6 +242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             summary_output_dir=output_dir,
             training_bundle=training_bundle,
             mode=args.mode,
+            training_options=training_options,
         )
 
         atomic_write_json(
@@ -237,11 +252,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 split_manifest_path,
                 training_bundle.split_manifest_scope,
                 args.mode,
+                training_options,
             ),
         )
         atomic_write_json(
             staged_output_dir / TRAINING_METADATA_FILENAME,
-            _build_training_metadata_payload(output_dir, args.mode, training_bundle, final_artifact_paths),
+            _build_training_metadata_payload(
+                output_dir,
+                args.mode,
+                training_bundle,
+                final_artifact_paths,
+                training_options,
+            ),
         )
         atomic_write_json(
             staged_output_dir / FEATURE_COLUMNS_FILENAME,
@@ -258,7 +280,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         atomic_write_json(
             staged_output_dir / TRAINING_REPORT_FILENAME,
-            _build_training_report_payload(output_dir, args.mode, training_bundle, training_summary, final_artifact_paths),
+            _build_training_report_payload(
+                output_dir,
+                args.mode,
+                training_bundle,
+                training_summary,
+                final_artifact_paths,
+                training_options,
+            ),
         )
         _publish_staged_output(staged_output_dir, output_dir, overwrite=args.overwrite)
     finally:
@@ -271,6 +300,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             training_bundle=training_bundle,
             training_summary=training_summary,
             artifact_paths=final_artifact_paths,
+            training_options=training_options,
         )
     )
     return 0
@@ -343,12 +373,16 @@ def _build_training_plan_payload(
     split_manifest_path: Path,
     split_manifest_scope: str,
     mode: str,
+    training_options: dict[str, object],
 ) -> dict[str, object]:
     return {
         "mode": mode,
         "dataset_path": str(dataset_path),
         "split_manifest_path": str(split_manifest_path),
         "split_manifest_scope": split_manifest_scope,
+        "training_preset": training_options["training_preset"],
+        "train_minutes": training_options["train_minutes"],
+        "time_limit_seconds": training_options["time_limit_seconds"],
         "predictors": build_training_plan(mode),
         "image_feature_columns": image_feature_columns_for_mode(mode),
         "boundary_threshold_policy": default_boundary_threshold_policy(),
@@ -360,6 +394,7 @@ def _build_training_metadata_payload(
     mode: str,
     training_bundle: TrainingDataBundle,
     artifact_paths: dict[str, Path],
+    training_options: dict[str, object],
 ) -> dict[str, object]:
     return {
         "output_dir": str(output_dir),
@@ -369,6 +404,9 @@ def _build_training_metadata_payload(
         "validation_row_count": int(len(training_bundle.validation_rows)),
         "split_manifest_scope": training_bundle.split_manifest_scope,
         "split_counts_by_name": training_bundle.split_counts_by_name,
+        "training_preset": training_options["training_preset"],
+        "train_minutes": training_options["train_minutes"],
+        "time_limit_seconds": training_options["time_limit_seconds"],
         "missing_annotation_photo_count": training_bundle.missing_annotation_photo_count,
         "missing_annotation_candidate_count": training_bundle.missing_annotation_candidate_count,
         "artifacts": {
@@ -384,6 +422,7 @@ def _train_predictors(
     summary_output_dir: Path,
     training_bundle: TrainingDataBundle,
     mode: str,
+    training_options: dict[str, object],
 ) -> dict[str, object]:
     summary: dict[str, object] = {}
     predictor_specs = {
@@ -409,6 +448,7 @@ def _train_predictors(
             problem_type=predictor_plan["problem_type"],
             predictor_data=predictor_specs[predictor_name],
             mode=mode,
+            training_options=training_options,
         )
         evaluation_payload = predictor.evaluate(
             _to_model_frame(predictor_specs[predictor_name].validation_data)
@@ -433,6 +473,7 @@ def _build_training_report_payload(
     training_bundle: TrainingDataBundle,
     training_summary: dict[str, object],
     artifact_paths: dict[str, Path],
+    training_options: dict[str, object],
 ) -> dict[str, object]:
     return {
         "output_dir": str(output_dir),
@@ -440,6 +481,9 @@ def _build_training_report_payload(
         "split_manifest_scope": training_bundle.split_manifest_scope,
         "train_row_count": int(len(training_bundle.train_rows)),
         "validation_row_count": int(len(training_bundle.validation_rows)),
+        "training_preset": training_options["training_preset"],
+        "train_minutes": training_options["train_minutes"],
+        "time_limit_seconds": training_options["time_limit_seconds"],
         "shared_feature_count": len(training_bundle.shared_feature_columns),
         "image_feature_count": len(training_bundle.image_feature_columns),
         "missing_annotation_photo_count": training_bundle.missing_annotation_photo_count,
@@ -514,10 +558,17 @@ def _final_console_block(
     training_bundle: TrainingDataBundle,
     training_summary: dict[str, object],
     artifact_paths: dict[str, Path],
+    training_options: dict[str, object],
 ) -> Group:
     lines = [
         "Training complete",
         f"Output dir: {output_dir}",
+        (
+            "Training options: "
+            f"preset={training_options['training_preset']}, "
+            f"train_minutes={training_options['train_minutes']}, "
+            f"time_limit_seconds={training_options['time_limit_seconds']}"
+        ),
         _predictor_console_line(training_summary, "segment_type", "Segment type"),
         _predictor_console_line(training_summary, "boundary", "Boundary"),
         (
@@ -542,6 +593,7 @@ def _fit_predictor(
     problem_type: str,
     predictor_data,
     mode: str,
+    training_options: dict[str, object],
 ):
     metric_spec = predictor_metric_spec(predictor_name)
     if mode == "tabular_plus_thumbnail":
@@ -555,7 +607,8 @@ def _fit_predictor(
         predictor.fit(
             _to_model_frame(predictor_data.train_data),
             tuning_data=_to_model_frame(predictor_data.validation_data),
-            presets="medium_quality",
+            presets=training_options["training_preset"],
+            time_limit=training_options["time_limit_seconds"],
             column_types={
                 column_name: "image_path" for column_name in THUMBNAIL_IMAGE_COLUMNS
             },
@@ -572,7 +625,8 @@ def _fit_predictor(
     predictor.fit(
         _to_model_frame(predictor_data.train_data),
         tuning_data=_to_model_frame(predictor_data.validation_data),
-        presets="medium_quality",
+        presets=training_options["training_preset"],
+        time_limit=training_options["time_limit_seconds"],
     )
     return predictor
 

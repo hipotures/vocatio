@@ -351,6 +351,9 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "dataset_path": str(dataset_path),
         "split_manifest_path": str(split_manifest_path),
         "split_manifest_scope": "day_id",
+        "training_preset": "medium_quality",
+        "train_minutes": None,
+        "time_limit_seconds": None,
         "predictors": [
             {"name": "segment_type", "problem_type": "multiclass"},
             {"name": "boundary", "problem_type": "binary"},
@@ -366,6 +369,9 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "validation_row_count": 1,
         "split_manifest_scope": "day_id",
         "split_counts_by_name": {"train": 1, "validation": 1, "test": 1},
+        "training_preset": "medium_quality",
+        "train_minutes": None,
+        "time_limit_seconds": None,
         "missing_annotation_photo_count": 15,
         "missing_annotation_candidate_count": 3,
         "artifacts": {
@@ -417,6 +423,9 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "split_manifest_scope": "day_id",
         "train_row_count": 1,
         "validation_row_count": 1,
+        "training_preset": "medium_quality",
+        "train_minutes": None,
+        "time_limit_seconds": None,
         "shared_feature_count": len(feature_columns["shared_feature_columns"]),
         "image_feature_count": 0,
         "missing_annotation_photo_count": 15,
@@ -443,9 +452,22 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
             "boundary_model_dir": str(output_dir / "boundary_model"),
         },
     }
+    assert training_plan["training_preset"] == "medium_quality"
+    assert training_plan["train_minutes"] is None
+    assert training_plan["time_limit_seconds"] is None
+    assert training_metadata["training_preset"] == "medium_quality"
+    assert training_metadata["train_minutes"] is None
+    assert training_metadata["time_limit_seconds"] is None
+    assert training_report["training_preset"] == "medium_quality"
+    assert training_report["train_minutes"] is None
+    assert training_report["time_limit_seconds"] is None
     assert FakeTabularPredictor.instances[0].fit_calls[0]["train_rows"] == 1
     assert FakeTabularPredictor.instances[0].fit_calls[0]["validation_rows"] == 1
+    assert FakeTabularPredictor.instances[0].fit_calls[0]["presets"] == "medium_quality"
+    assert FakeTabularPredictor.instances[0].fit_calls[0]["time_limit"] is None
     assert FakeTabularPredictor.instances[0].eval_metric == "f1_macro"
+    assert FakeTabularPredictor.instances[1].fit_calls[0]["presets"] == "medium_quality"
+    assert FakeTabularPredictor.instances[1].fit_calls[0]["time_limit"] is None
     assert FakeTabularPredictor.instances[1].eval_metric == "f1"
     train_columns = FakeTabularPredictor.instances[0].fit_calls[0]["train_columns"]
     assert "gap_34" in train_columns
@@ -483,6 +505,78 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert rendered.index("Boundary:") < rendered.index("Feature counts:")
     assert rendered.index("Feature counts:") < rendered.index("Missing annotations:")
     assert rendered.index("Missing annotations:") < rendered.index("Report:")
+
+
+def test_train_cli_applies_explicit_training_options(monkeypatch, tmp_path: Path) -> None:
+    FakeTabularPredictor.instances.clear()
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    output_dir = tmp_path / "models" / "run-best-quality"
+    annotation_dir = tmp_path / DEFAULT_OUTPUT_DIRNAME
+    annotation_dir.mkdir()
+    _write_candidate_csv(
+        dataset_path,
+        [
+            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250326", segment_type="warmup", boundary="0"),
+        ],
+    )
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"day_id": "20250324", "split_name": "train"},
+            {"day_id": "20250325", "split_name": "validation"},
+            {"day_id": "20250326", "split_name": "test"},
+        ],
+    )
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_tabular_predictor_class",
+        lambda: FakeTabularPredictor,
+    )
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_multimodal_predictor_class",
+        lambda: FakeMultiModalPredictor,
+    )
+    rendered_console = _recording_console(width=60)
+    monkeypatch.setattr(train_ml_boundary_verifier, "console", rendered_console)
+
+    exit_code = main(
+        [
+            str(dataset_path),
+            "--split-manifest-csv",
+            str(split_manifest_path),
+            "--mode",
+            "tabular_only",
+            "--output-dir",
+            str(output_dir),
+            "--preset",
+            "best_quality",
+            "--train-minutes",
+            "10",
+        ]
+    )
+
+    assert exit_code == 0
+    assert FakeTabularPredictor.instances[0].fit_calls[0]["presets"] == "best_quality"
+    assert FakeTabularPredictor.instances[0].fit_calls[0]["time_limit"] == 600
+    assert FakeTabularPredictor.instances[1].fit_calls[0]["presets"] == "best_quality"
+    assert FakeTabularPredictor.instances[1].fit_calls[0]["time_limit"] == 600
+    training_plan = json.loads((output_dir / TRAINING_PLAN_FILENAME).read_text(encoding="utf-8"))
+    training_metadata = json.loads((output_dir / TRAINING_METADATA_FILENAME).read_text(encoding="utf-8"))
+    training_report = json.loads((output_dir / TRAINING_REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert training_plan["training_preset"] == "best_quality"
+    assert training_plan["train_minutes"] == 10.0
+    assert training_plan["time_limit_seconds"] == 600
+    assert training_metadata["training_preset"] == "best_quality"
+    assert training_metadata["train_minutes"] == 10.0
+    assert training_metadata["time_limit_seconds"] == 600
+    assert training_report["training_preset"] == "best_quality"
+    assert training_report["train_minutes"] == 10.0
+    assert training_report["time_limit_seconds"] == 600
+    rendered = rendered_console.export_text()
+    assert "preset=best_quality" in rendered
+    assert "time_limit_seconds=600" in rendered
 
 
 def test_train_cli_records_candidate_keyed_split_manifest_scope(
