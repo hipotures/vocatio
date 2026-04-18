@@ -6,6 +6,7 @@ import argparse
 import csv
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence
@@ -402,6 +403,13 @@ def resolve_ml_model_run(
         return "", None
     selected_dir = candidate_dirs[-1]
     return selected_dir.name, selected_dir.resolve()
+
+
+def build_default_output_filename(ml_model_run_id: str) -> str:
+    normalized_run_id = re.sub(r"[^A-Za-z0-9._-]+", "-", ml_model_run_id.strip()).strip("-")
+    if normalized_run_id:
+        return f"vlm_boundary_results.ml-{normalized_run_id}.csv"
+    return "vlm_boundary_results.ml-hints.csv"
 
 
 def read_embedded_manifest(path: Path) -> List[Dict[str, str]]:
@@ -2019,13 +2027,15 @@ def main() -> int:
         raise SystemExit(f"Day directory does not exist: {day_dir}")
     args = apply_vocatio_defaults(args, day_dir)
     workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
-    embedded_manifest_csv = resolve_path(workspace_dir, args.embedded_manifest_csv)
-    photo_manifest_csv = resolve_path(workspace_dir, args.photo_manifest_csv)
-    output_csv = resolve_path(workspace_dir, args.output)
     effective_ml_model_run_id, resolved_ml_model_dir = resolve_ml_model_run(
         workspace_dir,
         args.ml_model_run_id,
     )
+    if args.output == DEFAULT_OUTPUT_FILENAME:
+        args.output = build_default_output_filename(effective_ml_model_run_id)
+    embedded_manifest_csv = resolve_path(workspace_dir, args.embedded_manifest_csv)
+    photo_manifest_csv = resolve_path(workspace_dir, args.photo_manifest_csv)
+    output_csv = resolve_path(workspace_dir, args.output)
     if not embedded_manifest_csv.exists():
         raise SystemExit(f"Embedded manifest CSV does not exist: {embedded_manifest_csv}")
     if not photo_manifest_csv.exists():

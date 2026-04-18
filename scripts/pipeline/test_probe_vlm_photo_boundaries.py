@@ -281,6 +281,20 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 ("missing-run", None),
             )
 
+    def test_build_default_output_filename_uses_ml_run_suffix(self):
+        self.assertEqual(
+            probe.build_default_output_filename("day-20260323-best-10m"),
+            "vlm_boundary_results.ml-day-20260323-best-10m.csv",
+        )
+        self.assertEqual(
+            probe.build_default_output_filename(""),
+            "vlm_boundary_results.ml-hints.csv",
+        )
+        self.assertEqual(
+            probe.build_default_output_filename("day/20260323 best"),
+            "vlm_boundary_results.ml-day-20260323-best.csv",
+        )
+
     def test_build_ml_hint_lines_renders_task_language(self):
         lines = probe.build_ml_hint_lines(
             probe.MlHintPrediction(
