@@ -17,6 +17,8 @@ autogluon = [
     "torch==2.9.0+cu128",
     "torchvision==0.24.0+cu128",
     "autogluon==1.5.0",
+    "fastai>=2.3.1,<2.9",
+    "spacy<3.9",
 ]
 
 [tool.uv]

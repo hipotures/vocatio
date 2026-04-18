@@ -5494,6 +5494,8 @@ dependencies = [
 [package.dev-dependencies]
 autogluon = [
     { name = "autogluon" },
+    { name = "fastai" },
+    { name = "spacy" },
     { name = "torch", version = "2.9.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
     { name = "torchvision", version = "0.24.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
 ]
@@ -5512,6 +5514,8 @@ requires-dist = [
 [package.metadata.requires-dev]
 autogluon = [
     { name = "autogluon", specifier = "==1.5.0" },
+    { name = "fastai", specifier = ">=2.3.1,<2.9" },
+    { name = "spacy", specifier = "<3.9" },
     { name = "torch", specifier = "==2.9.0+cu128", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchvision", specifier = "==0.24.0+cu128", index = "https://download.pytorch.org/whl/cu128" },
 ]
