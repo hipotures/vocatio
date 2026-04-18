@@ -70,6 +70,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QScrollArea,
     QSplitter,
     QStatusBar,
@@ -574,21 +575,116 @@ def flatten_info_sections_to_plain_text(sections: Sequence[Mapping[str, Any]]) -
     return "\n\n".join(bodies)
 
 
-def build_image_only_set_info_text(
+def join_info_section_lines(lines: Sequence[str]) -> str:
+    return "\n".join(lines).rstrip()
+
+
+def append_info_block(lines: List[str], block_lines: Sequence[str]) -> None:
+    if not block_lines:
+        return
+    if lines:
+        lines.append("")
+    lines.extend(block_lines)
+
+
+def build_diagnostics_unavailable_body(diagnostics: Mapping[str, Any]) -> str:
+    error_text = str(diagnostics.get("error", "") or "").strip()
+    if error_text:
+        return f"Diagnostics unavailable: {error_text}"
+    return "Diagnostics unavailable."
+
+
+def should_include_ml_hints_section(
+    ml_diagnostics: Mapping[str, Any],
+    hint_rows: Sequence[Optional[Mapping[str, Any]]],
+) -> bool:
+    if any(row is not None for row in hint_rows):
+        return True
+    if str(ml_diagnostics.get("error", "") or "").strip():
+        return True
+    return bool(ml_diagnostics.get("available"))
+
+
+def build_image_only_set_summary_body(
     display_set: Mapping[str, Any],
-    diagnostics: Mapping[str, Any],
     *,
     no_photos_confirmed: bool,
 ) -> str:
+    return join_info_section_lines(
+        [
+            f"Set: {display_set['display_name']}",
+            f"Original performance: {display_set['original_performance_number']}",
+            f"Set ID: {display_set['set_id']}",
+            f"Base set ID: {display_set['base_set_id']}",
+            f"Type: {format_value(display_set.get('type_code'))}",
+            f"Type override: {'yes' if display_set.get('type_override_active') else 'no'}",
+            f"Duplicate: {display_set['duplicate_status']}",
+            f"Timeline: {display_set['timeline_status']}",
+            f"Photos: {display_set['photo_count']}",
+            f"Review: {display_set['review_count']}",
+            f"Duration: {display_set['duration_seconds']} s",
+            f"Max photo gap: {display_set['max_internal_photo_gap_seconds']} s",
+            f"No photos confirmed: {'yes' if no_photos_confirmed else 'no'}",
+            f"Start: {display_set['performance_start_local']}",
+            f"End: {display_set['performance_end_local']}",
+            f"First photo: {format_value(display_set.get('first_photo_local'))}",
+            f"Last photo: {format_value(display_set.get('last_photo_local'))}",
+            f"Manual merge: {'yes' if display_set.get('merged_manually') else 'no'}",
+        ]
+    )
+
+
+def build_image_only_set_boundary_diagnostics_body(
+    display_set: Mapping[str, Any],
+    diagnostics: Mapping[str, Any],
+) -> str:
+    if not diagnostics.get("available"):
+        return build_diagnostics_unavailable_body(diagnostics)
     photos = list(display_set.get("photos", []))
     base_set_id = str(display_set.get("base_set_id", "") or "")
-    segment_row = diagnostics.get("segment_by_set_id", {}).get(base_set_id) if diagnostics.get("available") else None
-    ml_hint_by_pair = diagnostics.get("ml_hint_by_pair", {})
-    ml_diagnostics = diagnostics.get("ml_diagnostics", {})
+    segment_row = diagnostics.get("segment_by_set_id", {}).get(base_set_id)
+    first_relative_path = str(photos[0].get("relative_path", "") or "") if photos else ""
+    last_relative_path = str(photos[-1].get("relative_path", "") or "") if photos else ""
+    left_boundary = diagnostics.get("boundary_by_right_relative_path", {}).get(first_relative_path)
+    right_boundary = diagnostics.get("boundary_by_left_relative_path", {}).get(last_relative_path)
+    internal_boundaries: List[Mapping[str, Any]] = []
+    boundary_by_pair = diagnostics.get("boundary_by_pair", {})
+    for index in range(len(photos) - 1):
+        left_relative_path = str(photos[index].get("relative_path", "") or "")
+        right_relative_path = str(photos[index + 1].get("relative_path", "") or "")
+        boundary_row = boundary_by_pair.get((left_relative_path, right_relative_path))
+        if boundary_row:
+            internal_boundaries.append(boundary_row)
+    internal_boundaries.sort(key=lambda row: float(str(row.get("boundary_score", "0") or "0")), reverse=True)
+    lines = [
+        f"Segment confidence: {format_value(segment_row.get('segment_confidence') if segment_row else '')}",
+        f"Segment index: {format_value(segment_row.get('segment_index') if segment_row else '')}",
+    ]
+    append_info_block(lines, format_boundary_section("Boundary before set", left_boundary))
+    append_info_block(lines, format_boundary_section("Boundary after set", right_boundary))
+    append_info_block(lines, ["Top internal boundaries"])
+    if internal_boundaries:
+        for boundary_row in internal_boundaries[:3]:
+            append_info_block(
+                lines,
+                ["  " + line if line else "" for line in format_boundary_section("", boundary_row)[1:]],
+            )
+    else:
+        lines.append("  none")
+    return join_info_section_lines(lines)
+
+
+def build_image_only_set_ml_hints_body(
+    display_set: Mapping[str, Any],
+    diagnostics: Mapping[str, Any],
+) -> str:
+    photos = list(display_set.get("photos", []))
     first_relative_path = str(photos[0].get("relative_path", "") or "") if photos else ""
     last_relative_path = str(photos[-1].get("relative_path", "") or "") if photos else ""
     left_boundary = diagnostics.get("boundary_by_right_relative_path", {}).get(first_relative_path) if diagnostics.get("available") else None
     right_boundary = diagnostics.get("boundary_by_left_relative_path", {}).get(last_relative_path) if diagnostics.get("available") else None
+    ml_hint_by_pair = diagnostics.get("ml_hint_by_pair", {})
+    ml_diagnostics = diagnostics.get("ml_diagnostics", {})
     left_ml_hint = None
     right_ml_hint = None
     if isinstance(left_boundary, Mapping):
@@ -605,86 +701,54 @@ def build_image_only_set_info_text(
                 str(right_boundary.get("right_relative_path", "") or "").strip(),
             )
         )
-    internal_boundaries: List[Mapping[str, str]] = []
-    if diagnostics.get("available"):
-        boundary_by_pair = diagnostics.get("boundary_by_pair", {})
-        for index in range(len(photos) - 1):
-            left_relative_path = str(photos[index].get("relative_path", "") or "")
-            right_relative_path = str(photos[index + 1].get("relative_path", "") or "")
-            boundary_row = boundary_by_pair.get((left_relative_path, right_relative_path))
-            if boundary_row:
-                internal_boundaries.append(boundary_row)
-        internal_boundaries.sort(key=lambda row: float(str(row.get("boundary_score", "0") or "0")), reverse=True)
-    lines = [
-        f"Set: {display_set['display_name']}",
-        f"Original performance: {display_set['original_performance_number']}",
-        f"Set ID: {display_set['set_id']}",
-        f"Base set ID: {display_set['base_set_id']}",
-        f"Type: {format_value(display_set.get('type_code'))}",
-        f"Type override: {'yes' if display_set.get('type_override_active') else 'no'}",
-        f"Duplicate: {display_set['duplicate_status']}",
-        f"Timeline: {display_set['timeline_status']}",
-        f"Photos: {display_set['photo_count']}",
-        f"Review: {display_set['review_count']}",
-        f"Duration: {display_set['duration_seconds']} s",
-        f"Max photo gap: {display_set['max_internal_photo_gap_seconds']} s",
-        f"No photos confirmed: {'yes' if no_photos_confirmed else 'no'}",
-        f"Start: {display_set['performance_start_local']}",
-        f"End: {display_set['performance_end_local']}",
-        f"First photo: {format_value(display_set.get('first_photo_local'))}",
-        f"Last photo: {format_value(display_set.get('last_photo_local'))}",
-        f"Segment confidence: {format_value(segment_row.get('segment_confidence') if segment_row else '')}",
-        f"Segment index: {format_value(segment_row.get('segment_index') if segment_row else '')}",
-        f"Manual merge: {'yes' if display_set.get('merged_manually') else 'no'}",
-    ]
-    if diagnostics.get("available"):
-        lines.append("")
-        lines.extend(format_boundary_section("Boundary before set", left_boundary))
-        lines.append("")
-        lines.extend(format_ml_hint_section("ML hint before set", left_ml_hint, ml_diagnostics))
-        lines.append("")
-        lines.extend(format_boundary_section("Boundary after set", right_boundary))
-        lines.append("")
-        lines.extend(format_ml_hint_section("ML hint after set", right_ml_hint, ml_diagnostics))
-        lines.append("")
-        lines.append("Top internal boundaries")
-        if internal_boundaries:
-            for boundary_row in internal_boundaries[:3]:
-                lines.extend("  " + line if line else "" for line in format_boundary_section("", boundary_row)[1:])
-                lines.append("")
-            if lines[-1] == "":
-                lines.pop()
-        else:
-            lines.append("  none")
-    elif diagnostics.get("error"):
-        lines.extend(["", f"Diagnostics: {diagnostics['error']}"])
-    return "\n".join(lines)
+    if not should_include_ml_hints_section(ml_diagnostics, [left_ml_hint, right_ml_hint]):
+        return ""
+    lines: List[str] = []
+    append_info_block(lines, format_ml_hint_section("ML hint before set", left_ml_hint, ml_diagnostics))
+    append_info_block(lines, format_ml_hint_section("ML hint after set", right_ml_hint, ml_diagnostics))
+    return join_info_section_lines(lines)
 
 
-def build_image_only_set_info_sections(
-    display_set: Mapping[str, Any],
+def build_image_only_photo_summary_body(photo: Mapping[str, Any]) -> str:
+    return join_info_section_lines(
+        [
+            f"Set: {photo['display_name']}",
+            f"Original performance: {photo['original_performance_number']}",
+            f"Base set: {photo['base_set_id']}",
+            f"Type: {format_value(photo.get('type_code'))}",
+            f"Type override: {'yes' if photo.get('type_override_active') else 'no'}",
+            f"Relative path: {format_value(photo.get('relative_path'))}",
+            f"File: {photo['filename']}",
+            f"Time: {photo['adjusted_start_local']}",
+            f"Status: {photo['assignment_status']}",
+            f"Reason: {format_value(photo.get('assignment_reason'))}",
+            f"Nearest boundary: {format_value(photo.get('seconds_to_nearest_boundary'))} s",
+            f"Stream: {format_value(photo.get('stream_id'))}",
+            f"Device: {format_value(photo.get('device'))}",
+            f"Proxy exists: {'yes' if photo['proxy_exists'] else 'no'}",
+        ]
+    )
+
+
+def build_image_only_photo_boundary_diagnostics_body(
+    photo: Mapping[str, Any],
     diagnostics: Mapping[str, Any],
-    *,
-    no_photos_confirmed: bool,
-    show_manual_ml_prediction: bool,
-    manual_prediction_state: Optional[Mapping[str, Any]],
-) -> List[Dict[str, str]]:
-    _ = show_manual_ml_prediction
-    _ = manual_prediction_state
-    return [
-        build_info_section(
-            "Set summary",
-            "Basic set metadata and review state.",
-            build_image_only_set_info_text(
-                display_set,
-                diagnostics,
-                no_photos_confirmed=no_photos_confirmed,
-            ),
-        )
-    ]
+) -> str:
+    if not diagnostics.get("available"):
+        return build_diagnostics_unavailable_body(diagnostics)
+    relative_path = str(photo.get("relative_path", "") or "")
+    left_boundary = diagnostics.get("boundary_by_left_relative_path", {}).get(relative_path)
+    right_boundary = diagnostics.get("boundary_by_right_relative_path", {}).get(relative_path)
+    lines: List[str] = []
+    append_info_block(lines, format_boundary_section("Boundary after photo", left_boundary))
+    append_info_block(lines, format_boundary_section("Boundary before photo", right_boundary))
+    return join_info_section_lines(lines)
 
 
-def build_image_only_photo_info_text(photo: Mapping[str, Any], diagnostics: Mapping[str, Any]) -> str:
+def build_image_only_photo_ml_hints_body(
+    photo: Mapping[str, Any],
+    diagnostics: Mapping[str, Any],
+) -> str:
     relative_path = str(photo.get("relative_path", "") or "")
     left_boundary = diagnostics.get("boundary_by_left_relative_path", {}).get(relative_path) if diagnostics.get("available") else None
     right_boundary = diagnostics.get("boundary_by_right_relative_path", {}).get(relative_path) if diagnostics.get("available") else None
@@ -706,37 +770,15 @@ def build_image_only_photo_info_text(photo: Mapping[str, Any], diagnostics: Mapp
                 str(right_boundary.get("right_relative_path", "") or "").strip(),
             )
         )
-    lines = [
-        f"Set: {photo['display_name']}",
-        f"Original performance: {photo['original_performance_number']}",
-        f"Base set: {photo['base_set_id']}",
-        f"Type: {format_value(photo.get('type_code'))}",
-        f"Type override: {'yes' if photo.get('type_override_active') else 'no'}",
-        f"Relative path: {format_value(photo.get('relative_path'))}",
-        f"File: {photo['filename']}",
-        f"Time: {photo['adjusted_start_local']}",
-        f"Status: {photo['assignment_status']}",
-        f"Reason: {format_value(photo.get('assignment_reason'))}",
-        f"Nearest boundary: {format_value(photo.get('seconds_to_nearest_boundary'))} s",
-        f"Stream: {format_value(photo.get('stream_id'))}",
-        f"Device: {format_value(photo.get('device'))}",
-        f"Proxy exists: {'yes' if photo['proxy_exists'] else 'no'}",
-    ]
-    if diagnostics.get("available"):
-        lines.append("")
-        lines.extend(format_boundary_section("Boundary after photo", left_boundary))
-        lines.append("")
-        lines.extend(format_ml_hint_section("ML hint after photo", left_ml_hint, ml_diagnostics))
-        lines.append("")
-        lines.extend(format_boundary_section("Boundary before photo", right_boundary))
-        lines.append("")
-        lines.extend(format_ml_hint_section("ML hint before photo", right_ml_hint, ml_diagnostics))
-    elif diagnostics.get("error"):
-        lines.extend(["", f"Diagnostics: {diagnostics['error']}"])
-    return "\n".join(lines)
+    if not should_include_ml_hints_section(ml_diagnostics, [left_ml_hint, right_ml_hint]):
+        return ""
+    lines: List[str] = []
+    append_info_block(lines, format_ml_hint_section("ML hint after photo", left_ml_hint, ml_diagnostics))
+    append_info_block(lines, format_ml_hint_section("ML hint before photo", right_ml_hint, ml_diagnostics))
+    return join_info_section_lines(lines)
 
 
-def build_image_only_multi_photo_info_text(photos: Sequence[Mapping[str, Any]], diagnostics: Mapping[str, Any]) -> str:
+def build_image_only_multi_photo_summary_body(photos: Sequence[Mapping[str, Any]]) -> str:
     sorted_photos = sorted(
         photos,
         key=lambda photo: (
@@ -749,9 +791,9 @@ def build_image_only_multi_photo_info_text(photos: Sequence[Mapping[str, Any]], 
         f"Selected photos: {len(sorted_photos)}",
         f"First time: {format_value(sorted_photos[0].get('adjusted_start_local'))}",
         f"Last time: {format_value(sorted_photos[-1].get('adjusted_start_local'))}",
+        "",
+        "Selected photo rows",
     ]
-    lines.append("")
-    lines.append("Selected photo rows")
     for photo in sorted_photos:
         lines.append(
             "  "
@@ -764,28 +806,214 @@ def build_image_only_multi_photo_info_text(photos: Sequence[Mapping[str, Any]], 
                 ]
             )
         )
-    if diagnostics.get("available"):
-        boundary_by_pair = diagnostics.get("boundary_by_pair", {})
-        adjacent_boundaries = []
-        for index in range(len(sorted_photos) - 1):
-            left_relative_path = str(sorted_photos[index].get("relative_path", "") or "")
-            right_relative_path = str(sorted_photos[index + 1].get("relative_path", "") or "")
-            boundary_row = boundary_by_pair.get((left_relative_path, right_relative_path))
-            if boundary_row:
-                adjacent_boundaries.append(boundary_row)
-        lines.append("")
-        lines.append("Selected boundaries")
-        if adjacent_boundaries:
-            for boundary_row in adjacent_boundaries:
-                lines.extend("  " + line if line else "" for line in format_boundary_section("", boundary_row)[1:])
-                lines.append("")
-            if lines[-1] == "":
-                lines.pop()
-        else:
-            lines.append("  none")
-    elif diagnostics.get("error"):
-        lines.extend(["", f"Diagnostics: {diagnostics['error']}"])
-    return "\n".join(lines)
+    return join_info_section_lines(lines)
+
+
+def build_image_only_multi_photo_boundary_diagnostics_body(
+    photos: Sequence[Mapping[str, Any]],
+    diagnostics: Mapping[str, Any],
+) -> str:
+    if not diagnostics.get("available"):
+        return build_diagnostics_unavailable_body(diagnostics)
+    sorted_photos = sorted(
+        photos,
+        key=lambda photo: (
+            str(photo.get("adjusted_start_local", "")),
+            str(photo.get("relative_path", "")),
+            str(photo.get("filename", "")),
+        ),
+    )
+    lines = ["Selected boundaries"]
+    boundary_by_pair = diagnostics.get("boundary_by_pair", {})
+    adjacent_boundaries = []
+    for index in range(len(sorted_photos) - 1):
+        left_relative_path = str(sorted_photos[index].get("relative_path", "") or "")
+        right_relative_path = str(sorted_photos[index + 1].get("relative_path", "") or "")
+        boundary_row = boundary_by_pair.get((left_relative_path, right_relative_path))
+        if boundary_row:
+            adjacent_boundaries.append(boundary_row)
+    if adjacent_boundaries:
+        for boundary_row in adjacent_boundaries:
+            append_info_block(
+                lines,
+                ["  " + line if line else "" for line in format_boundary_section("", boundary_row)[1:]],
+            )
+    else:
+        lines.append("  none")
+    return join_info_section_lines(lines)
+
+
+def build_image_only_photo_info_sections(
+    photo: Mapping[str, Any],
+    diagnostics: Mapping[str, Any],
+) -> List[Dict[str, str]]:
+    sections = [
+        build_info_section(
+            "Photo summary",
+            "Basic photo metadata and assignment state.",
+            build_image_only_photo_summary_body(photo),
+            key="photo_summary",
+        ),
+        build_info_section(
+            "Boundary diagnostics",
+            "Boundary diagnostics around this photo.",
+            build_image_only_photo_boundary_diagnostics_body(photo, diagnostics),
+            key="boundary_diagnostics",
+        ),
+    ]
+    ml_hints_body = build_image_only_photo_ml_hints_body(photo, diagnostics)
+    if ml_hints_body:
+        sections.append(
+            build_info_section(
+                "ML hints",
+                "ML model hints around this photo.",
+                ml_hints_body,
+                key="ml_hints",
+            )
+        )
+    return sections
+
+
+def build_image_only_multi_photo_info_sections(
+    photos: Sequence[Mapping[str, Any]],
+    diagnostics: Mapping[str, Any],
+) -> List[Dict[str, str]]:
+    return [
+        build_info_section(
+            "Selection summary",
+            "Overview of the current photo selection.",
+            build_image_only_multi_photo_summary_body(photos),
+            key="selection_summary",
+        ),
+        build_info_section(
+            "Boundary diagnostics",
+            "Boundaries across the current photo selection.",
+            build_image_only_multi_photo_boundary_diagnostics_body(photos, diagnostics),
+            key="boundary_diagnostics",
+        ),
+    ]
+
+
+def build_image_only_set_info_text(
+    display_set: Mapping[str, Any],
+    diagnostics: Mapping[str, Any],
+    *,
+    no_photos_confirmed: bool,
+) -> str:
+    return flatten_info_sections_to_plain_text(
+        build_image_only_set_info_sections(
+            display_set,
+            diagnostics,
+            no_photos_confirmed=no_photos_confirmed,
+            show_manual_ml_prediction=False,
+            manual_prediction_state=None,
+        )
+    )
+
+
+def build_image_only_set_info_sections(
+    display_set: Mapping[str, Any],
+    diagnostics: Mapping[str, Any],
+    *,
+    no_photos_confirmed: bool,
+    show_manual_ml_prediction: bool,
+    manual_prediction_state: Optional[Mapping[str, Any]],
+) -> List[Dict[str, str]]:
+    _ = show_manual_ml_prediction
+    _ = manual_prediction_state
+    sections = [
+        build_info_section(
+            "Set summary",
+            "Basic set metadata and review state.",
+            build_image_only_set_summary_body(
+                display_set,
+                no_photos_confirmed=no_photos_confirmed,
+            ),
+            key="set_summary",
+        ),
+        build_info_section(
+            "Boundary diagnostics",
+            "Boundary and segment diagnostics for this set.",
+            build_image_only_set_boundary_diagnostics_body(display_set, diagnostics),
+            key="boundary_diagnostics",
+        )
+    ]
+    ml_hints_body = build_image_only_set_ml_hints_body(display_set, diagnostics)
+    if ml_hints_body:
+        sections.append(
+            build_info_section(
+                "ML hints",
+                "ML model hints around this set.",
+                ml_hints_body,
+                key="ml_hints",
+            )
+        )
+    return sections
+
+
+def build_image_only_photo_info_text(photo: Mapping[str, Any], diagnostics: Mapping[str, Any]) -> str:
+    return flatten_info_sections_to_plain_text(build_image_only_photo_info_sections(photo, diagnostics))
+
+
+def build_image_only_multi_photo_info_text(photos: Sequence[Mapping[str, Any]], diagnostics: Mapping[str, Any]) -> str:
+    return flatten_info_sections_to_plain_text(build_image_only_multi_photo_info_sections(photos, diagnostics))
+
+
+def build_default_set_info_sections(
+    display_set: Mapping[str, Any],
+    *,
+    no_photos_confirmed: bool,
+    first_photo_text: str,
+    last_photo_text: str,
+) -> List[Dict[str, str]]:
+    return [
+        build_info_section(
+            "Set summary",
+            "Basic set metadata and review state.",
+            join_info_section_lines(
+                [
+                    f"Set: {display_set['display_name']}",
+                    f"Original performance: {display_set['original_performance_number']}",
+                    f"Set ID: {display_set['set_id']}",
+                    f"Duplicate: {display_set['duplicate_status']}",
+                    f"Photos: {display_set['photo_count']}",
+                    f"Review: {display_set['review_count']}",
+                    f"Duration: {display_set['duration_seconds']} s",
+                    f"Max photo gap: {display_set['max_internal_photo_gap_seconds']} s",
+                    f"No photos confirmed: {'yes' if no_photos_confirmed else 'no'}",
+                    f"Timeline: {display_set['timeline_status']}",
+                    f"Start: {display_set['performance_start_local']}",
+                    f"End: {display_set['performance_end_local']}",
+                    f"First photo: {first_photo_text}",
+                    f"Last photo: {last_photo_text}",
+                ]
+            ),
+            key="set_summary",
+        )
+    ]
+
+
+def build_default_photo_info_sections(photo: Mapping[str, Any]) -> List[Dict[str, str]]:
+    return [
+        build_info_section(
+            "Photo summary",
+            "Basic photo metadata and assignment state.",
+            join_info_section_lines(
+                [
+                    f"Set: {photo['display_name']}",
+                    f"Original performance: {photo['original_performance_number']}",
+                    f"Base set: {photo['base_set_id']}",
+                    f"File: {photo['filename']}",
+                    f"Time: {photo['adjusted_start_local']}",
+                    f"Status: {photo['assignment_status']}",
+                    f"Reason: {photo['assignment_reason']}",
+                    f"Nearest boundary: {photo['seconds_to_nearest_boundary']} s",
+                    f"Proxy exists: {'yes' if photo['proxy_exists'] else 'no'}",
+                ]
+            ),
+            key="photo_summary",
+        )
+    ]
 
 
 def determine_selected_preview_paths(
@@ -1233,10 +1461,15 @@ class MainWindow(QMainWindow):
         image_pair_layout.addWidget(self.right_image_panel, 1)
         self.image_pair_widget.setLayout(image_pair_layout)
 
-        self.meta_label = QLabel("")
-        self.meta_label.setWordWrap(True)
-        self.meta_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.meta_label.setStyleSheet("padding: 8px;")
+        self.info_content = QWidget()
+        self.info_layout = QVBoxLayout()
+        self.info_layout.setContentsMargins(12, 12, 12, 12)
+        self.info_layout.setSpacing(12)
+        self.info_content.setLayout(self.info_layout)
+
+        self.info_scroll = QScrollArea()
+        self.info_scroll.setWidgetResizable(True)
+        self.info_scroll.setWidget(self.info_content)
 
         splitter = QSplitter()
         splitter.addWidget(self.tree)
@@ -1245,7 +1478,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(splitter)
 
         self.info_dock = QDockWidget("Info", self)
-        self.info_dock.setWidget(self.meta_label)
+        self.info_dock.setWidget(self.info_scroll)
         self.info_dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
         self.addDockWidget(Qt.RightDockWidgetArea, self.info_dock)
         self.info_dock.hide()
@@ -2264,7 +2497,9 @@ class MainWindow(QMainWindow):
             display_set = top_level_item.data(0, Qt.UserRole)
             self.mark_set_viewed(display_set["set_id"])
         if len(selected_photos) >= 2 and self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
-            self.meta_label.setText(build_image_only_multi_photo_info_text(selected_photos, self.image_only_diagnostics))
+            self.render_info_sections(
+                build_image_only_multi_photo_info_sections(selected_photos, self.image_only_diagnostics)
+            )
             current_photo = item.data(0, Qt.UserRole) if item.parent() is not None else selected_photos[0]
             left_path, right_path, left_title, right_title = determine_selected_preview_paths(
                 selected_photos=selected_photos,
@@ -2292,30 +2527,16 @@ class MainWindow(QMainWindow):
                     show_manual_ml_prediction=False,
                     manual_prediction_state=None,
                 )
-                self.meta_label.setText(
-                    flatten_info_sections_to_plain_text(sections)
-                )
+                self.render_info_sections(sections)
             else:
                 first_photo_text = self.display_time(display_set["first_photo_local"]) if display_set["first_photo_local"] else "-"
                 last_photo_text = self.display_time(display_set["last_photo_local"]) if display_set["last_photo_local"] else "-"
-                self.meta_label.setText(
-                    "\n".join(
-                        [
-                            f"Set: {display_set['display_name']}",
-                            f"Original performance: {display_set['original_performance_number']}",
-                        f"Set ID: {display_set['set_id']}",
-                        f"Duplicate: {display_set['duplicate_status']}",
-                        f"Photos: {display_set['photo_count']}",
-                        f"Review: {display_set['review_count']}",
-                        f"Duration: {display_set['duration_seconds']} s",
-                        f"Max photo gap: {display_set['max_internal_photo_gap_seconds']} s",
-                        f"No photos confirmed: {'yes' if self.review_entry(display_set['set_id']).get('no_photos_confirmed') else 'no'}",
-                        f"Timeline: {display_set['timeline_status']}",
-                        f"Start: {display_set['performance_start_local']}",
-                        f"End: {display_set['performance_end_local']}",
-                        f"First photo: {first_photo_text}",
-                        f"Last photo: {last_photo_text}",
-                        ]
+                self.render_info_sections(
+                    build_default_set_info_sections(
+                        display_set,
+                        no_photos_confirmed=bool(self.review_entry(display_set["set_id"]).get("no_photos_confirmed")),
+                        first_photo_text=first_photo_text,
+                        last_photo_text=last_photo_text,
                     )
                 )
             self.statusBar().showMessage(
@@ -2328,23 +2549,9 @@ class MainWindow(QMainWindow):
             should_show_right_preview(view_mode=self.view_mode, selected_photo_count=len(selected_photos))
         )
         if self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
-            self.meta_label.setText(build_image_only_photo_info_text(photo, self.image_only_diagnostics))
+            self.render_info_sections(build_image_only_photo_info_sections(photo, self.image_only_diagnostics))
         else:
-            self.meta_label.setText(
-                "\n".join(
-                    [
-                        f"Set: {photo['display_name']}",
-                        f"Original performance: {photo['original_performance_number']}",
-                        f"Base set: {photo['base_set_id']}",
-                        f"File: {photo['filename']}",
-                        f"Time: {photo['adjusted_start_local']}",
-                        f"Status: {photo['assignment_status']}",
-                        f"Reason: {photo['assignment_reason']}",
-                        f"Nearest boundary: {photo['seconds_to_nearest_boundary']} s",
-                        f"Proxy exists: {'yes' if photo['proxy_exists'] else 'no'}",
-                    ]
-                )
-            )
+            self.render_info_sections(build_default_photo_info_sections(photo))
         self.statusBar().showMessage(
             f"Set {photo['display_name']} - {photo['filename']} - {photo['assignment_status']}"
         )
@@ -2361,6 +2568,50 @@ class MainWindow(QMainWindow):
         dual = should_show_right_preview(view_mode=self.view_mode, selected_photo_count=len(self.selected_photo_entries()))
         self.right_image_panel.setVisible(dual)
         self.statusBar().showMessage(f"View mode {self.view_mode} | I toggles info panel")
+
+    def build_info_section_widget(self, section: Mapping[str, Any]) -> QWidget:
+        card = QWidget()
+        card_layout = QVBoxLayout()
+        card_layout.setContentsMargins(10, 10, 10, 10)
+        card_layout.setSpacing(6)
+
+        title_button = QPushButton(str(section.get("title", "") or ""))
+        title_button.setFlat(True)
+        title_button.setCursor(Qt.PointingHandCursor)
+        title_button.setStyleSheet("text-align: left; font-weight: 700; padding: 0;")
+        title_button.clicked.connect(lambda _checked=False, current_section=dict(section): self.copy_info_section_body(current_section))
+        card_layout.addWidget(title_button)
+
+        description = str(section.get("description", "") or "").strip()
+        if description:
+            description_label = QLabel(description)
+            description_label.setWordWrap(True)
+            description_label.setStyleSheet("color: #666;")
+            card_layout.addWidget(description_label)
+
+        body_label = QLabel(str(section.get("body", "") or ""))
+        body_label.setWordWrap(True)
+        body_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        body_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        body_label.setStyleSheet("padding-top: 2px;")
+        card_layout.addWidget(body_label)
+
+        card.setLayout(card_layout)
+        return card
+
+    def render_info_sections(self, sections: Sequence[Mapping[str, Any]]) -> None:
+        while self.info_layout.count():
+            item = self.info_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for section in sections:
+            self.info_layout.addWidget(self.build_info_section_widget(section))
+        self.info_layout.addStretch(1)
+
+    def copy_info_section_body(self, section: Mapping[str, Any]) -> None:
+        QApplication.clipboard().setText(str(section.get("body", "") or ""))
+        self.statusBar().showMessage(build_info_section_copy_status_message(str(section.get("title", "") or "")))
 
     def toggle_info_panel(self) -> None:
         self.info_dock.setVisible(not self.info_dock.isVisible())

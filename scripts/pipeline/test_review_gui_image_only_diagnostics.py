@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
@@ -22,6 +24,7 @@ def load_module(module_name: str, relative_path: str):
 
 
 review_gui = load_module("review_performance_proxy_gui_image_diagnostics_test", "scripts/pipeline/review_performance_proxy_gui.py")
+TEST_QT_APP = QApplication.instance() or QApplication([])
 
 
 class FakeRestoreItem:
@@ -350,12 +353,86 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(len(sections), 1)
+        self.assertEqual(
+            [section["title"] for section in sections],
+            ["Set summary", "Boundary diagnostics"],
+        )
         set_summary = next((section for section in sections if section["key"] == "set_summary"), None)
         self.assertIsNotNone(set_summary)
         self.assertEqual(set_summary["title"], "Set summary")
         self.assertEqual(set_summary["description"], "Basic set metadata and review state.")
         self.assertIn("Type: D", set_summary["body"])
         self.assertIn("No photos confirmed: yes", set_summary["body"])
+        boundary_diagnostics = next((section for section in sections if section["key"] == "boundary_diagnostics"), None)
+        self.assertIsNotNone(boundary_diagnostics)
+        self.assertIn("Diagnostics unavailable", boundary_diagnostics["body"])
+
+    def test_build_image_only_set_info_sections_includes_ml_hints_section_when_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            self.create_workspace_with_diagnostics(workspace_dir)
+            diagnostics = review_gui.load_image_only_diagnostics(workspace_dir)
+            diagnostics["ml_diagnostics"] = {
+                "available": True,
+                "ml_model_run_id": "day-20260323",
+                "ml_hint_by_pair": {
+                    ("cam/a.jpg", "cam/b.jpg"): {
+                        "boundary_prediction": True,
+                        "boundary_confidence": "0.63",
+                        "segment_type_prediction": "ceremony",
+                        "segment_type_confidence": "0.74",
+                    },
+                    ("cam/b.jpg", "cam/c.jpg"): {
+                        "boundary_prediction": False,
+                        "boundary_confidence": "0.81",
+                        "segment_type_prediction": "dance",
+                        "segment_type_confidence": "0.97",
+                    },
+                },
+                "error": "",
+            }
+            diagnostics["ml_hint_by_pair"] = diagnostics["ml_diagnostics"]["ml_hint_by_pair"]
+            display_set = {
+                "display_name": "SEG0001",
+                "original_performance_number": "SEG0001",
+                "set_id": "imgset-000001",
+                "base_set_id": "imgset-000001",
+                "type_code": "D",
+                "type_override_active": False,
+                "duplicate_status": "normal",
+                "timeline_status": "image_only",
+                "photo_count": 2,
+                "review_count": 0,
+                "duration_seconds": 5,
+                "max_internal_photo_gap_seconds": 5,
+                "performance_start_local": "2026-03-23T10:00:05",
+                "performance_end_local": "2026-03-23T10:00:10",
+                "first_photo_local": "2026-03-23T10:00:05",
+                "last_photo_local": "2026-03-23T10:00:10",
+                "merged_manually": False,
+                "photos": [
+                    {"relative_path": "cam/b.jpg"},
+                    {"relative_path": "cam/c.jpg"},
+                ],
+            }
+
+            sections = review_gui.build_image_only_set_info_sections(
+                display_set,
+                diagnostics,
+                no_photos_confirmed=False,
+                show_manual_ml_prediction=False,
+                manual_prediction_state=None,
+            )
+
+        self.assertEqual(
+            [section["title"] for section in sections],
+            ["Set summary", "Boundary diagnostics", "ML hints"],
+        )
+        ml_hints = next((section for section in sections if section["key"] == "ml_hints"), None)
+        self.assertIsNotNone(ml_hints)
+        self.assertIn("ML hint before set", ml_hints["body"])
+        self.assertIn("boundary: cut", ml_hints["body"])
+        self.assertIn("model run: day-20260323", ml_hints["body"])
 
     def test_build_copy_status_message_uses_section_title(self):
         self.assertEqual(
@@ -366,6 +443,107 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             review_gui.build_info_section_copy_status_message("  ML hints  "),
             "Copied ML hints",
         )
+
+    def test_build_image_only_photo_info_sections_returns_named_sections(self):
+        diagnostics = {
+            "available": False,
+            "error": "missing diagnostics",
+            "ml_diagnostics": {"available": False, "error": "missing diagnostics"},
+            "ml_hint_by_pair": {},
+        }
+        photo = {
+            "display_name": "SEG0001",
+            "original_performance_number": "SEG0001",
+            "base_set_id": "imgset-000001",
+            "type_code": "D",
+            "type_override_active": False,
+            "relative_path": "cam/b.jpg",
+            "filename": "b.jpg",
+            "adjusted_start_local": "2026-03-23T10:00:05",
+            "assignment_status": "assigned",
+            "assignment_reason": "",
+            "seconds_to_nearest_boundary": "0.000000",
+            "stream_id": "p-main",
+            "device": "A7R5",
+            "proxy_exists": True,
+        }
+
+        sections = review_gui.build_image_only_photo_info_sections(photo, diagnostics)
+
+        self.assertEqual(
+            [section["title"] for section in sections],
+            ["Photo summary", "Boundary diagnostics", "ML hints"],
+        )
+        self.assertIn("Relative path: cam/b.jpg", sections[0]["body"])
+        self.assertIn("Diagnostics unavailable", sections[1]["body"])
+        self.assertIn("unavailable: missing diagnostics", sections[2]["body"])
+
+    def test_build_image_only_multi_photo_info_sections_returns_selection_summary(self):
+        diagnostics = {"available": False, "error": ""}
+        photos = [
+            {
+                "adjusted_start_local": "2026-03-23T10:00:00",
+                "relative_path": "cam/a.jpg",
+                "filename": "a.jpg",
+                "assignment_status": "assigned",
+                "assignment_reason": "",
+            },
+            {
+                "adjusted_start_local": "2026-03-23T10:00:05",
+                "relative_path": "cam/b.jpg",
+                "filename": "b.jpg",
+                "assignment_status": "assigned",
+                "assignment_reason": "",
+            },
+        ]
+
+        sections = review_gui.build_image_only_multi_photo_info_sections(photos, diagnostics)
+
+        self.assertEqual([section["title"] for section in sections], ["Selection summary", "Boundary diagnostics"])
+        self.assertIn("Selected photos: 2", sections[0]["body"])
+        self.assertNotIn("ML hints", [section["title"] for section in sections])
+
+    def test_render_info_sections_rebuilds_scroll_container(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        existing = QLabel("old")
+        layout.addWidget(existing)
+        window.info_content = container
+        window.info_layout = layout
+        window.build_info_section_widget = Mock(
+            side_effect=lambda section: QLabel(f"section:{section['title']}")
+        )
+
+        sections = [
+            review_gui.build_info_section("Set summary", "Summary", "Body A"),
+            review_gui.build_info_section("Boundary diagnostics", "Boundary", "Body B"),
+        ]
+
+        window.render_info_sections(sections)
+
+        self.assertEqual(window.build_info_section_widget.call_count, 2)
+        self.assertEqual(window.info_layout.count(), 3)
+        self.assertEqual(window.info_layout.itemAt(0).widget().text(), "section:Set summary")
+        self.assertEqual(window.info_layout.itemAt(1).widget().text(), "section:Boundary diagnostics")
+        self.assertIsNone(window.info_layout.itemAt(2).widget())
+
+    def test_copy_info_section_body_copies_body_and_status_message(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        status_bar = Mock()
+        window.statusBar = Mock(return_value=status_bar)
+        clipboard = Mock()
+
+        with unittest.mock.patch.object(review_gui.QApplication, "clipboard", return_value=clipboard):
+            window.copy_info_section_body(
+                {
+                    "title": "ML hints",
+                    "body": "boundary: cut",
+                }
+            )
+
+        clipboard.setText.assert_called_once_with("boundary: cut")
+        status_bar.showMessage.assert_called_once_with("Copied ML hints")
 
     def test_on_selection_changed_uses_image_only_sections_for_set_metadata_text(self):
         display_set = {
@@ -384,7 +562,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.current_top_level_item = Mock(return_value=parent_item)
         window.mark_set_viewed = Mock()
         window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
-        window.meta_label = Mock()
+        window.render_info_sections = Mock()
         window.right_image_panel = Mock()
         window.view_mode = "single"
         window.image_only_diagnostics = {"available": False, "error": ""}
@@ -429,7 +607,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             show_manual_ml_prediction=False,
             manual_prediction_state=None,
         )
-        window.meta_label.setText.assert_called_once_with("\n\n".join(section_bodies))
+        window.render_info_sections.assert_called_once_with(mocked_sections)
         window.mark_set_viewed.assert_called_once_with("vlm-set-0001")
         status_bar.showMessage.assert_called_once_with("Set VLM0001 - 5 photos - view single")
         window.show_display_set.assert_called_once_with(display_set)
