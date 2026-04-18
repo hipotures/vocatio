@@ -159,6 +159,7 @@ def _full_strata_by_split(
 def test_render_eval_metrics_summary_uses_human_readable_precision() -> None:
     rendered = _render_eval_metrics_summary(
         {
+            "row_count": 46,
             "segment_type_accuracy": 0.8478260869565217,
             "segment_type_correct_count": 39,
             "segment_type_incorrect_count": 7,
@@ -193,7 +194,7 @@ def test_render_eval_metrics_summary_uses_human_readable_precision() -> None:
     assert "Segment type: accuracy=0.8478, correct=39, incorrect=7" in output
     assert "Boundary: f1=0.8163, correct=37, incorrect=9, tp=20, fp=3, fn=6, tn=17" in output
     assert "Review cost: merge_runs=4, split_runs=5, estimated_actions=9" in output
-    assert "Segment Type Confusion Matrix" in output
+    assert "Segment Type Confusion Matrix (test split, n=46)" in output
     assert "truth\\pred" in output
     assert "performance" in output
     assert "ceremony" in output

@@ -976,9 +976,13 @@ def _build_segment_type_confusion_table(metrics_payload: dict[str, object]) -> T
     confusion_payload = metrics_payload.get("segment_type_confusion_matrix")
     if not isinstance(confusion_payload, dict):
         raise ValueError("evaluation metrics missing segment_type_confusion_matrix object")
+    row_count = int(metrics_payload.get("row_count", 0) or 0)
 
     labels = sorted(VALID_SEGMENT_TYPES)
-    table = Table(title="Segment Type Confusion Matrix", expand=False)
+    table = Table(
+        title=f"Segment Type Confusion Matrix (test split, n={row_count})",
+        expand=False,
+    )
     table.add_column("truth\\pred", justify="left")
     for label in labels:
         table.add_column(label, justify="right")
