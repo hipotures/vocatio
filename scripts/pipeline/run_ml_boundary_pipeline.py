@@ -148,6 +148,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Rebuild candidate rows with --overwrite and replace train/eval artifacts.",
     )
+    parser.add_argument(
+        "--preset",
+        default=None,
+        help="AutoGluon preset forwarded to train_ml_boundary_verifier.py.",
+    )
+    parser.add_argument(
+        "--train-minutes",
+        type=float,
+        default=None,
+        help="Optional per-predictor training time limit in minutes forwarded to the training step.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1066,6 +1077,8 @@ def _run_training_and_evaluation(
     eval_dir: Path,
     mode: str,
     restart: bool,
+    preset: str | None,
+    train_minutes: float | None,
 ) -> tuple[dict[str, object], dict[str, object] | None]:
     train_command = [
         "uv",
@@ -1081,6 +1094,10 @@ def _run_training_and_evaluation(
         "--mode",
         mode,
     ]
+    if preset:
+        train_command.extend(["--preset", preset])
+    if train_minutes is not None:
+        train_command.extend(["--train-minutes", str(train_minutes)])
     if restart:
         train_command.append("--overwrite")
     _print_compact_command("Train verifier", train_command)
@@ -1162,6 +1179,9 @@ def _write_pipeline_summary(
         payload["evaluation_metrics"] = evaluation_metrics
     if training_metadata is not None:
         payload["training_metadata"] = training_metadata
+        payload["training_preset"] = training_metadata.get("training_preset")
+        payload["train_minutes"] = training_metadata.get("train_minutes")
+        payload["time_limit_seconds"] = training_metadata.get("time_limit_seconds")
     if note:
         payload["note"] = note
     atomic_write_json(summary_path, payload)
@@ -1250,6 +1270,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             eval_dir=eval_dir,
             mode=args.mode,
             restart=args.restart,
+            preset=args.preset,
+            train_minutes=args.train_minutes,
         )
 
     summary_path = corpus_workspace / PIPELINE_SUMMARY_FILENAME

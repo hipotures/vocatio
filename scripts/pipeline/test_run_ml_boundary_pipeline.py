@@ -329,6 +329,117 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
     assert any("evaluate_ml_boundary_verifier.py" in " ".join(command) for command in recorded_commands)
 
 
+def test_main_forwards_training_options_and_records_pipeline_summary_fields(
+    tmp_path: Path, monkeypatch
+) -> None:
+    day_dir = tmp_path / "20260323"
+    workspace_dir = tmp_path / "20260323DWC"
+    day_dir.mkdir(parents=True)
+    workspace_dir.mkdir(parents=True)
+    (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+
+    recorded_commands: list[list[str]] = []
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        recorded_commands.append(command_values)
+        command_text = " ".join(command_values)
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            rows = [
+                _candidate_row(day_id=day_dir.name, segment_type="performance", boundary="0", offset=1),
+                _candidate_row(day_id=day_dir.name, segment_type="ceremony", boundary="1", offset=2),
+                _candidate_row(day_id=day_dir.name, segment_type="warmup", boundary="0", offset=3),
+            ]
+            _write_day_candidate_artifacts(workspace_dir, rows)
+        if "train_ml_boundary_verifier.py" in command_text:
+            script_index = command_values.index("scripts/pipeline/train_ml_boundary_verifier.py")
+            corpus_dir = Path(command_values[script_index + 1])
+            model_run_id = command_values[command_values.index("--model-run-id") + 1]
+            model_dir = corpus_dir / "ml_boundary_models" / model_run_id
+            model_dir.mkdir(parents=True, exist_ok=True)
+            (model_dir / "training_metadata.json").write_text(
+                json.dumps(
+                    {
+                        "split_counts_by_name": {"train": 1, "validation": 1, "test": 1},
+                        "training_preset": "best_quality",
+                        "train_minutes": 10.0,
+                        "time_limit_seconds": 600,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        if "evaluate_ml_boundary_verifier.py" in command_text:
+            script_index = command_values.index("scripts/pipeline/evaluate_ml_boundary_verifier.py")
+            corpus_dir = Path(command_values[script_index + 1])
+            model_run_id = command_values[command_values.index("--model-run-id") + 1]
+            eval_dir = corpus_dir / "ml_boundary_eval" / model_run_id
+            eval_dir.mkdir(parents=True, exist_ok=True)
+            (eval_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "segment_type_macro_f1": 0.73,
+                        "segment_type_accuracy": 0.81,
+                        "segment_type_correct_count": 2,
+                        "segment_type_incorrect_count": 1,
+                        "segment_type_confusion_matrix": {
+                            "ceremony": {"ceremony": 1, "performance": 0, "warmup": 0},
+                            "performance": {"ceremony": 0, "performance": 1, "warmup": 0},
+                            "warmup": {"ceremony": 0, "performance": 0, "warmup": 1},
+                        },
+                        "boundary_f1": 0.67,
+                        "boundary_correct_count": 2,
+                        "boundary_incorrect_count": 1,
+                        "boundary_true_positive_count": 1,
+                        "boundary_false_positive_count": 0,
+                        "boundary_false_negative_count": 1,
+                        "boundary_true_negative_count": 1,
+                        "review_cost_metrics": {
+                            "merge_run_count": 1,
+                            "split_run_count": 1,
+                            "estimated_correction_actions": 1,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+
+    exit_code = main(
+        [
+            str(day_dir),
+            "--mode",
+            "tabular_only",
+            "--split-strategy",
+            "global_random",
+            "--model-run-id",
+            "day-20260323",
+            "--preset",
+            "best_quality",
+            "--train-minutes",
+            "10",
+        ]
+    )
+
+    assert exit_code == 0
+    train_command = next(
+        command for command in recorded_commands if "train_ml_boundary_verifier.py" in " ".join(command)
+    )
+    assert "--preset" in train_command
+    assert "best_quality" in train_command
+    assert "--train-minutes" in train_command
+    assert "10.0" in train_command
+
+    summary_payload = json.loads(
+        ((workspace_dir / "ml_boundary_corpus") / "ml_boundary_pipeline_summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert summary_payload["training_preset"] == "best_quality"
+    assert summary_payload["train_minutes"] == 10.0
+    assert summary_payload["time_limit_seconds"] == 600
+
+
 def test_main_prepare_only_skips_train_and_eval(tmp_path: Path, monkeypatch) -> None:
     day_dirs = []
     for day_id in ("20250324", "20250325", "20250326"):
