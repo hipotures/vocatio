@@ -13,7 +13,7 @@ from lib.photo_pre_model_annotations import (
 
 GAP_OUTLIER_K = 3.0
 CANONICAL_MISSING = "__missing__"
-HEURISTIC_NUMERIC_MISSING = -1.0
+HEURISTIC_NUMERIC_MISSING = math.nan
 DESCRIPTOR_LIST_DELIMITERS = (",", ";", "|", "/")
 DESCRIPTOR_MAX_VALUES_PER_FIELD = 5
 HEURISTIC_PAIR_NAMES = ("12", "23", "34", "45")
