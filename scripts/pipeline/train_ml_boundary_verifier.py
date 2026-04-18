@@ -627,6 +627,7 @@ def _fit_predictor(
         tuning_data=_to_model_frame(predictor_data.validation_data),
         presets=training_options["training_preset"],
         time_limit=training_options["time_limit_seconds"],
+        use_bag_holdout=True,
     )
     return predictor
 

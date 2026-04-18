@@ -560,8 +560,10 @@ def test_train_cli_applies_explicit_training_options(monkeypatch, tmp_path: Path
     assert exit_code == 0
     assert FakeTabularPredictor.instances[0].fit_calls[0]["presets"] == "best_quality"
     assert FakeTabularPredictor.instances[0].fit_calls[0]["time_limit"] == 600
+    assert FakeTabularPredictor.instances[0].fit_calls[0]["extra_kwargs"]["use_bag_holdout"] is True
     assert FakeTabularPredictor.instances[1].fit_calls[0]["presets"] == "best_quality"
     assert FakeTabularPredictor.instances[1].fit_calls[0]["time_limit"] == 600
+    assert FakeTabularPredictor.instances[1].fit_calls[0]["extra_kwargs"]["use_bag_holdout"] is True
     training_plan = json.loads((output_dir / TRAINING_PLAN_FILENAME).read_text(encoding="utf-8"))
     training_metadata = json.loads((output_dir / TRAINING_METADATA_FILENAME).read_text(encoding="utf-8"))
     training_report = json.loads((output_dir / TRAINING_REPORT_FILENAME).read_text(encoding="utf-8"))
