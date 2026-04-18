@@ -205,6 +205,22 @@ def build_photo_selection_payload(
     return payload
 
 
+def photo_identity_key(photo: Mapping[str, Any]) -> str:
+    source_path = str(photo.get("source_path", "")).strip()
+    if source_path:
+        return f"source:{source_path}"
+    relative_path = str(photo.get("relative_path", "")).strip()
+    if relative_path:
+        return f"relative:{relative_path}"
+    filename = str(photo.get("filename", "")).strip()
+    stream_id = str(photo.get("stream_id", "")).strip()
+    if stream_id and filename:
+        return f"stream:{stream_id}::{filename}"
+    if filename:
+        return f"filename:{filename}"
+    return ""
+
+
 def keyboard_help_sections() -> List[tuple[str, List[tuple[str, str]]]]:
     return [
         (
@@ -1530,6 +1546,15 @@ class MainWindow(QMainWindow):
         ordered_items.extend(remaining)
         return ordered_items
 
+    def selected_top_level_set_ids(self) -> List[str]:
+        selected_set_ids: List[str] = []
+        for item in self.selected_top_level_items():
+            display_set = item.data(0, Qt.UserRole)
+            if not display_set:
+                continue
+            selected_set_ids.append(display_set["set_id"])
+        return selected_set_ids
+
     def update_selection_order(self) -> None:
         selected_items = []
         selected_ids = set()
@@ -1568,12 +1593,9 @@ class MainWindow(QMainWindow):
             photo = item.data(0, Qt.UserRole)
             if not isinstance(photo, dict):
                 continue
-            filename = str(photo.get("filename", "")).strip()
-            if not filename:
+            key = photo_identity_key(photo)
+            if not key:
                 continue
-            source_path = str(photo.get("source_path", "")).strip()
-            fallback_key = f"{photo.get('stream_id', '')}::{filename}"
-            key = source_path or fallback_key
             if key in selected:
                 continue
             selected[key] = photo
@@ -1707,10 +1729,17 @@ class MainWindow(QMainWindow):
         if current_item is None:
             return
         preferred_filename = ""
+        preferred_photo_key = ""
         item = current_item
+        selected_set_ids = self.selected_top_level_set_ids()
+        selection_order_ids = [set_id for set_id in self.selection_order_ids if set_id in selected_set_ids]
+        for set_id in selected_set_ids:
+            if set_id not in selection_order_ids:
+                selection_order_ids.append(set_id)
         if current_item.parent() is not None:
             photo = current_item.data(0, Qt.UserRole) or {}
             preferred_filename = str(photo.get("filename", "") or "")
+            preferred_photo_key = photo_identity_key(photo)
             while item.parent() is not None:
                 item = item.parent()
         display_set = item.data(0, Qt.UserRole)
@@ -1722,7 +1751,13 @@ class MainWindow(QMainWindow):
         entry["segment_type_override"] = override_value
         self.review_state["updated_at"] = self.current_timestamp()
         self.state_dirty = True
-        self.rebuild_tree_after_state_change(preferred_set_id=set_id, preferred_filename=preferred_filename)
+        self.rebuild_tree_after_state_change(
+            preferred_set_id=set_id,
+            preferred_filename=preferred_filename,
+            preferred_photo_key=preferred_photo_key,
+            selected_set_ids=selected_set_ids,
+            selection_order_ids=selection_order_ids,
+        )
         status_message = build_segment_type_override_status_message(
             display_name,
             override_value,
@@ -2448,29 +2483,62 @@ class MainWindow(QMainWindow):
         else:
             self.show_single_preview(left_path, left_title)
 
-    def rebuild_tree_after_state_change(self, preferred_set_id: str = "", preferred_filename: str = "") -> None:
+    def rebuild_tree_after_state_change(
+        self,
+        preferred_set_id: str = "",
+        preferred_filename: str = "",
+        preferred_photo_key: str = "",
+        selected_set_ids: Optional[Sequence[str]] = None,
+        selection_order_ids: Optional[Sequence[str]] = None,
+    ) -> None:
         self.migrate_split_state_keys()
         self.rebuild_display_sets()
         self.migrate_review_state_keys()
         self.build_tree()
         self.preload_set_images()
         self.apply_view_mode()
+        current_item: Optional[QTreeWidgetItem] = None
         if preferred_set_id:
             item = self.item_by_set_id.get(preferred_set_id)
             if item is not None:
-                self.tree.setCurrentItem(item)
-                if preferred_filename:
+                current_item = item
+                if preferred_photo_key or preferred_filename:
                     self.populate_children(item)
                     for index in range(item.childCount()):
                         child = item.child(index)
                         photo = child.data(0, Qt.UserRole)
-                        if photo["filename"] == preferred_filename:
+                        if preferred_photo_key and photo_identity_key(photo) == preferred_photo_key:
                             item.setExpanded(True)
-                            self.tree.setCurrentItem(child)
+                            current_item = child
                             break
-                return
-        if self.display_items:
-            self.tree.setCurrentItem(self.display_items[0])
+                        if not preferred_photo_key and photo["filename"] == preferred_filename:
+                            item.setExpanded(True)
+                            current_item = child
+                            break
+        if current_item is None and self.display_items:
+            current_item = self.display_items[0]
+        previous_blocked = self.tree.blockSignals(True)
+        try:
+            if current_item is not None:
+                self.tree.setCurrentItem(current_item)
+            if selected_set_ids is not None:
+                self.tree.clearSelection()
+                restored_selection_ids: List[str] = []
+                for set_id in selected_set_ids:
+                    item = self.item_by_set_id.get(set_id)
+                    if item is None:
+                        continue
+                    item.setSelected(True)
+                    restored_selection_ids.append(set_id)
+                restored_order = [set_id for set_id in (selection_order_ids or []) if set_id in restored_selection_ids]
+                for set_id in restored_selection_ids:
+                    if set_id not in restored_order:
+                        restored_order.append(set_id)
+                self.selection_order_ids = restored_order
+        finally:
+            self.tree.blockSignals(previous_blocked)
+        if self.tree.currentItem() is not None:
+            self.on_selection_changed()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)

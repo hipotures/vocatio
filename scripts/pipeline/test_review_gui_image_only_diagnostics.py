@@ -24,6 +24,83 @@ def load_module(module_name: str, relative_path: str):
 review_gui = load_module("review_performance_proxy_gui_image_diagnostics_test", "scripts/pipeline/review_performance_proxy_gui.py")
 
 
+class FakeRestoreItem:
+    def __init__(self, payload: dict, parent: "FakeRestoreItem | None" = None):
+        self._payload = payload
+        self._parent = parent
+        self._children: list[FakeRestoreItem] = []
+        self._selected = False
+        self._expanded = False
+
+    def parent(self):
+        return self._parent
+
+    def data(self, _column: int, _role: int):
+        return self._payload
+
+    def addChild(self, child: "FakeRestoreItem") -> None:
+        child._parent = self
+        self._children.append(child)
+
+    def childCount(self) -> int:
+        return len(self._children)
+
+    def child(self, index: int) -> "FakeRestoreItem":
+        return self._children[index]
+
+    def setSelected(self, selected: bool) -> None:
+        self._selected = selected
+
+    def isSelected(self) -> bool:
+        return self._selected
+
+    def setExpanded(self, expanded: bool) -> None:
+        self._expanded = expanded
+
+    def isExpanded(self) -> bool:
+        return self._expanded
+
+
+class FakeRestoreTree:
+    def __init__(self, current_item: FakeRestoreItem | None = None, selected_items: list[FakeRestoreItem] | None = None):
+        self._current_item = current_item
+        self._top_level_items: list[FakeRestoreItem] = []
+        self._signals_blocked = False
+        for item in selected_items or []:
+            item.setSelected(True)
+
+    def set_top_level_items(self, items: list[FakeRestoreItem]) -> None:
+        self._top_level_items = items
+
+    def currentItem(self):
+        return self._current_item
+
+    def setCurrentItem(self, item: FakeRestoreItem) -> None:
+        self._current_item = item
+
+    def selectedItems(self) -> list[FakeRestoreItem]:
+        selected: list[FakeRestoreItem] = []
+
+        def visit(item: FakeRestoreItem) -> None:
+            if item.isSelected():
+                selected.append(item)
+            for child_index in range(item.childCount()):
+                visit(item.child(child_index))
+
+        for item in self._top_level_items:
+            visit(item)
+        return selected
+
+    def clearSelection(self) -> None:
+        for item in self.selectedItems():
+            item.setSelected(False)
+
+    def blockSignals(self, blocked: bool) -> bool:
+        previous = self._signals_blocked
+        self._signals_blocked = blocked
+        return previous
+
+
 class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
     def write_csv(self, path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
         with path.open("w", newline="", encoding="utf-8") as handle:
@@ -554,30 +631,61 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "Type reset for set VLM0007",
         )
 
-    def test_cycle_current_set_segment_type_override_updates_state_and_preserves_child_selection_context(self):
-        class FakeItem:
-            def __init__(self, payload: dict, parent: "FakeItem | None" = None):
-                self._payload = payload
-                self._parent = parent
+    def test_photo_identity_key_prefers_source_path_then_relative_path_then_stream_and_filename(self):
+        self.assertEqual(
+            review_gui.photo_identity_key(
+                {
+                    "filename": "a.jpg",
+                    "relative_path": "cam/a.jpg",
+                    "stream_id": "stream-a",
+                    "source_path": "/src/a.jpg",
+                }
+            ),
+            "source:/src/a.jpg",
+        )
+        self.assertEqual(
+            review_gui.photo_identity_key(
+                {
+                    "filename": "a.jpg",
+                    "relative_path": "cam/a.jpg",
+                    "stream_id": "stream-a",
+                    "source_path": "",
+                }
+            ),
+            "relative:cam/a.jpg",
+        )
+        self.assertEqual(
+            review_gui.photo_identity_key(
+                {
+                    "filename": "a.jpg",
+                    "relative_path": "",
+                    "stream_id": "stream-a",
+                    "source_path": "",
+                }
+            ),
+            "stream:stream-a::a.jpg",
+        )
 
-            def parent(self):
-                return self._parent
-
-            def data(self, _column: int, _role: int):
-                return self._payload
-
-        class FakeTree:
-            def __init__(self, current_item: FakeItem):
-                self._current_item = current_item
-
-            def currentItem(self):
-                return self._current_item
-
+    def test_cycle_current_set_segment_type_override_updates_state_and_snapshots_selection_state(self):
         for flush_result, expected_message in (
             (True, "Type set to D for set VLM0007"),
             (False, "Type set to D for set VLM0007 in memory, but save failed"),
         ):
             with self.subTest(flush_result=flush_result):
+                parent_item = FakeRestoreItem({"set_id": "set-a", "display_name": "VLM0007"})
+                other_parent = FakeRestoreItem({"set_id": "set-b", "display_name": "VLM0008"})
+                child_item = FakeRestoreItem(
+                    {
+                        "filename": "b.jpg",
+                        "source_path": "/src/stream-2/b.jpg",
+                        "relative_path": "cam-b/b.jpg",
+                        "stream_id": "stream-2",
+                    },
+                    parent=parent_item,
+                )
+                parent_item.addChild(child_item)
+                tree = FakeRestoreTree(current_item=child_item, selected_items=[child_item, other_parent])
+                tree.set_top_level_items([parent_item, other_parent])
                 window = review_gui.MainWindow.__new__(review_gui.MainWindow)
                 window.review_state = {"performances": {}}
                 window.state_dirty = False
@@ -586,9 +694,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 window.rebuild_tree_after_state_change = Mock()
                 status_bar = Mock()
                 window.statusBar = Mock(return_value=status_bar)
-                parent_item = FakeItem({"set_id": "set-a", "display_name": "VLM0007"})
-                child_item = FakeItem({"filename": "b.jpg"}, parent=parent_item)
-                window.tree = FakeTree(child_item)
+                window.selection_order_ids = ["set-b", "set-a"]
+                window.tree = tree
 
                 window.cycle_current_set_segment_type_override()
 
@@ -598,8 +705,143 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 window.rebuild_tree_after_state_change.assert_called_once_with(
                     preferred_set_id="set-a",
                     preferred_filename="b.jpg",
+                    preferred_photo_key="source:/src/stream-2/b.jpg",
+                    selected_set_ids=["set-b", "set-a"],
+                    selection_order_ids=["set-b", "set-a"],
                 )
                 status_bar.showMessage.assert_called_once_with(expected_message)
+
+    def test_rebuild_tree_after_state_change_restores_selection_order_and_current_child_by_stable_key(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.selection_order_ids = []
+        window.migrate_split_state_keys = Mock()
+        window.rebuild_display_sets = Mock()
+        window.migrate_review_state_keys = Mock()
+        window.preload_set_images = Mock()
+        window.apply_view_mode = Mock()
+        window.on_selection_changed = Mock()
+        tree = FakeRestoreTree()
+        window.tree = tree
+
+        children_by_set = {
+            "set-a": [
+                {
+                    "filename": "alpha.jpg",
+                    "source_path": "/src/alpha.jpg",
+                }
+            ],
+            "set-b": [
+                {
+                    "filename": "shared.jpg",
+                    "source_path": "/src/stream-1/shared.jpg",
+                    "stream_id": "stream-1",
+                },
+                {
+                    "filename": "shared.jpg",
+                    "source_path": "/src/stream-2/shared.jpg",
+                    "stream_id": "stream-2",
+                },
+            ],
+        }
+
+        def build_tree() -> None:
+            item_a = FakeRestoreItem({"set_id": "set-a", "display_name": "SET-A"})
+            item_b = FakeRestoreItem({"set_id": "set-b", "display_name": "SET-B"})
+            window.item_by_set_id = {
+                "set-a": item_a,
+                "set-b": item_b,
+            }
+            window.display_items = [item_a, item_b]
+            tree.set_top_level_items(window.display_items)
+
+        def populate_children(item: FakeRestoreItem) -> None:
+            if item.childCount() > 0:
+                return
+            for photo in children_by_set[item.data(0, review_gui.Qt.UserRole)["set_id"]]:
+                item.addChild(FakeRestoreItem(photo, parent=item))
+
+        window.build_tree = build_tree
+        window.populate_children = populate_children
+
+        window.rebuild_tree_after_state_change(
+            preferred_set_id="set-b",
+            preferred_filename="shared.jpg",
+            preferred_photo_key="source:/src/stream-2/shared.jpg",
+            selected_set_ids=["set-b", "set-a"],
+            selection_order_ids=["set-b", "set-a"],
+        )
+
+        selected_top_level_ids = [
+            item.data(0, review_gui.Qt.UserRole)["set_id"]
+            for item in tree.selectedItems()
+            if item.parent() is None
+        ]
+        self.assertEqual(selected_top_level_ids, ["set-a", "set-b"])
+        self.assertEqual(window.selection_order_ids, ["set-b", "set-a"])
+        self.assertEqual(
+            tree.currentItem().data(0, review_gui.Qt.UserRole)["source_path"],
+            "/src/stream-2/shared.jpg",
+        )
+        self.assertTrue(window.item_by_set_id["set-b"].isExpanded())
+        window.on_selection_changed.assert_called_once_with()
+
+    def test_install_actions_registers_y_shortcut(self):
+        created_actions = []
+
+        class FakeSignal:
+            def __init__(self):
+                self.connections = []
+
+            def connect(self, callback):
+                self.connections.append(callback)
+
+        class FakeAction:
+            def __init__(self, _parent):
+                self.shortcut = None
+                self.triggered = FakeSignal()
+                created_actions.append(self)
+
+            def setShortcut(self, shortcut):
+                self.shortcut = shortcut
+
+        class FakeWindow:
+            def __init__(self):
+                self.added_actions = []
+                self.toggle_fullscreen = Mock()
+                self.set_view_mode = Mock()
+                self.toggle_info_panel = Mock()
+                self.show_help_dialog = Mock()
+                self.confirm_reset_review_state = Mock()
+                self.confirm_split_current_photo = Mock()
+                self.confirm_merge_selected_sets = Mock()
+                self.toggle_no_photos_confirmed_current_set = Mock()
+                self.cycle_current_set_segment_type_override = Mock()
+                self.toggle_tree_icon_mode = Mock()
+                self.increase_ui_scale = Mock()
+                self.decrease_ui_scale = Mock()
+                self.reset_ui_scale = Mock()
+                self.export_selected_photos_json = Mock()
+
+            def addAction(self, action):
+                self.added_actions.append(action)
+
+        original_qaction = review_gui.QAction
+        original_qkeysequence = review_gui.QKeySequence
+        review_gui.QAction = FakeAction
+        review_gui.QKeySequence = lambda shortcut: shortcut
+        try:
+            window = FakeWindow()
+            review_gui.MainWindow.install_actions(window)
+        finally:
+            review_gui.QAction = original_qaction
+            review_gui.QKeySequence = original_qkeysequence
+
+        y_actions = [action for action in created_actions if action.shortcut == "Y"]
+        self.assertEqual(len(y_actions), 1)
+        self.assertEqual(
+            y_actions[0].triggered.connections,
+            [window.cycle_current_set_segment_type_override],
+        )
 
     def test_keyboard_help_sections_review_shortcuts_include_type_override_cycle(self):
         review_section = dict(review_gui.keyboard_help_sections())["Review"]
