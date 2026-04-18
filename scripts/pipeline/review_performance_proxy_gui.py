@@ -549,6 +549,22 @@ def format_ml_hint_section(title: str, ml_hint_row: Optional[Mapping[str, Any]],
     return lines
 
 
+def build_info_section(title: str, description: str, body: str, *, key: str = "") -> Dict[str, str]:
+    normalized_key = str(key or "").strip()
+    if not normalized_key:
+        normalized_key = str(title or "").strip().lower().replace(" ", "_")
+    return {
+        "key": normalized_key,
+        "title": str(title or ""),
+        "description": str(description or ""),
+        "body": str(body or ""),
+    }
+
+
+def build_info_section_copy_status_message(title: str) -> str:
+    return f"Copied {str(title or '').strip()}"
+
+
 def build_image_only_set_info_text(
     display_set: Mapping[str, Any],
     diagnostics: Mapping[str, Any],
@@ -634,6 +650,29 @@ def build_image_only_set_info_text(
     elif diagnostics.get("error"):
         lines.extend(["", f"Diagnostics: {diagnostics['error']}"])
     return "\n".join(lines)
+
+
+def build_image_only_set_info_sections(
+    display_set: Mapping[str, Any],
+    diagnostics: Mapping[str, Any],
+    *,
+    no_photos_confirmed: bool,
+    show_manual_ml_prediction: bool,
+    manual_prediction_state: Optional[Mapping[str, Any]],
+) -> List[Dict[str, str]]:
+    _ = show_manual_ml_prediction
+    _ = manual_prediction_state
+    return [
+        build_info_section(
+            "Set summary",
+            "Basic set metadata and review state.",
+            build_image_only_set_info_text(
+                display_set,
+                diagnostics,
+                no_photos_confirmed=no_photos_confirmed,
+            ),
+        )
+    ]
 
 
 def build_image_only_photo_info_text(photo: Mapping[str, Any], diagnostics: Mapping[str, Any]) -> str:

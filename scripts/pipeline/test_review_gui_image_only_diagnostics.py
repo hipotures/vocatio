@@ -287,6 +287,46 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 "0.910000",
             )
 
+    def test_build_image_only_set_info_sections_for_set_returns_named_sections(self):
+        diagnostics = {"available": False, "error": ""}
+        display_set = {
+            "display_name": "VLM0001",
+            "original_performance_number": "VLM0001",
+            "set_id": "vlm-set-0001",
+            "base_set_id": "vlm-set-0001",
+            "type_code": "D",
+            "type_override_active": False,
+            "duplicate_status": "normal",
+            "timeline_status": "vlm_probe:1_hits",
+            "photo_count": 5,
+            "review_count": 0,
+            "duration_seconds": 10,
+            "max_internal_photo_gap_seconds": 3,
+            "performance_start_local": "2026-03-23T10:00:00",
+            "performance_end_local": "2026-03-23T10:00:10",
+            "first_photo_local": "2026-03-23T10:00:00",
+            "last_photo_local": "2026-03-23T10:00:10",
+            "merged_manually": False,
+            "photos": [],
+        }
+
+        sections = review_gui.build_image_only_set_info_sections(
+            display_set,
+            diagnostics,
+            no_photos_confirmed=False,
+            show_manual_ml_prediction=False,
+            manual_prediction_state=None,
+        )
+
+        self.assertEqual([section["title"] for section in sections], ["Set summary"])
+        self.assertIn("Type: D", sections[0]["body"])
+
+    def test_build_copy_status_message_uses_section_title(self):
+        self.assertEqual(
+            review_gui.build_info_section_copy_status_message("ML hints"),
+            "Copied ML hints",
+        )
+
     def test_build_image_only_set_info_text_includes_boundary_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_dir = Path(tmp)
