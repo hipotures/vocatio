@@ -31,6 +31,7 @@ from lib.media_manifest import read_media_manifest, select_photo_rows
 from lib.pipeline_io import atomic_write_json
 from lib.photo_pre_model_annotations import (
     DEFAULT_OUTPUT_DIRNAME as DEFAULT_PHOTO_PRE_MODEL_DIRNAME,
+    build_dataset_photo_pre_model_descriptor_field_registry,
     load_photo_pre_model_annotations_by_relative_path,
 )
 from lib.vlm_transport import VlmRequest, build_provider_request_payload, get_vlm_capabilities, run_vlm_request
@@ -797,9 +798,9 @@ def _load_ml_candidate_descriptors(
     candidate_row: Mapping[str, object],
     *,
     photo_pre_model_dir: Optional[Path],
-) -> dict[str, dict[str, object]]:
+) -> tuple[dict[str, dict[str, object]], Optional[dict[str, str]]]:
     if photo_pre_model_dir is None or not photo_pre_model_dir.exists():
-        return {}
+        return {}, None
     relative_paths = [
         str(candidate_row.get(f"frame_{frame_index:02d}_relpath", "") or "").strip()
         for frame_index in range(1, ML_BOUNDARY_WINDOW_SIZE + 1)
@@ -818,7 +819,10 @@ def _load_ml_candidate_descriptors(
         annotation = annotations_by_relative_path.get(relative_path)
         if annotation is not None:
             descriptors[photo_id] = annotation
-    return descriptors
+    return (
+        descriptors,
+        build_dataset_photo_pre_model_descriptor_field_registry(annotations_by_relative_path),
+    )
 
 
 def _build_ml_candidate_heuristic_features(
@@ -867,12 +871,16 @@ def predict_ml_hint_for_candidate(
     boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
     photo_pre_model_dir: Optional[Path],
 ) -> MlHintPrediction:
-    descriptors = _load_ml_candidate_descriptors(candidate_row, photo_pre_model_dir=photo_pre_model_dir)
+    descriptors, descriptor_field_registry = _load_ml_candidate_descriptors(
+        candidate_row,
+        photo_pre_model_dir=photo_pre_model_dir,
+    )
     heuristic_features = _build_ml_candidate_heuristic_features(candidate_row, boundary_rows_by_pair)
     derived_features = build_candidate_feature_row(
         candidate_row,
         descriptors=descriptors,
         embeddings=None,
+        descriptor_field_registry=descriptor_field_registry,
         heuristic_features=heuristic_features,
     )
     segment_type_row = _build_predictor_feature_row(
