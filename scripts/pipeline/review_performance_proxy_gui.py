@@ -325,6 +325,18 @@ def resolve_effective_type_code(base_type: str, override_type: str) -> tuple[str
     return segment_type_to_code(effective_segment_type), override_active
 
 
+def resolve_merged_segment_type(target_type: object, source_type: object) -> str:
+    normalized_target = str(target_type or "").strip().lower()
+    normalized_source = str(source_type or "").strip().lower()
+    if normalized_target == normalized_source:
+        return normalized_target
+    if normalized_target and not normalized_source:
+        return normalized_target
+    if normalized_source and not normalized_target:
+        return normalized_source
+    return ""
+
+
 def build_review_row_font(base_font: QFont, *, is_viewed: bool, type_override_active: bool) -> QFont:
     font = QFont(base_font)
     font.setBold(not is_viewed)
@@ -1856,12 +1868,10 @@ class MainWindow(QMainWindow):
             )
             target_set["performance_end_local"] = source_set.get("performance_end_local", target_set["performance_end_local"])
             target_set["timeline_status"] = source_set.get("timeline_status", target_set["timeline_status"])
-            target_segment_type = str(target_set.get("segment_type", "") or "").strip()
-            source_segment_type = str(source_set.get("segment_type", "") or "").strip()
-            if target_segment_type == source_segment_type:
-                merged_segment_type = target_segment_type
-            else:
-                merged_segment_type = ""
+            merged_segment_type = resolve_merged_segment_type(
+                target_set.get("segment_type", ""),
+                source_set.get("segment_type", ""),
+            )
             target_set["segment_type"] = merged_segment_type
             target_set["type_code"] = segment_type_to_code(merged_segment_type)
             for photo in target_set["photos"]:

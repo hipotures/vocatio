@@ -115,6 +115,53 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             ],
         )
 
+    def build_merge_test_window(self, merge_specs: list[dict[str, str]]):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.review_state = {"merges": merge_specs}
+        return window
+
+    def build_display_set(self, set_id: str, segment_type: str, *, photo_prefix: str) -> dict:
+        normalized_segment_type = str(segment_type or "").strip().lower()
+        type_code = review_gui.segment_type_to_code(normalized_segment_type)
+        photo_time = "2026-03-23T10:00:00" if photo_prefix == "a" else "2026-03-23T10:00:05"
+        photo = {
+            "filename": f"{photo_prefix}.jpg",
+            "relative_path": f"cam/{photo_prefix}.jpg",
+            "adjusted_start_local": photo_time,
+            "assignment_status": "assigned",
+            "segment_type": normalized_segment_type,
+            "type_code": type_code,
+            "source_path": f"/src/{photo_prefix}.jpg",
+            "proxy_exists": True,
+            "proxy_path": f"/proxy/{photo_prefix}.jpg",
+        }
+        return {
+            "set_id": set_id,
+            "base_set_id": set_id,
+            "display_name": set_id,
+            "original_performance_number": set_id,
+            "segment_type": normalized_segment_type,
+            "type_code": type_code,
+            "occurrence_index": "",
+            "duplicate_status": "normal",
+            "timeline_status": "image_only",
+            "performance_start_local": photo_time,
+            "performance_end_local": photo_time,
+            "photo_count": 1,
+            "review_count": 0,
+            "first_photo_local": photo_time,
+            "last_photo_local": photo_time,
+            "duration_seconds": 0,
+            "max_internal_photo_gap_seconds": 0,
+            "gap_boundary_filenames": [],
+            "merged_manually": False,
+            "first_proxy_path": photo["proxy_path"],
+            "last_proxy_path": photo["proxy_path"],
+            "first_source_path": photo["source_path"],
+            "last_source_path": photo["source_path"],
+            "photos": [photo],
+        }
+
     def test_load_image_only_diagnostics_builds_boundary_and_segment_maps(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_dir = Path(tmp)
@@ -278,6 +325,54 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
     def test_resolve_effective_type_code_prefers_override_when_present(self):
         self.assertEqual(review_gui.resolve_effective_type_code("dance", "ceremony"), ("C", True))
         self.assertEqual(review_gui.resolve_effective_type_code("dance", ""), ("D", False))
+
+    def test_apply_display_set_merges_keeps_known_type_when_merging_known_and_empty(self):
+        window = self.build_merge_test_window([{"target_set_id": "set-a", "source_set_id": "set-b"}])
+        merged_sets = window.apply_display_set_merges(
+            [
+                self.build_display_set("set-a", "dance", photo_prefix="a"),
+                self.build_display_set("set-b", "", photo_prefix="b"),
+            ]
+        )
+
+        self.assertEqual(len(merged_sets), 1)
+        merged_set = merged_sets[0]
+        self.assertEqual(merged_set["segment_type"], "dance")
+        self.assertEqual(merged_set["type_code"], "D")
+        self.assertEqual([photo["segment_type"] for photo in merged_set["photos"]], ["dance", "dance"])
+        self.assertEqual([photo["type_code"] for photo in merged_set["photos"]], ["D", "D"])
+
+    def test_apply_display_set_merges_keeps_type_when_merging_same_known_types(self):
+        window = self.build_merge_test_window([{"target_set_id": "set-a", "source_set_id": "set-b"}])
+        merged_sets = window.apply_display_set_merges(
+            [
+                self.build_display_set("set-a", "ceremony", photo_prefix="a"),
+                self.build_display_set("set-b", "ceremony", photo_prefix="b"),
+            ]
+        )
+
+        self.assertEqual(len(merged_sets), 1)
+        merged_set = merged_sets[0]
+        self.assertEqual(merged_set["segment_type"], "ceremony")
+        self.assertEqual(merged_set["type_code"], "C")
+        self.assertEqual([photo["segment_type"] for photo in merged_set["photos"]], ["ceremony", "ceremony"])
+        self.assertEqual([photo["type_code"] for photo in merged_set["photos"]], ["C", "C"])
+
+    def test_apply_display_set_merges_falls_back_to_unknown_for_conflicting_known_types(self):
+        window = self.build_merge_test_window([{"target_set_id": "set-a", "source_set_id": "set-b"}])
+        merged_sets = window.apply_display_set_merges(
+            [
+                self.build_display_set("set-a", "dance", photo_prefix="a"),
+                self.build_display_set("set-b", "ceremony", photo_prefix="b"),
+            ]
+        )
+
+        self.assertEqual(len(merged_sets), 1)
+        merged_set = merged_sets[0]
+        self.assertEqual(merged_set["segment_type"], "")
+        self.assertEqual(merged_set["type_code"], "?")
+        self.assertEqual([photo["segment_type"] for photo in merged_set["photos"]], ["", ""])
+        self.assertEqual([photo["type_code"] for photo in merged_set["photos"]], ["?", "?"])
 
     def test_build_review_row_font_italicizes_overridden_rows_without_relying_on_bold(self):
         viewed_font = review_gui.build_review_row_font(
