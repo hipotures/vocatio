@@ -287,6 +287,37 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 "0.910000",
             )
 
+    def test_build_info_section_derives_default_key_and_full_shape(self):
+        self.assertEqual(
+            review_gui.build_info_section(
+                "Set summary",
+                "Basic set metadata and review state.",
+                "Body text",
+            ),
+            {
+                "key": "set_summary",
+                "title": "Set summary",
+                "description": "Basic set metadata and review state.",
+                "body": "Body text",
+            },
+        )
+
+    def test_build_info_section_uses_explicit_key_override(self):
+        self.assertEqual(
+            review_gui.build_info_section(
+                "Set summary",
+                "Basic set metadata and review state.",
+                "Body text",
+                key="custom_summary",
+            ),
+            {
+                "key": "custom_summary",
+                "title": "Set summary",
+                "description": "Basic set metadata and review state.",
+                "body": "Body text",
+            },
+        )
+
     def test_build_image_only_set_info_sections_for_set_returns_named_sections(self):
         diagnostics = {"available": False, "error": ""}
         display_set = {
@@ -318,12 +349,19 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             manual_prediction_state=None,
         )
 
-        self.assertEqual([section["title"] for section in sections], ["Set summary"])
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(sections[0]["key"], "set_summary")
+        self.assertEqual(sections[0]["title"], "Set summary")
+        self.assertEqual(sections[0]["description"], "Basic set metadata and review state.")
         self.assertIn("Type: D", sections[0]["body"])
 
     def test_build_copy_status_message_uses_section_title(self):
         self.assertEqual(
             review_gui.build_info_section_copy_status_message("ML hints"),
+            "Copied ML hints",
+        )
+        self.assertEqual(
+            review_gui.build_info_section_copy_status_message("  ML hints  "),
             "Copied ML hints",
         )
 
