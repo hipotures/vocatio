@@ -1703,9 +1703,16 @@ class MainWindow(QMainWindow):
             )
 
     def cycle_current_set_segment_type_override(self) -> None:
-        item = self.current_top_level_item()
-        if item is None:
+        current_item = self.tree.currentItem()
+        if current_item is None:
             return
+        preferred_filename = ""
+        item = current_item
+        if current_item.parent() is not None:
+            photo = current_item.data(0, Qt.UserRole) or {}
+            preferred_filename = str(photo.get("filename", "") or "")
+            while item.parent() is not None:
+                item = item.parent()
         display_set = item.data(0, Qt.UserRole)
         set_id = display_set["set_id"]
         display_name = str(display_set.get("display_name", "") or set_id)
@@ -1715,7 +1722,7 @@ class MainWindow(QMainWindow):
         entry["segment_type_override"] = override_value
         self.review_state["updated_at"] = self.current_timestamp()
         self.state_dirty = True
-        self.rebuild_tree_after_state_change(preferred_set_id=set_id)
+        self.rebuild_tree_after_state_change(preferred_set_id=set_id, preferred_filename=preferred_filename)
         status_message = build_segment_type_override_status_message(
             display_name,
             override_value,

@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -552,6 +553,53 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             review_gui.build_segment_type_override_status_message("VLM0007", "", override_active=False),
             "Type reset for set VLM0007",
         )
+
+    def test_cycle_current_set_segment_type_override_updates_state_and_preserves_child_selection_context(self):
+        class FakeItem:
+            def __init__(self, payload: dict, parent: "FakeItem | None" = None):
+                self._payload = payload
+                self._parent = parent
+
+            def parent(self):
+                return self._parent
+
+            def data(self, _column: int, _role: int):
+                return self._payload
+
+        class FakeTree:
+            def __init__(self, current_item: FakeItem):
+                self._current_item = current_item
+
+            def currentItem(self):
+                return self._current_item
+
+        for flush_result, expected_message in (
+            (True, "Type set to D for set VLM0007"),
+            (False, "Type set to D for set VLM0007 in memory, but save failed"),
+        ):
+            with self.subTest(flush_result=flush_result):
+                window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+                window.review_state = {"performances": {}}
+                window.state_dirty = False
+                window.current_timestamp = Mock(return_value="2026-04-18T12:34:56Z")
+                window.flush_review_state = Mock(return_value=flush_result)
+                window.rebuild_tree_after_state_change = Mock()
+                status_bar = Mock()
+                window.statusBar = Mock(return_value=status_bar)
+                parent_item = FakeItem({"set_id": "set-a", "display_name": "VLM0007"})
+                child_item = FakeItem({"filename": "b.jpg"}, parent=parent_item)
+                window.tree = FakeTree(child_item)
+
+                window.cycle_current_set_segment_type_override()
+
+                self.assertEqual(window.review_state["performances"]["set-a"]["segment_type_override"], "dance")
+                self.assertEqual(window.review_state["updated_at"], "2026-04-18T12:34:56Z")
+                self.assertTrue(window.state_dirty)
+                window.rebuild_tree_after_state_change.assert_called_once_with(
+                    preferred_set_id="set-a",
+                    preferred_filename="b.jpg",
+                )
+                status_bar.showMessage.assert_called_once_with(expected_message)
 
     def test_keyboard_help_sections_review_shortcuts_include_type_override_cycle(self):
         review_section = dict(review_gui.keyboard_help_sections())["Review"]
