@@ -350,11 +350,12 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(len(sections), 1)
-        self.assertEqual(sections[0]["key"], "set_summary")
-        self.assertEqual(sections[0]["title"], "Set summary")
-        self.assertEqual(sections[0]["description"], "Basic set metadata and review state.")
-        self.assertIn("Type: D", sections[0]["body"])
-        self.assertIn("No photos confirmed: yes", sections[0]["body"])
+        set_summary = next((section for section in sections if section["key"] == "set_summary"), None)
+        self.assertIsNotNone(set_summary)
+        self.assertEqual(set_summary["title"], "Set summary")
+        self.assertEqual(set_summary["description"], "Basic set metadata and review state.")
+        self.assertIn("Type: D", set_summary["body"])
+        self.assertIn("No photos confirmed: yes", set_summary["body"])
 
     def test_build_copy_status_message_uses_section_title(self):
         self.assertEqual(
@@ -392,16 +393,27 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.statusBar = Mock(return_value=status_bar)
         window.show_display_set = Mock()
 
+        section_bodies = [
+            "No photos confirmed: yes",
+            "Boundary before set\n  score: 0.910000",
+        ]
+        mocked_sections = [
+            review_gui.build_info_section(
+                "Set summary",
+                "Basic set metadata and review state.",
+                section_bodies[0],
+            ),
+            review_gui.build_info_section(
+                "Boundary diagnostics",
+                "Boundary and segment diagnostics for this set.",
+                section_bodies[1],
+            ),
+        ]
+
         with unittest.mock.patch.object(
             review_gui,
             "build_image_only_set_info_sections",
-            return_value=[
-                review_gui.build_info_section(
-                    "Set summary",
-                    "Basic set metadata and review state.",
-                    "No photos confirmed: yes",
-                )
-            ],
+            return_value=mocked_sections,
         ) as build_sections, unittest.mock.patch.object(
             review_gui,
             "build_image_only_set_info_text",
@@ -409,6 +421,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         ):
             window.on_selection_changed()
 
+        self.assertGreaterEqual(len(mocked_sections), 2)
         build_sections.assert_called_once_with(
             display_set,
             window.image_only_diagnostics,
@@ -416,7 +429,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             show_manual_ml_prediction=False,
             manual_prediction_state=None,
         )
-        window.meta_label.setText.assert_called_once_with("No photos confirmed: yes")
+        window.meta_label.setText.assert_called_once_with("\n\n".join(section_bodies))
         window.mark_set_viewed.assert_called_once_with("vlm-set-0001")
         status_bar.showMessage.assert_called_once_with("Set VLM0001 - 5 photos - view single")
         window.show_display_set.assert_called_once_with(display_set)
