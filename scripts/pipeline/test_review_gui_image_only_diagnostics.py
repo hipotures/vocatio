@@ -381,6 +381,148 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Boundary: cut", result_section["body"])
         self.assertIn("Right-side segment: ceremony", result_section["body"])
 
+    def test_resolve_manual_prediction_window_config_prefers_vocatio_values(self):
+        resolved = review_gui.resolve_manual_prediction_window_config(
+            {
+                "VLM_WINDOW_SIZE": "7",
+                "VLM_OVERLAP": "3",
+            }
+        )
+        self.assertEqual(resolved, {"window_size": 7, "overlap": 3})
+
+    def test_resolve_manual_prediction_window_config_falls_back_to_probe_defaults(self):
+        resolved = review_gui.resolve_manual_prediction_window_config({})
+        self.assertEqual(
+            resolved,
+            {
+                "window_size": review_gui.probe_vlm_boundary.DEFAULT_WINDOW_SIZE,
+                "overlap": review_gui.probe_vlm_boundary.DEFAULT_OVERLAP,
+            },
+        )
+
+    def test_resolve_manual_prediction_anchor_pair_sorts_like_gui_and_ignores_interior_rows(self):
+        selected_photos = [
+            {
+                "filename": "d.jpg",
+                "relative_path": "cam/d.jpg",
+                "source_path": "/src/d.jpg",
+                "adjusted_start_local": "2026-03-23T10:00:08",
+            },
+            {
+                "filename": "a.jpg",
+                "relative_path": "cam/a.jpg",
+                "source_path": "/src/a.jpg",
+                "adjusted_start_local": "2026-03-23T10:00:00",
+            },
+        ]
+        joined_rows = [
+            {"relative_path": "cam/a.jpg", "start_epoch_ms": "1000"},
+            {"relative_path": "cam/b.jpg", "start_epoch_ms": "2000"},
+            {"relative_path": "cam/c.jpg", "start_epoch_ms": "3000"},
+            {"relative_path": "cam/d.jpg", "start_epoch_ms": "9000"},
+        ]
+
+        resolved = review_gui.resolve_manual_prediction_anchor_pair(selected_photos, joined_rows)
+
+        self.assertEqual(resolved["left_relative_path"], "cam/a.jpg")
+        self.assertEqual(resolved["right_relative_path"], "cam/d.jpg")
+        self.assertEqual(resolved["left_row_index"], 0)
+        self.assertEqual(resolved["right_row_index"], 3)
+        self.assertEqual(resolved["gap_seconds"], 8.0)
+
+    def test_manual_ml_prediction_state_order_matches_preview_and_export_for_tied_timestamps(self):
+        display_set = {
+            "set_id": "imgset-000001",
+            "display_name": "SEG0001",
+        }
+        photo_z = {
+            "filename": "z.jpg",
+            "relative_path": "cam/z.jpg",
+            "source_path": "/src/z.jpg",
+            "stream_id": "stream-z",
+            "proxy_path": "/tmp/z.jpg",
+            "adjusted_start_local": "2026-03-23T10:00:00",
+            "display_set_id": "imgset-000001",
+            "display_name": "SEG0001",
+        }
+        photo_a = {
+            "filename": "a.jpg",
+            "relative_path": "cam/a.jpg",
+            "source_path": "/src/a.jpg",
+            "stream_id": "stream-a",
+            "proxy_path": "/tmp/a.jpg",
+            "adjusted_start_local": "2026-03-23T10:00:00",
+            "display_set_id": "imgset-000001",
+            "display_name": "SEG0001",
+        }
+        set_item = FakeRestoreItem(display_set)
+        photo_item_z = FakeRestoreItem(photo_z, parent=set_item)
+        photo_item_a = FakeRestoreItem(photo_a, parent=set_item)
+        set_item.addChild(photo_item_z)
+        set_item.addChild(photo_item_a)
+        tree = FakeRestoreTree(current_item=photo_item_z, selected_items=[photo_item_z, photo_item_a])
+        tree.set_top_level_items([set_item])
+
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.tree = tree
+        window.index_path = Path("/tmp/performance_proxy_index.json")
+        window.workspace_dir = Path("/tmp")
+        window.payload = {
+            "day": "20260323",
+            "workspace_dir": "/tmp",
+        }
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        window.image_only_diagnostics = {"available": False, "error": ""}
+        window.manual_ml_prediction_state = None
+
+        window.selected_photo_entries = review_gui.MainWindow.selected_photo_entries.__get__(window, review_gui.MainWindow)
+        window.selected_photo_identity_keys = review_gui.MainWindow.selected_photo_identity_keys.__get__(window, review_gui.MainWindow)
+        window.should_show_manual_ml_prediction = review_gui.MainWindow.should_show_manual_ml_prediction.__get__(
+            window,
+            review_gui.MainWindow,
+        )
+        window.current_manual_ml_prediction_state = review_gui.MainWindow.current_manual_ml_prediction_state.__get__(
+            window,
+            review_gui.MainWindow,
+        )
+
+        with unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_vocatio_config",
+            return_value={},
+        ), unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_joined_rows",
+            return_value=[
+                {"relative_path": "cam/a.jpg", "start_epoch_ms": "1000"},
+                {"relative_path": "cam/z.jpg", "start_epoch_ms": "1000"},
+            ],
+        ):
+            state = window.current_manual_ml_prediction_state()
+
+        selected_photos = window.selected_photo_entries()
+        left_path, right_path, _, _ = review_gui.determine_selected_preview_paths(
+            selected_photos=selected_photos,
+            current_photo=photo_z,
+        )
+        diagnostics = review_gui.build_selection_diagnostics_payload(
+            mode="multi_photo",
+            current_display_name="SEG0001",
+            current_set_id="imgset-000001",
+            selected_photos=selected_photos,
+            display_set=None,
+            current_photo=None,
+            diagnostics={"available": False, "error": ""},
+        )
+
+        self.assertEqual(state["selected_photo_keys"], ["source:/src/a.jpg", "source:/src/z.jpg"])
+        self.assertEqual(left_path, "/tmp/a.jpg")
+        self.assertEqual(right_path, "/tmp/z.jpg")
+        self.assertEqual(
+            [photo["relative_path"] for photo in diagnostics["multi_photo_diagnostics"]["selected_photos"]],
+            ["cam/a.jpg", "cam/z.jpg"],
+        )
+
     def test_build_image_only_set_info_sections_for_set_returns_named_sections(self):
         diagnostics = {"available": False, "error": ""}
         display_set = {
@@ -857,6 +999,85 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             self.assertEqual(payload["selection_diagnostics"]["mode"], "multi_photo")
             self.assertEqual(payload["selection_diagnostics"]["summary"]["selected_photo_count"], 2)
             self.assertEqual(payload["selection_diagnostics"]["summary"]["current_set_id"], "imgset-000001")
+            status_bar.showMessage.assert_called_once_with(f"Saved 2 photos to {output_path}")
+
+    def test_export_selected_photos_json_uses_exported_rows_not_tree_focus_for_selection_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            output_path = workspace_dir / "selection.json"
+            selected_photos = [
+                {
+                    "filename": "a.jpg",
+                    "relative_path": "cam/a.jpg",
+                    "stream_id": "stream-a",
+                    "source_path": "/src/a.jpg",
+                    "adjusted_start_local": "2026-03-23T10:00:00",
+                    "display_set_id": "imgset-000001",
+                    "display_name": "SEG0001",
+                },
+                {
+                    "filename": "b.jpg",
+                    "relative_path": "cam/b.jpg",
+                    "stream_id": "stream-b",
+                    "source_path": "/src/b.jpg",
+                    "adjusted_start_local": "2026-03-23T10:00:05",
+                    "display_set_id": "imgset-000001",
+                    "display_name": "SEG0001",
+                },
+            ]
+            focused_display_set = {
+                "display_name": "SEG9999",
+                "set_id": "imgset-000099",
+            }
+            focused_photo = {
+                "filename": "z.jpg",
+                "relative_path": "cam/z.jpg",
+                "stream_id": "stream-z",
+                "source_path": "/src/z.jpg",
+                "adjusted_start_local": "2026-03-23T11:00:00",
+                "display_set_id": "imgset-000099",
+                "display_name": "SEG9999",
+            }
+            focused_set_item = FakeRestoreItem(focused_display_set)
+            focused_photo_item = FakeRestoreItem(focused_photo, parent=focused_set_item)
+            focused_set_item.addChild(focused_photo_item)
+
+            window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+            window.workspace_dir = workspace_dir
+            window.payload = {"day": "20260323"}
+            window.index_path = workspace_dir / "performance_proxy_index.json"
+            window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+            window.image_only_diagnostics = {"available": False, "error": "missing diagnostics"}
+            window.selected_photo_entries = Mock(return_value=selected_photos)
+            window.current_timestamp = Mock(return_value="2026-04-19T12:34:56")
+            window.tree = FakeRestoreTree(current_item=focused_photo_item)
+            window.tree.set_top_level_items([focused_set_item])
+            window.current_top_level_item = Mock(return_value=focused_set_item)
+            window.current_selection_diagnostics_payload = review_gui.MainWindow.current_selection_diagnostics_payload.__get__(
+                window,
+                review_gui.MainWindow,
+            )
+            window.info_dock = Mock()
+            window.info_dock.isVisible.return_value = False
+            status_bar = Mock()
+            window.statusBar = Mock(return_value=status_bar)
+
+            with unittest.mock.patch.object(
+                review_gui.QInputDialog,
+                "getText",
+                return_value=(str(output_path), True),
+            ):
+                window.export_selected_photos_json()
+
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            diagnostics = payload["selection_diagnostics"]
+            self.assertEqual(diagnostics["mode"], "multi_photo")
+            self.assertEqual(diagnostics["summary"]["current_display_name"], "SEG0001")
+            self.assertEqual(diagnostics["summary"]["current_set_id"], "imgset-000001")
+            self.assertEqual(
+                [photo["relative_path"] for photo in diagnostics["multi_photo_diagnostics"]["selected_photos"]],
+                ["cam/a.jpg", "cam/b.jpg"],
+            )
             status_bar.showMessage.assert_called_once_with(f"Saved 2 photos to {output_path}")
 
     def test_build_image_only_set_info_text_includes_boundary_metrics(self):

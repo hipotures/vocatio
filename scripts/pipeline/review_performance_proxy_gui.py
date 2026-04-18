@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from lib.workspace_dir import resolve_workspace_dir
+from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
 try:
     from lib import review_index_loader
 except ModuleNotFoundError:
@@ -220,6 +220,132 @@ def photo_identity_key(photo: Mapping[str, Any]) -> str:
     if filename:
         return f"filename:{filename}"
     return ""
+
+
+def selected_photo_sort_key(photo: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(photo.get("adjusted_start_local", "") or ""),
+        str(photo.get("relative_path", "") or ""),
+        str(photo.get("filename", "") or ""),
+        str(photo.get("stream_id", "") or ""),
+        str(photo.get("source_path", "") or ""),
+    )
+
+
+def sort_selected_photos(selected_photos: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
+    return sorted(selected_photos, key=selected_photo_sort_key)
+
+
+def resolve_selected_photo_context(selected_photos: Sequence[Mapping[str, Any]]) -> tuple[str, str]:
+    sorted_photos = sort_selected_photos(selected_photos)
+    if not sorted_photos:
+        return "", ""
+    if len(sorted_photos) == 1:
+        photo = sorted_photos[0]
+        return (
+            str(photo.get("display_name", "") or ""),
+            str(photo.get("display_set_id", "") or ""),
+        )
+    display_names = {str(photo.get("display_name", "") or "").strip() for photo in sorted_photos}
+    set_ids = {str(photo.get("display_set_id", "") or "").strip() for photo in sorted_photos}
+    if len(display_names) == 1 and len(set_ids) == 1:
+        return next(iter(display_names)), next(iter(set_ids))
+    return "", ""
+
+
+def resolve_manual_prediction_window_config(vocatio_config: Mapping[str, str]) -> Dict[str, int]:
+    window_size = probe_vlm_boundary.DEFAULT_WINDOW_SIZE
+    overlap = probe_vlm_boundary.DEFAULT_OVERLAP
+
+    configured_window_size = str(vocatio_config.get("VLM_WINDOW_SIZE", "") or "").strip()
+    if configured_window_size:
+        window_size = probe_vlm_boundary.positive_int_arg(configured_window_size)
+
+    configured_overlap = str(vocatio_config.get("VLM_OVERLAP", "") or "").strip()
+    if configured_overlap:
+        overlap = probe_vlm_boundary.non_negative_int_arg(configured_overlap)
+
+    return {
+        "window_size": window_size,
+        "overlap": overlap,
+    }
+
+
+def resolve_manual_prediction_anchor_pair(
+    selected_photos: Sequence[Mapping[str, Any]],
+    joined_rows: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    sorted_photos = sort_selected_photos(selected_photos)
+    if len(sorted_photos) != 2:
+        raise ValueError("manual prediction requires exactly two selected photos")
+
+    joined_row_index_by_relative_path: Dict[str, int] = {}
+    for index, row in enumerate(joined_rows):
+        relative_path = str(row.get("relative_path", "") or "").strip()
+        if relative_path and relative_path not in joined_row_index_by_relative_path:
+            joined_row_index_by_relative_path[relative_path] = index
+
+    left_photo = sorted_photos[0]
+    right_photo = sorted_photos[1]
+    left_relative_path = str(left_photo.get("relative_path", "") or "").strip()
+    right_relative_path = str(right_photo.get("relative_path", "") or "").strip()
+    if not left_relative_path or not right_relative_path:
+        raise ValueError("manual prediction anchors require relative_path values")
+    if left_relative_path not in joined_row_index_by_relative_path:
+        raise ValueError(f"manual prediction anchor is missing from joined rows: {left_relative_path}")
+    if right_relative_path not in joined_row_index_by_relative_path:
+        raise ValueError(f"manual prediction anchor is missing from joined rows: {right_relative_path}")
+
+    left_row_index = joined_row_index_by_relative_path[left_relative_path]
+    right_row_index = joined_row_index_by_relative_path[right_relative_path]
+    left_row = joined_rows[left_row_index]
+    right_row = joined_rows[right_row_index]
+    left_start_epoch_ms = int(str(left_row.get("start_epoch_ms", "") or "").strip())
+    right_start_epoch_ms = int(str(right_row.get("start_epoch_ms", "") or "").strip())
+
+    return {
+        "left_relative_path": left_relative_path,
+        "right_relative_path": right_relative_path,
+        "left_row_index": left_row_index,
+        "right_row_index": right_row_index,
+        "left_start_epoch_ms": left_start_epoch_ms,
+        "right_start_epoch_ms": right_start_epoch_ms,
+        "gap_seconds": abs(right_start_epoch_ms - left_start_epoch_ms) / 1000.0,
+    }
+
+
+def resolve_manual_prediction_day_dir(index_path: Path, payload: Mapping[str, Any], source_mode: str) -> Path:
+    day_dir, _workspace_dir = review_index_loader.resolve_day_and_workspace_dir(payload, index_path, source_mode)
+    return day_dir
+
+
+def load_manual_prediction_vocatio_config(
+    index_path: Path,
+    payload: Mapping[str, Any],
+    source_mode: str,
+) -> Dict[str, str]:
+    return load_vocatio_config(resolve_manual_prediction_day_dir(index_path, payload, source_mode))
+
+
+def load_manual_prediction_joined_rows(
+    workspace_dir: Path,
+    payload: Mapping[str, Any],
+) -> List[Dict[str, str]]:
+    embedded_manifest_csv = probe_vlm_boundary.resolve_path(
+        workspace_dir,
+        str(payload.get("embedded_manifest_csv", "") or probe_vlm_boundary.PHOTO_EMBEDDED_MANIFEST_FILENAME),
+    )
+    photo_manifest_csv = probe_vlm_boundary.resolve_path(
+        workspace_dir,
+        str(payload.get("photo_manifest_csv", "") or probe_vlm_boundary.PHOTO_MANIFEST_FILENAME),
+    )
+    image_variant = str(payload.get("vlm_image_variant", "") or probe_vlm_boundary.DEFAULT_IMAGE_VARIANT).strip()
+    return probe_vlm_boundary.read_joined_rows(
+        workspace_dir=workspace_dir,
+        embedded_manifest_csv=embedded_manifest_csv,
+        photo_manifest_csv=photo_manifest_csv,
+        image_variant=image_variant,
+    )
 
 
 def keyboard_help_sections() -> List[tuple[str, List[tuple[str, str]]]]:
@@ -824,14 +950,7 @@ def build_image_only_photo_ml_hints_body(
 
 
 def build_image_only_multi_photo_summary_body(photos: Sequence[Mapping[str, Any]]) -> str:
-    sorted_photos = sorted(
-        photos,
-        key=lambda photo: (
-            str(photo.get("adjusted_start_local", "")),
-            str(photo.get("relative_path", "")),
-            str(photo.get("filename", "")),
-        ),
-    )
+    sorted_photos = sort_selected_photos(photos)
     lines = [
         f"Selected photos: {len(sorted_photos)}",
         f"First time: {format_value(sorted_photos[0].get('adjusted_start_local'))}",
@@ -860,14 +979,7 @@ def build_image_only_multi_photo_boundary_diagnostics_body(
 ) -> str:
     if not diagnostics.get("available"):
         return build_diagnostics_unavailable_body(diagnostics)
-    sorted_photos = sorted(
-        photos,
-        key=lambda photo: (
-            str(photo.get("adjusted_start_local", "")),
-            str(photo.get("relative_path", "")),
-            str(photo.get("filename", "")),
-        ),
-    )
+    sorted_photos = sort_selected_photos(photos)
     lines = ["Selected boundaries"]
     boundary_by_pair = diagnostics.get("boundary_by_pair", {})
     adjacent_boundaries = []
@@ -1079,14 +1191,7 @@ def determine_selected_preview_paths(
     selected_photos: Sequence[Mapping[str, Any]],
     current_photo: Mapping[str, Any],
 ) -> tuple[str, str, str, str]:
-    sorted_photos = sorted(
-        selected_photos,
-        key=lambda photo: (
-            str(photo.get("adjusted_start_local", "")),
-            str(photo.get("relative_path", "")),
-            str(photo.get("filename", "")),
-        ),
-    )
+    sorted_photos = sort_selected_photos(selected_photos)
     if len(sorted_photos) == 2:
         return (
             str(sorted_photos[0].get("proxy_path", "") or ""),
@@ -1127,14 +1232,7 @@ def build_selection_diagnostics_payload(
         },
     }
     if selected_photos:
-        sorted_photos = sorted(
-            selected_photos,
-            key=lambda photo: (
-                str(photo.get("adjusted_start_local", "")),
-                str(photo.get("relative_path", "")),
-                str(photo.get("filename", "")),
-            ),
-        )
+        sorted_photos = sort_selected_photos(selected_photos)
         payload["summary"]["first_time"] = str(sorted_photos[0].get("adjusted_start_local", "") or "")
         payload["summary"]["last_time"] = str(sorted_photos[-1].get("adjusted_start_local", "") or "")
     if mode == "set" and display_set is not None:
@@ -1175,14 +1273,7 @@ def build_selection_diagnostics_payload(
             "boundary_before_photo": dict(right_boundary) if right_boundary else None,
         }
     if mode == "multi_photo":
-        sorted_photos = sorted(
-            selected_photos,
-            key=lambda photo: (
-                str(photo.get("adjusted_start_local", "")),
-                str(photo.get("relative_path", "")),
-                str(photo.get("filename", "")),
-            ),
-        )
+        sorted_photos = sort_selected_photos(selected_photos)
         selected_boundaries: List[Dict[str, Any]] = []
         if diagnostics.get("available"):
             boundary_by_pair = diagnostics.get("boundary_by_pair", {})
@@ -1943,15 +2034,7 @@ class MainWindow(QMainWindow):
             if key in selected:
                 continue
             selected[key] = photo
-        photos = list(selected.values())
-        photos.sort(
-            key=lambda photo: (
-                str(photo.get("adjusted_start_local", "")),
-                str(photo.get("stream_id", "")),
-                str(photo.get("filename", "")),
-            )
-        )
-        return photos
+        return [photo for photo in sort_selected_photos(list(selected.values()))]
 
     def selected_photo_identity_keys(self) -> List[str]:
         selected_keys: List[str] = []
@@ -2509,61 +2592,81 @@ class MainWindow(QMainWindow):
         return should_show_manual_ml_prediction(self.selected_photo_entries())
 
     def current_manual_ml_prediction_state(self) -> Optional[Mapping[str, Any]]:
-        if not self.should_show_manual_ml_prediction():
+        selected_photos = self.selected_photo_entries()
+        if self.source_mode != review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1 or not should_show_manual_ml_prediction(selected_photos):
             self.manual_ml_prediction_state = None
             return None
-        selected_photo_keys = self.selected_photo_identity_keys()
+        selected_photo_keys: List[str] = []
+        seen_keys: set[str] = set()
+        for photo in selected_photos:
+            key = photo_identity_key(photo)
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            selected_photo_keys.append(key)
         current_state = getattr(self, "manual_ml_prediction_state", None)
         current_keys = []
         if isinstance(current_state, Mapping):
             current_keys = [str(value) for value in current_state.get("selected_photo_keys", [])]
         if current_keys != selected_photo_keys:
-            self.manual_ml_prediction_state = {
+            next_state: Dict[str, Any] = {
                 "status": "idle",
                 "selected_photo_keys": list(selected_photo_keys),
             }
+            try:
+                next_state["window_config"] = resolve_manual_prediction_window_config(
+                    load_manual_prediction_vocatio_config(self.index_path, self.payload, self.source_mode)
+                )
+                next_state["anchor_pair"] = resolve_manual_prediction_anchor_pair(
+                    selected_photos,
+                    load_manual_prediction_joined_rows(self.workspace_dir, self.payload),
+                )
+            except Exception as exc:
+                next_state["resolution_error"] = str(exc)
+            self.manual_ml_prediction_state = next_state
         return self.manual_ml_prediction_state
 
     def current_selection_diagnostics_payload(
         self,
         selected_photos: Sequence[Mapping[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        current_item = self.tree.currentItem()
-        if current_item is None:
-            return None
-        if len(selected_photos) >= 2:
-            mode = "multi_photo"
-            top_level_item = self.current_top_level_item()
-            display_set = top_level_item.data(0, Qt.UserRole) if top_level_item is not None else None
-            current_photo = current_item.data(0, Qt.UserRole) if current_item.parent() is not None else None
-            current_display_name = (
-                str(display_set.get("display_name", "") or "")
-                if isinstance(display_set, dict)
-                else str((selected_photos[0].get("display_name", "") if selected_photos else "") or "")
-            )
-            current_set_id = (
-                str(display_set.get("set_id", "") or "")
-                if isinstance(display_set, dict)
-                else str((selected_photos[0].get("display_set_id", "") if selected_photos else "") or "")
-            )
-        elif current_item.parent() is None:
-            mode = "set"
-            display_set = current_item.data(0, Qt.UserRole)
-            current_photo = None
-            current_display_name = str(display_set.get("display_name", "") or "") if isinstance(display_set, dict) else ""
-            current_set_id = str(display_set.get("set_id", "") or "") if isinstance(display_set, dict) else ""
+        sorted_photos = sort_selected_photos(selected_photos)
+        if sorted_photos:
+            current_display_name, current_set_id = resolve_selected_photo_context(sorted_photos)
+            if len(sorted_photos) >= 2:
+                mode = "multi_photo"
+                display_set = None
+                current_photo = None
+            else:
+                mode = "single_photo"
+                display_set = None
+                current_photo = sorted_photos[0]
+                if not current_display_name:
+                    current_display_name = str(current_photo.get("display_name", "") or "")
+                if not current_set_id:
+                    current_set_id = str(current_photo.get("display_set_id", "") or "")
         else:
-            mode = "single_photo"
-            top_level_item = self.current_top_level_item()
-            display_set = top_level_item.data(0, Qt.UserRole) if top_level_item is not None else None
-            current_photo = current_item.data(0, Qt.UserRole)
-            current_display_name = str(current_photo.get("display_name", "") or "") if isinstance(current_photo, dict) else ""
-            current_set_id = str(current_photo.get("display_set_id", "") or "") if isinstance(current_photo, dict) else ""
+            current_item = self.tree.currentItem()
+            if current_item is None:
+                return None
+            if current_item.parent() is None:
+                mode = "set"
+                display_set = current_item.data(0, Qt.UserRole)
+                current_photo = None
+                current_display_name = str(display_set.get("display_name", "") or "") if isinstance(display_set, dict) else ""
+                current_set_id = str(display_set.get("set_id", "") or "") if isinstance(display_set, dict) else ""
+            else:
+                mode = "single_photo"
+                top_level_item = self.current_top_level_item()
+                display_set = top_level_item.data(0, Qt.UserRole) if top_level_item is not None else None
+                current_photo = current_item.data(0, Qt.UserRole)
+                current_display_name = str(current_photo.get("display_name", "") or "") if isinstance(current_photo, dict) else ""
+                current_set_id = str(current_photo.get("display_set_id", "") or "") if isinstance(current_photo, dict) else ""
         return build_selection_diagnostics_payload(
             mode=mode,
             current_display_name=current_display_name,
             current_set_id=current_set_id,
-            selected_photos=selected_photos,
+            selected_photos=sorted_photos,
             display_set=display_set if isinstance(display_set, dict) else None,
             current_photo=current_photo if isinstance(current_photo, dict) else None,
             diagnostics=self.image_only_diagnostics
