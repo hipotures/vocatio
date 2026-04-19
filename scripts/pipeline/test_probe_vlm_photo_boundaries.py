@@ -906,7 +906,139 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(stored["args"]["response_schema_mode"], "on")
             self.assertEqual(stored["response_schema"], {"type": "object"})
 
-    def test_read_result_rows_rejects_legacy_header(self):
+    def test_read_result_rows_accepts_pre_follow_up_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base_row = {
+                "generated_at": "2026-04-14T05:30:12+02:00",
+                "run_id": "vlm-20260414053012",
+                "config_hash": "oldhash",
+                "image_variant": "thumb",
+                "model": "qwen3.5:9b",
+                "temperature": "0.0",
+                "batch_index": "1",
+                "start_row": "1",
+                "end_row": "4",
+                "window_size": "4",
+                "overlap": "2",
+                "relative_paths_json": '["cam/a.hif","cam/b.hif"]',
+                "filenames_json": '["a.hif","b.hif"]',
+                "image_paths_json": '["/tmp/a.jpg","/tmp/b.jpg"]',
+                "delta_from_first_seconds_json": "[0.0,1.0]",
+                "delta_from_previous_seconds_json": "[0.0,1.0]",
+                "decision": "cut_after_1",
+                "cut_after_local_index": "1",
+                "cut_after_global_row": "2",
+                "cut_left_relative_path": "cam/a.hif",
+                "cut_right_relative_path": "cam/b.hif",
+                "reason": "boundary",
+                "response_status": "ok",
+                "raw_response": '{"decision":"cut_after_1"}',
+            }
+            cases = [
+                (
+                    "old_current",
+                    [
+                        "generated_at",
+                        "run_id",
+                        "config_hash",
+                        "image_variant",
+                        "model",
+                        "temperature",
+                        "batch_index",
+                        "start_row",
+                        "end_row",
+                        "window_size",
+                        "overlap",
+                        "relative_paths_json",
+                        "filenames_json",
+                        "image_paths_json",
+                        "delta_from_first_seconds_json",
+                        "delta_from_previous_seconds_json",
+                        "decision",
+                        "cut_after_local_index",
+                        "cut_after_global_row",
+                        "cut_left_relative_path",
+                        "cut_right_relative_path",
+                        "reason",
+                        "response_status",
+                        "raw_response",
+                    ],
+                    {"run_id": "vlm-20260414053012", "config_hash": "oldhash", "window_radius": "2"},
+                ),
+                (
+                    "old_mid",
+                    [
+                        "generated_at",
+                        "run_id",
+                        "image_variant",
+                        "model",
+                        "temperature",
+                        "batch_index",
+                        "start_row",
+                        "end_row",
+                        "window_size",
+                        "overlap",
+                        "relative_paths_json",
+                        "filenames_json",
+                        "image_paths_json",
+                        "delta_from_first_seconds_json",
+                        "delta_from_previous_seconds_json",
+                        "decision",
+                        "cut_after_local_index",
+                        "cut_after_global_row",
+                        "cut_left_relative_path",
+                        "cut_right_relative_path",
+                        "reason",
+                        "response_status",
+                        "raw_response",
+                    ],
+                    {"run_id": "vlm-20260414053012", "config_hash": "", "window_radius": "2"},
+                ),
+                (
+                    "old_legacy",
+                    [
+                        "generated_at",
+                        "image_variant",
+                        "model",
+                        "temperature",
+                        "batch_index",
+                        "start_row",
+                        "end_row",
+                        "window_size",
+                        "overlap",
+                        "relative_paths_json",
+                        "filenames_json",
+                        "image_paths_json",
+                        "delta_from_first_seconds_json",
+                        "delta_from_previous_seconds_json",
+                        "decision",
+                        "cut_after_local_index",
+                        "cut_after_global_row",
+                        "cut_left_relative_path",
+                        "cut_right_relative_path",
+                        "reason",
+                        "response_status",
+                        "raw_response",
+                    ],
+                    {"run_id": "", "config_hash": "", "window_radius": "2"},
+                ),
+            ]
+            for name, headers, expected in cases:
+                output_csv = Path(tmp) / f"{name}.csv"
+                with output_csv.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow(headers)
+                    writer.writerow([base_row[header] for header in headers])
+                rows = probe.read_result_rows(output_csv)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["generated_at"], base_row["generated_at"])
+                self.assertEqual(rows[0]["image_variant"], "thumb")
+                self.assertEqual(rows[0]["decision"], "cut_after_1")
+                self.assertEqual(rows[0]["run_id"], expected["run_id"])
+                self.assertEqual(rows[0]["config_hash"], expected["config_hash"])
+                self.assertEqual(rows[0]["window_radius"], expected["window_radius"])
+
+    def test_read_result_rows_accepts_current_rows_appended_to_pre_follow_up_header(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_csv = Path(tmp) / "vlm_boundary_results.csv"
             legacy_headers = [
@@ -933,12 +1065,63 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "response_status",
                 "raw_response",
             ]
+            legacy_row = {
+                "generated_at": "2026-04-14T05:30:12+02:00",
+                "image_variant": "thumb",
+                "model": "qwen3.5:9b",
+                "temperature": "0.0",
+                "batch_index": "1",
+                "start_row": "1",
+                "end_row": "4",
+                "window_size": "4",
+                "overlap": "2",
+                "relative_paths_json": '["cam/a.hif","cam/b.hif"]',
+                "filenames_json": '["a.hif","b.hif"]',
+                "image_paths_json": '["/tmp/a.jpg","/tmp/b.jpg"]',
+                "delta_from_first_seconds_json": "[0.0,1.0]",
+                "delta_from_previous_seconds_json": "[0.0,1.0]",
+                "decision": "no_cut",
+                "cut_after_local_index": "",
+                "cut_after_global_row": "",
+                "cut_left_relative_path": "",
+                "cut_right_relative_path": "",
+                "reason": "same segment",
+                "response_status": "ok",
+                "raw_response": '{"decision":"no_cut"}',
+            }
+            current_row = {header: "" for header in probe.OUTPUT_HEADERS}
+            current_row["generated_at"] = "2026-04-14T05:31:12+02:00"
+            current_row["run_id"] = "vlm-20260414053112"
+            current_row["config_hash"] = "newhash"
+            current_row["image_variant"] = "preview"
+            current_row["model"] = "qwen3.5:9b"
+            current_row["temperature"] = "0.1"
+            current_row["batch_index"] = "2"
+            current_row["start_row"] = "5"
+            current_row["end_row"] = "8"
+            current_row["window_radius"] = "3"
+            current_row["decision"] = "cut_after_2"
+            current_row["cut_after_local_index"] = "2"
+            current_row["cut_after_global_row"] = "6"
+            current_row["cut_left_relative_path"] = "cam/f.hif"
+            current_row["cut_right_relative_path"] = "cam/g.hif"
+            current_row["reason"] = "boundary"
+            current_row["response_status"] = "ok"
+            current_row["raw_response"] = '{"decision":"cut_after_2"}'
             with output_csv.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
                 writer.writerow(legacy_headers)
-                writer.writerow(["legacy"] * len(legacy_headers))
-            with self.assertRaisesRegex(ValueError, "unsupported header"):
-                probe.read_result_rows(output_csv)
+                writer.writerow([legacy_row[header] for header in legacy_headers])
+                writer.writerow([current_row[header] for header in probe.OUTPUT_HEADERS])
+            rows = probe.read_result_rows(output_csv)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["run_id"], "")
+            self.assertEqual(rows[0]["config_hash"], "")
+            self.assertEqual(rows[0]["window_radius"], "2")
+            self.assertEqual(rows[1]["run_id"], "vlm-20260414053112")
+            self.assertEqual(rows[1]["config_hash"], "newhash")
+            self.assertEqual(rows[1]["image_variant"], "preview")
+            self.assertEqual(rows[1]["window_radius"], "3")
 
     def test_append_result_rows_writes_config_hash_column(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -969,6 +1152,112 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 second["batch_index"] = "2"
                 second["config_hash"] = "samehash"
                 writer.writerow(second)
+            for run_id in ("vlm-20260414053012", "vlm-20260414053113"):
+                (runs_dir / f"{run_id}.json").write_text(
+                    json.dumps({"run_id": run_id, "config_hash": "samehash", "args": {}}),
+                    encoding="utf-8",
+                )
+            state = probe.resolve_run_state(
+                workspace_dir=workspace_dir,
+                output_csv=output_csv,
+                config_hash="samehash",
+                new_run=False,
+                run_id=None,
+            )
+            self.assertEqual(state["run_id"], "vlm-20260414053113")
+            self.assertEqual(state["completed_batches"], 1)
+
+    def test_resolve_run_state_counts_pre_follow_up_rows_for_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
+            runs_dir.mkdir(parents=True)
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
+            legacy_headers = [
+                "generated_at",
+                "run_id",
+                "config_hash",
+                "image_variant",
+                "model",
+                "temperature",
+                "batch_index",
+                "start_row",
+                "end_row",
+                "window_size",
+                "overlap",
+                "relative_paths_json",
+                "filenames_json",
+                "image_paths_json",
+                "delta_from_first_seconds_json",
+                "delta_from_previous_seconds_json",
+                "decision",
+                "cut_after_local_index",
+                "cut_after_global_row",
+                "cut_left_relative_path",
+                "cut_right_relative_path",
+                "reason",
+                "response_status",
+                "raw_response",
+            ]
+            with output_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(legacy_headers)
+                writer.writerow(
+                    [
+                        "2026-04-14T05:30:12+02:00",
+                        "vlm-20260414053012",
+                        "samehash",
+                        "thumb",
+                        "qwen3.5:9b",
+                        "0.0",
+                        "1",
+                        "1",
+                        "4",
+                        "4",
+                        "2",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "no_cut",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "same segment",
+                        "ok",
+                        '{"decision":"no_cut"}',
+                    ]
+                )
+                writer.writerow(
+                    [
+                        "2026-04-14T05:31:12+02:00",
+                        "vlm-20260414053113",
+                        "samehash",
+                        "thumb",
+                        "qwen3.5:9b",
+                        "0.0",
+                        "2",
+                        "5",
+                        "8",
+                        "4",
+                        "2",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "cut_after_1",
+                        "1",
+                        "6",
+                        "cam/f.hif",
+                        "cam/g.hif",
+                        "boundary",
+                        "ok",
+                        '{"decision":"cut_after_1"}',
+                    ]
+                )
             for run_id in ("vlm-20260414053012", "vlm-20260414053113"):
                 (runs_dir / f"{run_id}.json").write_text(
                     json.dumps({"run_id": run_id, "config_hash": "samehash", "args": {}}),
