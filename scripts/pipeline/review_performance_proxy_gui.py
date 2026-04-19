@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+import yaml
 from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
 try:
     from lib import review_index_loader
@@ -208,6 +209,8 @@ def load_manual_vlm_models_for_gui(repo_root: Path) -> Tuple[List[Dict[str, Any]
     config_path = repo_root / MANUAL_VLM_MODELS_PATH
     try:
         loaded = manual_vlm_models.load_manual_vlm_models(config_path)
+    except yaml.YAMLError as exc:
+        return [], None, f"Model config error: {exc}"
     except ValueError as exc:
         return [], None, f"Model config error: {exc}"
     return loaded.models, loaded.md5_hex, None

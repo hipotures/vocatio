@@ -549,6 +549,56 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(debug_dir, Path(tempfile.gettempdir()))
 
+    def test_load_manual_vlm_models_for_gui_returns_config_error_for_invalid_yaml(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            config_path = repo_root / "conf" / "manual_vlm_models.yaml"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text("models: [\n", encoding="utf-8")
+
+            models, md5_hex, error_text = review_gui.load_manual_vlm_models_for_gui(repo_root)
+
+        self.assertEqual(models, [])
+        self.assertIsNone(md5_hex)
+        self.assertIsNotNone(error_text)
+        self.assertIn("Model config error:", error_text)
+
+    def test_reload_manual_vlm_models_loads_startup_preset_from_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            config_path = repo_root / "conf" / "manual_vlm_models.yaml"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "models:",
+                        "  - VLM_NAME: Preset B",
+                        "    VLM_PROVIDER: ollama",
+                        "    VLM_BASE_URL: http://127.0.0.1:11434",
+                        "    VLM_MODEL: llava:latest",
+                        "    VLM_CONTEXT_TOKENS: 8192",
+                        "    VLM_MAX_OUTPUT_TOKENS: 512",
+                        "    VLM_KEEP_ALIVE: 5m",
+                        "    VLM_TIMEOUT_SECONDS: 30",
+                        "    VLM_TEMPERATURE: 0.2",
+                        "    VLM_REASONING_LEVEL: low",
+                        "    VLM_RESPONSE_SCHEMA_MODE: strict",
+                        "    VLM_JSON_VALIDATION_MODE: strict",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+            window.manual_vlm_selected_name = "Missing Preset"
+
+            with unittest.mock.patch.object(review_gui, "REPO_ROOT", repo_root):
+                review_gui.MainWindow.reload_manual_vlm_models(window, startup=True)
+
+        self.assertEqual([model["VLM_NAME"] for model in window.manual_vlm_models], ["Preset B"])
+        self.assertIsNotNone(window.manual_vlm_models_md5)
+        self.assertIsNone(window.manual_vlm_models_error)
+        self.assertEqual(window.manual_vlm_selected_name, "Preset B")
+
     def test_format_manual_vlm_analyze_result_text_splits_reason_into_blocks(self):
         body = review_gui.format_manual_vlm_analyze_result_text(
             {
