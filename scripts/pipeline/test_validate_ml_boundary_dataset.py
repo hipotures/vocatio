@@ -8,8 +8,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
+from build_ml_boundary_candidate_dataset import _serialize_candidate_row
 from build_ml_boundary_candidate_dataset import candidate_row_headers
+from build_ml_boundary_candidate_dataset import build_candidate_rows
 from lib.ml_boundary_dataset import canonical_candidate_id
+from lib.ml_boundary_truth import build_final_photo_truth
 from validate_ml_boundary_dataset import (
     build_validation_report,
     main,
@@ -75,11 +78,14 @@ def _candidate_row(
         row[f"frame_{suffix}_timestamp"] = frame_timestamps[frame_index - 1]
         row[f"frame_{suffix}_thumb_path"] = f"thumb/p{frame_index}.jpg"
         row[f"frame_{suffix}_preview_path"] = f"preview/p{frame_index}.jpg"
+    candidate_identity_rule_version = (
+        f'{candidate_rule_version}|{row["candidate_rule_params_json"]}'
+    )
     row["candidate_id"] = canonical_candidate_id(
         day_id=day_id,
         center_left_photo_id=f"p{center_left_index}",
         center_right_photo_id=f"p{center_right_index}",
-        candidate_rule_version=candidate_rule_version,
+        candidate_rule_version=candidate_identity_rule_version,
     )
     return row
 
@@ -151,6 +157,35 @@ def test_validate_attrition_report_rejects_coverage_count_above_generated_or_ret
 
 def test_validate_candidate_row_accepts_valid_row() -> None:
     validate_candidate_row(_candidate_row(), row_number=2)
+
+
+def test_validate_candidate_row_accepts_freshly_generated_candidate_row() -> None:
+    photos = [
+        {"photo_id": "p1", "order_idx": 1, "timestamp": 0.0, "relative_path": "cam/p1.jpg"},
+        {"photo_id": "p2", "order_idx": 2, "timestamp": 1.0, "relative_path": "cam/p2.jpg"},
+        {"photo_id": "p3", "order_idx": 3, "timestamp": 2.0, "relative_path": "cam/p3.jpg"},
+        {"photo_id": "p4", "order_idx": 4, "timestamp": 30.0, "relative_path": "cam/p4.jpg"},
+        {"photo_id": "p5", "order_idx": 5, "timestamp": 31.0, "relative_path": "cam/p5.jpg"},
+    ]
+    truth = build_final_photo_truth(
+        [
+            {"photo_id": "p1", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p2", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p3", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p4", "segment_id": "s2", "segment_type": "ceremony"},
+            {"photo_id": "p5", "segment_id": "s2", "segment_type": "ceremony"},
+        ]
+    )
+
+    rows, _ = build_candidate_rows(
+        photos=photos,
+        truth=truth,
+        gap_threshold_seconds=10.0,
+        day_id="20250325",
+        candidate_rule_version="gap-v1",
+    )
+
+    validate_candidate_row(_serialize_candidate_row(rows[0]), row_number=2)
 
 
 def test_validate_candidate_row_rejects_boundary_segment_mismatch() -> None:

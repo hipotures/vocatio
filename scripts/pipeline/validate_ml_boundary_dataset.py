@@ -510,7 +510,7 @@ def validate_candidate_row(row: Mapping[str, object], *, row_number: int) -> Non
         day_id=day_id,
         center_left_photo_id=center_left_photo_id,
         center_right_photo_id=center_right_photo_id,
-        candidate_rule_version=candidate_rule_version,
+        candidate_rule_version=f"{candidate_rule_version}|{row['candidate_rule_params_json']}",
     )
     if candidate_id != expected_candidate_id:
         raise ValueError(f"row {row_number}: candidate_id does not match canonical_candidate_id")
