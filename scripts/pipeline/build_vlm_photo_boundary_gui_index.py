@@ -113,6 +113,16 @@ def resolve_ml_model_run_id(run_metadata: Mapping[str, Any]) -> str:
     return ""
 
 
+def resolve_runtime_window_radius(run_metadata: Mapping[str, Any]) -> int:
+    args = run_metadata.get("args")
+    if not isinstance(args, Mapping):
+        raise ValueError("run metadata args are unavailable")
+    raw_window_radius = str(args.get("window_radius", "") or "").strip()
+    if not raw_window_radius:
+        raise ValueError("run metadata window_radius is unavailable")
+    return probe.positive_window_radius_arg(raw_window_radius)
+
+
 def build_ml_hint_pairs_for_run(
     *,
     day_dir: Path,
@@ -125,6 +135,7 @@ def build_ml_hint_pairs_for_run(
     normalized_run_id = ml_model_run_id.strip()
     if not normalized_run_id:
         return "", [], ""
+    runtime_window_radius = resolve_runtime_window_radius(run_metadata)
     try:
         effective_ml_model_run_id, resolved_ml_model_dir = probe.resolve_ml_model_run(workspace_dir, normalized_run_id)
         ml_hint_context = probe.load_ml_hint_context(
@@ -133,6 +144,11 @@ def build_ml_hint_pairs_for_run(
         )
         if ml_hint_context is None:
             return effective_ml_model_run_id, [], "ML model directory is unavailable"
+        if ml_hint_context.window_radius != runtime_window_radius:
+            raise ValueError(
+                "ml model window_radius mismatch: "
+                f"runtime={runtime_window_radius}, artifact={ml_hint_context.window_radius}"
+            )
         args = run_metadata.get("args")
         photo_pre_model_dir_value = (
             str(args.get("photo_pre_model_dir", "") or probe.DEFAULT_PHOTO_PRE_MODEL_DIR)
@@ -162,7 +178,21 @@ def build_ml_hint_pairs_for_run(
             normalized_relative_paths = [str(value or "").strip() for value in relative_paths]
             if any(not value for value in normalized_relative_paths):
                 continue
-            main_left_index = max(0, (len(normalized_relative_paths) // 2) - 1)
+            expected_window_size = probe.window_radius_to_window_size(runtime_window_radius)
+            if len(normalized_relative_paths) != expected_window_size:
+                raise ValueError(
+                    "run row window_radius mismatch: "
+                    f"runtime={runtime_window_radius}, row_frame_count={len(normalized_relative_paths)}"
+                )
+            row_window_radius_text = str(result_row.get("window_radius", "") or "").strip()
+            if row_window_radius_text:
+                row_window_radius = probe.positive_window_radius_arg(row_window_radius_text)
+                if row_window_radius != runtime_window_radius:
+                    raise ValueError(
+                        "run row window_radius mismatch: "
+                        f"runtime={runtime_window_radius}, row={row_window_radius}"
+                    )
+            main_left_index = runtime_window_radius - 1
             main_right_index = main_left_index + 1
             if main_right_index >= len(normalized_relative_paths):
                 continue
@@ -192,11 +222,19 @@ def build_ml_hint_pairs_for_run(
         ) as progress:
             task_id = progress.add_task("Build ML GUI hints".ljust(25), total=total_pair_count)
             for candidate_rows in candidate_windows:
-                left_relative_path = str(candidate_rows[1].get("relative_path", "") or "").strip()
-                right_relative_path = str(candidate_rows[2].get("relative_path", "") or "").strip()
+                left_relative_path = str(
+                    candidate_rows[runtime_window_radius - 1].get("relative_path", "") or ""
+                ).strip()
+                right_relative_path = str(
+                    candidate_rows[runtime_window_radius].get("relative_path", "") or ""
+                ).strip()
                 prediction = probe.predict_ml_hint_for_candidate(
                     ml_hint_context=ml_hint_context,
-                    candidate_row=probe._build_ml_candidate_row(candidate_rows, day_id=day_dir.name),
+                    candidate_row=probe._build_ml_candidate_row(
+                        candidate_rows,
+                        day_id=day_dir.name,
+                        window_radius=runtime_window_radius,
+                    ),
                     boundary_rows_by_pair=boundary_rows_by_pair,
                     photo_pre_model_dir=photo_pre_model_dir,
                 )
@@ -214,6 +252,8 @@ def build_ml_hint_pairs_for_run(
                 progress.advance(task_id)
         return effective_ml_model_run_id, ml_hint_pairs, ""
     except Exception as error:
+        if "window_radius mismatch" in str(error):
+            raise
         return normalized_run_id, [], str(error)
 
 

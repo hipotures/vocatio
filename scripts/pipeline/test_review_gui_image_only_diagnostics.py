@@ -1,3 +1,4 @@
+import argparse
 import csv
 import importlib.util
 import json
@@ -390,12 +391,12 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         section = review_gui.build_manual_ml_prediction_section(
             {
                 "status": "idle",
-                "resolution_error": "overlap must be smaller than window_size",
+                "resolution_error": "ml model window_radius mismatch: runtime=2, artifact=3",
             }
         )
 
         self.assertIn("Status: error", section["body"])
-        self.assertIn("Error: overlap must be smaller than window_size", section["body"])
+        self.assertIn("Error: ml model window_radius mismatch: runtime=2, artifact=3", section["body"])
 
     def test_manual_ml_prediction_formatters_preserve_zero_values(self):
         self.assertEqual(review_gui.format_manual_prediction_score(0.0), "0.00")
@@ -417,38 +418,30 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Right-side segment: ceremony (0.00)", result_text)
         self.assertIn("Gap seconds: 0.0", result_text)
 
-    def test_resolve_manual_prediction_window_config_prefers_vocatio_values(self):
+    def test_resolve_manual_prediction_window_config_prefers_window_radius_only(self):
         resolved = review_gui.resolve_manual_prediction_window_config(
             {
+                "VLM_WINDOW_RADIUS": "4",
                 "VLM_WINDOW_SIZE": "7",
                 "VLM_OVERLAP": "3",
             }
         )
-        self.assertEqual(resolved, {"window_size": 7, "overlap": 3})
+        self.assertEqual(resolved, {"window_radius": 4})
 
     def test_resolve_manual_prediction_window_config_falls_back_to_probe_defaults(self):
         resolved = review_gui.resolve_manual_prediction_window_config({})
         self.assertEqual(
             resolved,
             {
-                "window_size": review_gui.probe_vlm_boundary.DEFAULT_WINDOW_SIZE,
-                "overlap": review_gui.probe_vlm_boundary.DEFAULT_OVERLAP,
+                "window_radius": review_gui.probe_vlm_boundary.DEFAULT_WINDOW_RADIUS,
             },
         )
 
-    def test_resolve_manual_prediction_window_config_rejects_overlap_greater_or_equal_window_size(self):
-        with self.assertRaisesRegex(ValueError, "overlap must be smaller than window_size"):
+    def test_resolve_manual_prediction_window_config_rejects_non_positive_window_radius(self):
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "must be a positive integer"):
             review_gui.resolve_manual_prediction_window_config(
                 {
-                    "VLM_WINDOW_SIZE": "3",
-                    "VLM_OVERLAP": "3",
-                }
-            )
-
-        with self.assertRaisesRegex(ValueError, "overlap must be smaller than window_size"):
-            review_gui.resolve_manual_prediction_window_config(
-                {
-                    "VLM_WINDOW_SIZE": "2",
+                    "VLM_WINDOW_RADIUS": "0",
                 }
             )
 
@@ -982,7 +975,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.manual_ml_prediction_state = {
             "status": "idle",
             "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
-            "window_config": {"window_size": 7, "overlap": 3},
+            "window_config": {"window_radius": 2},
             "anchor_pair": {
                 "left_relative_path": "cam/left.jpg",
                 "right_relative_path": "cam/right.jpg",
@@ -1009,14 +1002,17 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             {"relative_path": "cam/post1.jpg", "start_epoch_ms": "12000"},
         ]
         candidate_rows = [
-            full_joined_rows[0],
-            full_joined_rows[1],
             full_joined_rows[2],
             full_joined_rows[4],
             full_joined_rows[5],
+            full_joined_rows[1],
         ]
 
         with unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_vocatio_config",
+            return_value={"VLM_WINDOW_RADIUS": "2"},
+        ), unittest.mock.patch.object(
             review_gui,
             "load_manual_prediction_joined_rows",
             return_value=full_joined_rows,
@@ -1027,7 +1023,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         ), unittest.mock.patch.object(
             review_gui.probe_vlm_boundary,
             "load_ml_hint_context",
-            return_value="ml-context",
+            return_value=Mock(window_radius=2),
         ), unittest.mock.patch.object(
             review_gui.probe_vlm_boundary,
             "read_boundary_scores_by_pair",
@@ -1090,7 +1086,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.manual_ml_prediction_state = {
             "status": "idle",
             "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
-            "window_config": {"window_size": 7, "overlap": 3},
+            "window_config": {"window_radius": 2},
             "anchor_pair": {
                 "left_relative_path": "cam/left.jpg",
                 "right_relative_path": "cam/right.jpg",
@@ -1150,8 +1146,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.manual_ml_prediction_state = {
             "status": "error",
             "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
-            "resolution_error": "overlap must be smaller than window_size",
-            "error": "overlap must be smaller than window_size",
+            "resolution_error": "ml model window_radius mismatch: runtime=2, artifact=3",
+            "error": "ml model window_radius mismatch: runtime=2, artifact=3",
         }
         window.selected_photo_entries = Mock(
             return_value=[
@@ -1245,7 +1241,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         ), unittest.mock.patch.object(
             review_gui.probe_vlm_boundary,
             "load_ml_hint_context",
-            return_value=Mock(mode="tabular_plus_thumbnail"),
+            return_value=Mock(mode="tabular_plus_thumbnail", window_radius=2),
         ), unittest.mock.patch.object(
             review_gui.probe_vlm_boundary,
             "read_boundary_scores_by_pair",
@@ -1274,14 +1270,15 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     "right_row_index": 3,
                     "gap_seconds": 1.0,
                 },
-                window_config={"window_size": 7, "overlap": 3},
+                window_config={"window_radius": 2},
             )
 
         self.assertEqual(len(captured_candidate_rows), 1)
         candidate_row = captured_candidate_rows[0]
-        self.assertEqual(candidate_row["frame_01_thumb_path"], "/tmp/pre1.jpg")
-        self.assertEqual(candidate_row["frame_03_thumb_path"], "/tmp/left.jpg")
-        self.assertEqual(candidate_row["frame_05_thumb_path"], "/tmp/post1.jpg")
+        self.assertEqual(candidate_row["window_radius"], 2)
+        self.assertEqual(candidate_row["frame_01_thumb_path"], "/tmp/pre2.jpg")
+        self.assertEqual(candidate_row["frame_02_thumb_path"], "/tmp/left.jpg")
+        self.assertEqual(candidate_row["frame_04_thumb_path"], "/tmp/post1.jpg")
 
     def test_load_ml_hint_diagnostics_does_not_recompute_when_index_has_no_precomputed_pairs(self):
         with unittest.mock.patch.object(

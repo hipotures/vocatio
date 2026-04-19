@@ -254,23 +254,12 @@ def resolve_selected_photo_context(selected_photos: Sequence[Mapping[str, Any]])
 
 
 def resolve_manual_prediction_window_config(vocatio_config: Mapping[str, str]) -> Dict[str, int]:
-    window_size = probe_vlm_boundary.DEFAULT_WINDOW_SIZE
-    overlap = probe_vlm_boundary.DEFAULT_OVERLAP
-
-    configured_window_size = str(vocatio_config.get("VLM_WINDOW_SIZE", "") or "").strip()
-    if configured_window_size:
-        window_size = probe_vlm_boundary.positive_int_arg(configured_window_size)
-
-    configured_overlap = str(vocatio_config.get("VLM_OVERLAP", "") or "").strip()
-    if configured_overlap:
-        overlap = probe_vlm_boundary.non_negative_int_arg(configured_overlap)
-
-    if overlap >= window_size:
-        raise ValueError("overlap must be smaller than window_size")
-
+    window_radius = probe_vlm_boundary.DEFAULT_WINDOW_RADIUS
+    configured_window_radius = str(vocatio_config.get("VLM_WINDOW_RADIUS", "") or "").strip()
+    if configured_window_radius:
+        window_radius = probe_vlm_boundary.positive_window_radius_arg(configured_window_radius)
     return {
-        "window_size": window_size,
-        "overlap": overlap,
+        "window_radius": window_radius,
     }
 
 
@@ -484,6 +473,9 @@ def compute_manual_ml_prediction_result(
 ) -> Dict[str, Any]:
     if not window_config:
         raise ValueError("manual prediction window config is unavailable")
+    runtime_window_radius = probe_vlm_boundary.positive_window_radius_arg(
+        str(window_config.get("window_radius", "") or "").strip()
+    )
     requested_ml_model_run_id = str(payload.get("ml_model_run_id", "") or "").strip()
     if not requested_ml_model_run_id:
         raise ValueError("ML model run is unavailable")
@@ -497,11 +489,17 @@ def compute_manual_ml_prediction_result(
     )
     if ml_hint_context is None:
         raise ValueError("ML model directory is unavailable")
+    if ml_hint_context.window_radius != runtime_window_radius:
+        raise ValueError(
+            "ml model window_radius mismatch: "
+            f"runtime={runtime_window_radius}, artifact={ml_hint_context.window_radius}"
+        )
 
     reduced_rows, cut_index = build_manual_prediction_joined_rows(joined_rows, anchor_pair)
     candidate_rows = probe_vlm_boundary._build_ml_candidate_window_rows(
         joined_rows=reduced_rows,
         cut_index=cut_index,
+        window_radius=runtime_window_radius,
     )
     if candidate_rows is None:
         raise ValueError("manual prediction needs enough surrounding context for ML inference")
@@ -514,7 +512,11 @@ def compute_manual_ml_prediction_result(
     photo_pre_model_dir = probe_vlm_boundary.resolve_path(workspace_dir, photo_pre_model_dir_value)
     prediction = probe_vlm_boundary.predict_ml_hint_for_candidate(
         ml_hint_context=ml_hint_context,
-        candidate_row=probe_vlm_boundary._build_ml_candidate_row(normalized_candidate_rows, day_id=day_id),
+        candidate_row=probe_vlm_boundary._build_ml_candidate_row(
+            normalized_candidate_rows,
+            day_id=day_id,
+            window_radius=runtime_window_radius,
+        ),
         boundary_rows_by_pair=probe_vlm_boundary.read_boundary_scores_by_pair(
             workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME
         ),

@@ -26,7 +26,7 @@ from rich.progress import (
 from lib.image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1
 from lib.ml_boundary_dataset import normalize_timestamp
 from lib.ml_boundary_features import build_candidate_feature_row
-from lib.ml_boundary_training_data import HEURISTIC_PAIR_JOIN_COLUMNS, HEURISTIC_VALUE_COLUMNS
+from lib.ml_boundary_training_data import HEURISTIC_VALUE_COLUMNS, heuristic_pair_join_columns_for_window_radius
 from lib.media_manifest import read_media_manifest, select_photo_rows
 from lib.pipeline_io import atomic_write_json
 from lib.photo_pre_model_annotations import (
@@ -73,8 +73,6 @@ DEFAULT_PHOTO_PRE_MODEL_DIR = DEFAULT_PHOTO_PRE_MODEL_DIRNAME
 DEFAULT_PROVIDER = "ollama"
 DEFAULT_ML_MODEL_RUN_ID = ""
 SEGMENT_TYPES = ("dance", "ceremony", "audience", "rehearsal", "other")
-ML_BOUNDARY_WINDOW_SIZE = 5
-ML_BOUNDARY_WINDOW_RADIUS = 2
 ML_SEGMENT_TYPE_TO_PROMPT_LABEL = {
     "performance": "dance",
     "ceremony": "ceremony",
@@ -183,6 +181,7 @@ class MlHintContext(NamedTuple):
     run_id: str
     mode: str
     model_dir: Path
+    window_radius: int
     boundary_predictor: object
     segment_type_predictor: object
     boundary_feature_columns: list[str]
@@ -771,6 +770,9 @@ def load_ml_hint_context(
     training_metadata = _load_required_json(ml_model_dir / TRAINING_METADATA_FILENAME)
     feature_columns_payload = _load_required_json(ml_model_dir / FEATURE_COLUMNS_FILENAME)
     mode = str(training_metadata.get("mode", "tabular_only") or "tabular_only")
+    window_radius = int(training_metadata["window_radius"])
+    if window_radius < 1:
+        raise ValueError("window_radius must be at least 1")
     boundary_feature_columns = [str(value) for value in feature_columns_payload.get("boundary_feature_columns", [])]
     segment_type_feature_columns = [str(value) for value in feature_columns_payload.get("segment_type_feature_columns", [])]
     descriptor_field_registry = _build_descriptor_field_registry_from_feature_columns(
@@ -785,6 +787,7 @@ def load_ml_hint_context(
         run_id=ml_model_run_id,
         mode=mode,
         model_dir=ml_model_dir,
+        window_radius=window_radius,
         boundary_predictor=boundary_predictor,
         segment_type_predictor=segment_type_predictor,
         boundary_feature_columns=boundary_feature_columns,
@@ -797,13 +800,21 @@ def _build_ml_candidate_window_rows(
     joined_rows: Sequence[Mapping[str, str]],
     *,
     cut_index: int,
+    window_radius: int,
 ) -> Optional[list[Mapping[str, str]]]:
-    window_start = cut_index - ML_BOUNDARY_WINDOW_RADIUS
-    window_end = cut_index + ML_BOUNDARY_WINDOW_RADIUS + 1
-    if window_start < 0 or window_end > len(joined_rows):
+    window_size = window_radius_to_window_size(window_radius)
+    if len(joined_rows) < window_size:
+        return None
+    try:
+        window_start, window_end = build_centered_window_bounds(
+            len(joined_rows),
+            cut_index,
+            window_radius,
+        )
+    except ValueError:
         return None
     rows = list(joined_rows[window_start:window_end])
-    if len(rows) != ML_BOUNDARY_WINDOW_SIZE:
+    if len(rows) != window_size:
         return None
     return rows
 
@@ -812,17 +823,23 @@ def _build_ml_candidate_row(
     rows: Sequence[Mapping[str, str]],
     *,
     day_id: str,
+    window_radius: int,
 ) -> dict[str, object]:
-    if len(rows) != ML_BOUNDARY_WINDOW_SIZE:
-        raise ValueError(f"ML candidate rows must contain exactly {ML_BOUNDARY_WINDOW_SIZE} frames")
+    window_size = window_radius_to_window_size(window_radius)
+    if len(rows) != window_size:
+        raise ValueError(f"ML candidate rows must contain exactly {window_size} frames")
     normalized_day_id = day_id.strip()
     if normalized_day_id == "":
         raise ValueError("day_id must not be blank for ML prompt inference")
     candidate_row: dict[str, object] = {
         "day_id": normalized_day_id,
-        "window_size": ML_BOUNDARY_WINDOW_SIZE,
-        "center_left_photo_id": str(rows[2].get("photo_id", "") or rows[2].get("relative_path", "")).strip(),
-        "center_right_photo_id": str(rows[3].get("photo_id", "") or rows[3].get("relative_path", "")).strip(),
+        "window_radius": window_radius,
+        "center_left_photo_id": str(
+            rows[window_radius - 1].get("photo_id", "") or rows[window_radius - 1].get("relative_path", "")
+        ).strip(),
+        "center_right_photo_id": str(
+            rows[window_radius].get("photo_id", "") or rows[window_radius].get("relative_path", "")
+        ).strip(),
         "boundary": False,
         "segment_type": "",
         "split_name": "",
@@ -845,19 +862,21 @@ def _load_ml_candidate_descriptors(
     candidate_row: Mapping[str, object],
     *,
     photo_pre_model_dir: Optional[Path],
+    window_radius: int,
 ) -> dict[str, dict[str, object]]:
     if photo_pre_model_dir is None or not photo_pre_model_dir.exists():
         return {}
+    frame_count = window_radius_to_window_size(window_radius)
     relative_paths = [
         str(candidate_row.get(f"frame_{frame_index:02d}_relpath", "") or "").strip()
-        for frame_index in range(1, ML_BOUNDARY_WINDOW_SIZE + 1)
+        for frame_index in range(1, frame_count + 1)
     ]
     annotations_by_relative_path = load_photo_pre_model_annotations_by_relative_path(
         photo_pre_model_dir,
         relative_paths,
     )
     descriptors: dict[str, dict[str, object]] = {}
-    for frame_index in range(1, ML_BOUNDARY_WINDOW_SIZE + 1):
+    for frame_index in range(1, frame_count + 1):
         suffix = f"{frame_index:02d}"
         photo_id = str(candidate_row.get(f"frame_{suffix}_photo_id", "") or "").strip()
         relative_path = str(candidate_row.get(f"frame_{suffix}_relpath", "") or "").strip()
@@ -872,9 +891,11 @@ def _load_ml_candidate_descriptors(
 def _build_ml_candidate_heuristic_features(
     candidate_row: Mapping[str, object],
     boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
+    *,
+    window_radius: int,
 ) -> dict[str, dict[str, str]]:
     heuristic_features: dict[str, dict[str, str]] = {}
-    for pair_name, left_column, right_column in HEURISTIC_PAIR_JOIN_COLUMNS:
+    for pair_name, left_column, right_column in heuristic_pair_join_columns_for_window_radius(window_radius):
         pair_row = boundary_rows_by_pair.get(
             (
                 str(candidate_row.get(left_column, "") or "").strip(),
@@ -915,17 +936,29 @@ def predict_ml_hint_for_candidate(
     boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
     photo_pre_model_dir: Optional[Path],
 ) -> MlHintPrediction:
+    candidate_window_radius = int(str(candidate_row.get("window_radius", "") or "").strip())
+    if candidate_window_radius != ml_hint_context.window_radius:
+        raise ValueError(
+            "ml model window_radius mismatch: "
+            f"runtime={candidate_window_radius}, artifact={ml_hint_context.window_radius}"
+        )
     descriptors = _load_ml_candidate_descriptors(
         candidate_row,
         photo_pre_model_dir=photo_pre_model_dir,
+        window_radius=ml_hint_context.window_radius,
     )
-    heuristic_features = _build_ml_candidate_heuristic_features(candidate_row, boundary_rows_by_pair)
+    heuristic_features = _build_ml_candidate_heuristic_features(
+        candidate_row,
+        boundary_rows_by_pair,
+        window_radius=ml_hint_context.window_radius,
+    )
     derived_features = build_candidate_feature_row(
         candidate_row,
         descriptors=descriptors,
         embeddings=None,
         descriptor_field_registry=ml_hint_context.descriptor_field_registry,
         heuristic_features=heuristic_features,
+        window_radius=ml_hint_context.window_radius,
     )
     segment_type_row = _build_predictor_feature_row(
         feature_columns=ml_hint_context.segment_type_feature_columns,
@@ -990,15 +1023,24 @@ def build_ml_hint_lines_for_candidate(
     boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
     photo_pre_model_dir: Optional[Path],
     ml_hint_context: Optional[MlHintContext],
+    runtime_window_radius: int,
 ) -> List[str]:
     if ml_hint_context is None:
         return build_ml_hint_lines(None)
-    candidate_rows = _build_ml_candidate_window_rows(joined_rows, cut_index=cut_index)
+    candidate_rows = _build_ml_candidate_window_rows(
+        joined_rows,
+        cut_index=cut_index,
+        window_radius=runtime_window_radius,
+    )
     if candidate_rows is None:
         return build_ml_hint_lines(None)
     prediction = predict_ml_hint_for_candidate(
         ml_hint_context=ml_hint_context,
-        candidate_row=_build_ml_candidate_row(candidate_rows, day_id=day_id),
+        candidate_row=_build_ml_candidate_row(
+            candidate_rows,
+            day_id=day_id,
+            window_radius=runtime_window_radius,
+        ),
         boundary_rows_by_pair=boundary_rows_by_pair,
         photo_pre_model_dir=photo_pre_model_dir,
     )
@@ -2046,6 +2088,7 @@ def probe_vlm_photo_boundaries(
                 boundary_rows_by_pair=boundary_rows_by_pair,
                 photo_pre_model_dir=photo_pre_model_dir,
                 ml_hint_context=ml_hint_context,
+                runtime_window_radius=window_radius,
             )
             prompt = build_user_prompt(
                 window_size=window_size,

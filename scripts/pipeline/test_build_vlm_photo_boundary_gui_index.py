@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
@@ -44,6 +45,131 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
             second.write_text(json.dumps({"run_id": "vlm-20260414053113"}), encoding="utf-8")
             selected = builder.select_run_metadata(workspace_dir=workspace_dir, run_id=None)
             self.assertEqual(selected["run_id"], "vlm-20260414053113")
+
+    def test_build_ml_hint_pairs_for_run_uses_window_radius_contract(self):
+        joined_rows = [
+            {
+                "relative_path": f"cam/{name}.hif",
+                "photo_id": f"cam/{name}.hif",
+                "start_epoch_ms": str(index * 1000),
+                "thumb_path": f"/tmp/{name}.jpg",
+            }
+            for index, name in enumerate(("a", "b", "c", "d", "e", "f"), start=1)
+        ]
+        captured_candidate_rows: list[dict[str, object]] = []
+
+        def capture_prediction(**kwargs):
+            captured_candidate_rows.append(dict(kwargs["candidate_row"]))
+            return builder.probe.MlHintPrediction(
+                boundary_prediction=True,
+                boundary_confidence=0.91,
+                boundary_positive_probability=0.91,
+                segment_type_prediction="ceremony",
+                segment_type_confidence=0.88,
+            )
+
+        with mock.patch.object(
+            builder.probe,
+            "resolve_ml_model_run",
+            return_value=("ml-run-001", Path("/tmp/model-run")),
+        ), mock.patch.object(
+            builder.probe,
+            "load_ml_hint_context",
+            return_value=mock.Mock(window_radius=3),
+        ), mock.patch.object(
+            builder.probe,
+            "read_boundary_scores_by_pair",
+            return_value={},
+        ), mock.patch.object(
+            builder.probe,
+            "resolve_path",
+            return_value=Path("/tmp/photo-pre"),
+        ), mock.patch.object(
+            builder.probe,
+            "predict_ml_hint_for_candidate",
+            side_effect=capture_prediction,
+        ):
+            ml_model_run_id, ml_hint_pairs, error = builder.build_ml_hint_pairs_for_run(
+                day_dir=Path("/tmp/20260323"),
+                workspace_dir=Path("/tmp/workspace"),
+                run_metadata={"args": {"window_radius": 3, "photo_pre_model_dir": "photo-pre"}},
+                run_rows=[
+                    {
+                        "relative_paths_json": json.dumps(
+                            [
+                                "cam/a.hif",
+                                "cam/b.hif",
+                                "cam/c.hif",
+                                "cam/d.hif",
+                                "cam/e.hif",
+                                "cam/f.hif",
+                            ]
+                        )
+                    }
+                ],
+                joined_rows=joined_rows,
+                ml_model_run_id="ml-run-001",
+            )
+
+        self.assertEqual(ml_model_run_id, "ml-run-001")
+        self.assertEqual(error, "")
+        self.assertEqual(
+            ml_hint_pairs,
+            [
+                {
+                    "left_relative_path": "cam/c.hif",
+                    "right_relative_path": "cam/d.hif",
+                    "boundary_prediction": True,
+                    "boundary_confidence": "0.91",
+                    "boundary_positive_probability": "0.91",
+                    "segment_type_prediction": "ceremony",
+                    "segment_type_confidence": "0.88",
+                }
+            ],
+        )
+        self.assertEqual(len(captured_candidate_rows), 1)
+        self.assertEqual(captured_candidate_rows[0]["window_radius"], 3)
+
+    def test_build_ml_hint_pairs_for_run_rejects_model_window_radius_mismatch(self):
+        joined_rows = [
+            {
+                "relative_path": f"cam/{name}.hif",
+                "photo_id": f"cam/{name}.hif",
+                "start_epoch_ms": str(index * 1000),
+                "thumb_path": f"/tmp/{name}.jpg",
+            }
+            for index, name in enumerate(("a", "b", "c", "d"), start=1)
+        ]
+
+        with mock.patch.object(
+            builder.probe,
+            "resolve_ml_model_run",
+            return_value=("ml-run-001", Path("/tmp/model-run")),
+        ), mock.patch.object(
+            builder.probe,
+            "load_ml_hint_context",
+            return_value=mock.Mock(window_radius=3),
+        ):
+            with self.assertRaisesRegex(ValueError, "ml model window_radius mismatch: runtime=2, artifact=3"):
+                builder.build_ml_hint_pairs_for_run(
+                    day_dir=Path("/tmp/20260323"),
+                    workspace_dir=Path("/tmp/workspace"),
+                    run_metadata={"args": {"window_radius": 2}},
+                    run_rows=[
+                        {
+                            "relative_paths_json": json.dumps(
+                                [
+                                    "cam/a.hif",
+                                    "cam/b.hif",
+                                    "cam/c.hif",
+                                    "cam/d.hif",
+                                ]
+                            )
+                        }
+                    ],
+                    joined_rows=joined_rows,
+                    ml_model_run_id="ml-run-001",
+                )
 
     def test_build_gui_index_for_specific_run_filters_other_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -111,6 +237,7 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                 row["run_id"] = "vlm-20260414053012"
                 row["generated_at"] = "2026-04-14T05:30:12+02:00"
                 row["image_variant"] = "thumb"
+                row["window_radius"] = "2"
                 row["decision"] = "cut_after_2"
                 row["cut_left_relative_path"] = "cam/b.hif"
                 row["cut_right_relative_path"] = "cam/c.hif"
@@ -238,7 +365,11 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                 writer.writerow(row)
             run_metadata = {
                 "run_id": "vlm-20260414053012",
-                "args": {"image_variant": "thumb", "effective_ml_model_run_id": "day-20260323"},
+                "args": {
+                    "image_variant": "thumb",
+                    "window_radius": 2,
+                    "effective_ml_model_run_id": "day-20260323",
+                },
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),
                 "output_csv": str(output_csv),

@@ -433,7 +433,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertNotIn('"decision"', prompt)
         self.assertIn("<one of: null, frame_01, frame_02>", prompt)
 
-    def test_build_ml_hint_lines_for_candidate_uses_model_predictions(self):
+    def test_build_ml_hint_lines_for_candidate_uses_model_predictions_for_arbitrary_window_radius(self):
         class FakeBoundaryPredictor:
             def predict(self, _frame):
                 return [1]
@@ -452,14 +452,15 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             run_id="day-20260323",
             mode="tabular_only",
             model_dir=Path("/tmp/fake-model"),
+            window_radius=3,
             boundary_predictor=FakeBoundaryPredictor(),
             segment_type_predictor=FakeSegmentPredictor(),
-            boundary_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45"],
-            segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45"],
+            boundary_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
+            segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
             descriptor_field_registry={},
         )
         joined_rows = []
-        for index, name in enumerate(("a", "b", "c", "d", "e"), start=1):
+        for index, name in enumerate(("a", "b", "c", "d", "e", "f"), start=1):
             joined_rows.append(
                 {
                     "day": "20260323",
@@ -476,6 +477,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             boundary_rows_by_pair={},
             photo_pre_model_dir=None,
             ml_hint_context=ml_hint_context,
+            runtime_window_radius=3,
         )
         self.assertEqual(
             lines,
@@ -484,6 +486,40 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "ML hint for the likely segment on the right side of the candidate gap: ceremony (confidence 0.74).",
             ],
         )
+
+    def test_build_ml_hint_lines_for_candidate_rejects_runtime_radius_mismatch(self):
+        ml_hint_context = probe.MlHintContext(
+            run_id="day-20260323",
+            mode="tabular_only",
+            model_dir=Path("/tmp/fake-model"),
+            window_radius=3,
+            boundary_predictor=mock.Mock(),
+            segment_type_predictor=mock.Mock(),
+            boundary_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
+            segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
+            descriptor_field_registry={},
+        )
+        joined_rows = [
+            {
+                "day": "20260323",
+                "photo_id": f"cam/{name}.hif",
+                "relative_path": f"cam/{name}.hif",
+                "start_epoch_ms": str(index * 1000),
+                "thumb_path": f"/tmp/{name}.jpg",
+            }
+            for index, name in enumerate(("a", "b", "c", "d", "e", "f"), start=1)
+        ]
+
+        with self.assertRaisesRegex(ValueError, "ml model window_radius mismatch: runtime=2, artifact=3"):
+            probe.build_ml_hint_lines_for_candidate(
+                day_id="20260323",
+                joined_rows=joined_rows,
+                cut_index=2,
+                boundary_rows_by_pair={},
+                photo_pre_model_dir=None,
+                ml_hint_context=ml_hint_context,
+                runtime_window_radius=2,
+            )
 
     def test_build_ml_hint_lines_for_candidate_falls_back_when_model_context_missing(self):
         joined_rows = []
@@ -505,6 +541,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 boundary_rows_by_pair={},
                 photo_pre_model_dir=None,
                 ml_hint_context=None,
+                runtime_window_radius=2,
             ),
             ["ML hints are unavailable for this window."],
         )
