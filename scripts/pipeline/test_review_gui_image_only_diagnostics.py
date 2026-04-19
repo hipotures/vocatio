@@ -346,10 +346,32 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             )
         )
 
+    def test_should_show_manual_vlm_analyze_requires_exactly_two_selected_photos(self):
+        self.assertFalse(review_gui.should_show_manual_vlm_analyze([]))
+        self.assertFalse(review_gui.should_show_manual_vlm_analyze([{"relative_path": "cam/a.jpg"}]))
+        self.assertTrue(
+            review_gui.should_show_manual_vlm_analyze(
+                [
+                    {"relative_path": "cam/a.jpg"},
+                    {"relative_path": "cam/b.jpg"},
+                ]
+            )
+        )
+        self.assertFalse(
+            review_gui.should_show_manual_vlm_analyze(
+                [
+                    {"relative_path": "cam/a.jpg"},
+                    {"relative_path": "cam/b.jpg"},
+                    {"relative_path": "cam/c.jpg"},
+                ]
+            )
+        )
+
     def test_build_manual_ml_prediction_section_supports_idle_running_error_and_result_states(self):
         idle_section = review_gui.build_manual_ml_prediction_section(None)
         self.assertEqual(idle_section["title"], "Manual ML prediction")
         self.assertIn("Status: idle", idle_section["body"])
+        self.assertEqual(idle_section["action_text"], "Run")
 
         running_section = review_gui.build_manual_ml_prediction_section(
             {
@@ -389,6 +411,59 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Right-side segment: ceremony (0.88)", result_section["body"])
         self.assertIn("Gap seconds: 128", result_section["body"])
         self.assertIn("Anchors: cam/a.jpg -> cam/d.jpg", result_section["body"])
+
+    def test_build_manual_vlm_analyze_section_supports_idle_running_error_and_result_states(self):
+        idle_section = review_gui.build_manual_vlm_analyze_section(None)
+        self.assertEqual(idle_section["title"], "Manual VLM analyze")
+        self.assertIn("Status: idle", idle_section["body"])
+        self.assertIn("Analyze run not started.", idle_section["body"])
+        self.assertEqual(idle_section["action_text"], "Analyze")
+
+        running_section = review_gui.build_manual_vlm_analyze_section(
+            {
+                "status": "running",
+                "started_at": "2026-04-19T12:34:56",
+            }
+        )
+        self.assertIn("Status: running", running_section["body"])
+        self.assertIn("Started: 2026-04-19T12:34:56", running_section["body"])
+
+        error_section = review_gui.build_manual_vlm_analyze_section(
+            {
+                "status": "error",
+                "error": "provider request timed out",
+                "debug_file_paths": [
+                    "/tmp/manual-vlm/request.json",
+                    "/tmp/manual-vlm/error.txt",
+                ],
+            }
+        )
+        self.assertIn("Status: error", error_section["body"])
+        self.assertIn("Error: provider request timed out", error_section["body"])
+        self.assertIn("Debug files:", error_section["body"])
+        self.assertIn("/tmp/manual-vlm/request.json", error_section["body"])
+        self.assertIn("/tmp/manual-vlm/error.txt", error_section["body"])
+
+        result_section = review_gui.build_manual_vlm_analyze_section(
+            {
+                "status": "result",
+                "decision": "cut_after_2",
+                "left_segment_type": "performance",
+                "right_segment_type": "ceremony",
+                "summary": "Strong costume and performer change across the gap.",
+                "result_text": "Decision: cut_after_2\nSummary: Strong costume and performer change across the gap.",
+                "debug_file_paths": [
+                    "/tmp/manual-vlm/prompt.txt",
+                    "/tmp/manual-vlm/response.json",
+                ],
+            }
+        )
+        self.assertIn("Status: result", result_section["body"])
+        self.assertIn("Decision: cut_after_2", result_section["body"])
+        self.assertIn("Summary: Strong costume and performer change across the gap.", result_section["body"])
+        self.assertIn("Debug files:", result_section["body"])
+        self.assertIn("/tmp/manual-vlm/prompt.txt", result_section["body"])
+        self.assertIn("/tmp/manual-vlm/response.json", result_section["body"])
 
     def test_manual_ml_prediction_section_renders_left_right_and_boundary(self):
         state = review_gui.build_manual_ml_prediction_section(
@@ -940,6 +1015,41 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
         self.assertIn("Status: running", sections[2]["body"])
 
+    def test_build_image_only_multi_photo_info_sections_includes_manual_vlm_analyze_section_when_enabled(self):
+        diagnostics = {"available": False, "error": ""}
+        photos = [
+            {
+                "adjusted_start_local": "2026-03-23T10:00:00",
+                "relative_path": "cam/a.jpg",
+                "filename": "a.jpg",
+                "assignment_status": "assigned",
+                "assignment_reason": "",
+            },
+            {
+                "adjusted_start_local": "2026-03-23T10:00:05",
+                "relative_path": "cam/b.jpg",
+                "filename": "b.jpg",
+                "assignment_status": "assigned",
+                "assignment_reason": "",
+            },
+        ]
+
+        sections = review_gui.build_image_only_multi_photo_info_sections(
+            photos,
+            diagnostics,
+            show_manual_ml_prediction=True,
+            manual_prediction_state={"status": "idle"},
+            show_manual_vlm_analyze=True,
+            manual_vlm_analyze_state={"status": "error", "error": "provider request timed out"},
+        )
+
+        self.assertEqual(
+            [section["title"] for section in sections],
+            ["Selection summary", "Boundary diagnostics", "Manual ML prediction", "Manual VLM analyze"],
+        )
+        self.assertIn("Status: error", sections[3]["body"])
+        self.assertIn("provider request timed out", sections[3]["body"])
+
     def test_format_manual_ml_prediction_result_text_renders_prediction_details(self):
         text = review_gui.format_manual_ml_prediction_result_text(
             {
@@ -1045,6 +1155,29 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         buttons = widget.findChildren(QPushButton)
         self.assertEqual([button.text() for button in buttons], ["Manual ML prediction", "Running..."])
         self.assertFalse(buttons[1].isEnabled())
+
+    def test_build_info_section_widget_uses_manual_action_button_labels(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.run_manual_ml_prediction = Mock()
+        window.run_manual_vlm_analyze = Mock()
+
+        manual_ml_widget = window.build_info_section_widget(
+            review_gui.build_manual_ml_prediction_section({"status": "idle"})
+        )
+        self.addCleanup(manual_ml_widget.deleteLater)
+        manual_ml_widget.show()
+
+        manual_vlm_widget = window.build_info_section_widget(
+            review_gui.build_manual_vlm_analyze_section({"status": "idle"})
+        )
+        self.addCleanup(manual_vlm_widget.deleteLater)
+        manual_vlm_widget.show()
+        TEST_QT_APP.processEvents()
+
+        manual_ml_buttons = manual_ml_widget.findChildren(QPushButton)
+        manual_vlm_buttons = manual_vlm_widget.findChildren(QPushButton)
+        self.assertEqual([button.text() for button in manual_ml_buttons], ["Manual ML prediction", "Run"])
+        self.assertEqual([button.text() for button in manual_vlm_buttons], ["Manual VLM analyze", "Analyze"])
 
     def test_run_manual_ml_prediction_success_path_updates_result_state(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
@@ -1292,6 +1425,110 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         compute_result.assert_called_once()
         self.assertEqual(window.manual_ml_prediction_state["status"], "result")
         self.assertNotIn("resolution_error", window.manual_ml_prediction_state)
+        self.assertEqual(window.refresh_current_info_dock.call_count, 2)
+
+    def test_run_manual_vlm_analyze_success_path_updates_result_state(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.manual_vlm_analyze_state = {
+            "status": "idle",
+            "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+        }
+        window.current_manual_vlm_analyze_state = Mock(return_value=window.manual_vlm_analyze_state)
+        window.manual_prediction_day_dir = Mock(return_value=Path("/tmp/20260323"))
+        window.workspace_dir = Path("/tmp/workspace")
+        window.payload = {"day": "20260323", "window_radius": 2}
+        window.selected_photo_entries = Mock(
+            return_value=[
+                {"relative_path": "cam/left.jpg", "source_path": "/src/left.jpg"},
+                {"relative_path": "cam/right.jpg", "source_path": "/src/right.jpg"},
+            ]
+        )
+        window.refresh_current_info_dock = Mock()
+
+        with unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_vlm_analyze_state",
+            return_value={
+                "status": "idle",
+                "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+                "window_config": {"window_radius": 2},
+                "anchor_pair": {"left_relative_path": "cam/left.jpg", "right_relative_path": "cam/right.jpg"},
+            },
+        ), unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_joined_rows",
+            return_value=[
+                {"relative_path": "cam/left.jpg", "start_epoch_ms": "1000"},
+                {"relative_path": "cam/right.jpg", "start_epoch_ms": "2000"},
+            ],
+        ), unittest.mock.patch.object(
+            review_gui,
+            "compute_manual_vlm_analyze_result",
+            return_value={
+                "decision": "cut_after_2",
+                "summary": "Strong costume and performer change across the gap.",
+                "result_text": "Decision: cut_after_2\nSummary: Strong costume and performer change across the gap.",
+                "debug_file_paths": ["/tmp/manual-vlm/prompt.txt"],
+            },
+        ), unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
+            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(
+                window,
+                review_gui.MainWindow,
+            )
+            window.run_manual_vlm_analyze()
+
+        self.assertEqual(window.manual_vlm_analyze_state["status"], "result")
+        self.assertIn("Decision: cut_after_2", window.manual_vlm_analyze_state["result_text"])
+        self.assertEqual(window.manual_vlm_analyze_state["debug_file_paths"], ["/tmp/manual-vlm/prompt.txt"])
+        self.assertEqual(window.refresh_current_info_dock.call_count, 2)
+
+    def test_run_manual_vlm_analyze_error_path_updates_error_state(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.manual_vlm_analyze_state = {
+            "status": "idle",
+            "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+        }
+        window.current_manual_vlm_analyze_state = Mock(return_value=window.manual_vlm_analyze_state)
+        window.manual_prediction_day_dir = Mock(return_value=Path("/tmp/20260323"))
+        window.workspace_dir = Path("/tmp/workspace")
+        window.payload = {"day": "20260323", "window_radius": 2}
+        window.selected_photo_entries = Mock(
+            return_value=[
+                {"relative_path": "cam/left.jpg", "source_path": "/src/left.jpg"},
+                {"relative_path": "cam/right.jpg", "source_path": "/src/right.jpg"},
+            ]
+        )
+        window.refresh_current_info_dock = Mock()
+
+        with unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_vlm_analyze_state",
+            return_value={
+                "status": "idle",
+                "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+                "window_config": {"window_radius": 2},
+                "anchor_pair": {"left_relative_path": "cam/left.jpg", "right_relative_path": "cam/right.jpg"},
+            },
+        ), unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_joined_rows",
+            return_value=[
+                {"relative_path": "cam/left.jpg", "start_epoch_ms": "1000"},
+                {"relative_path": "cam/right.jpg", "start_epoch_ms": "2000"},
+            ],
+        ), unittest.mock.patch.object(
+            review_gui,
+            "compute_manual_vlm_analyze_result",
+            side_effect=RuntimeError("provider request timed out"),
+        ), unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
+            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(
+                window,
+                review_gui.MainWindow,
+            )
+            window.run_manual_vlm_analyze()
+
+        self.assertEqual(window.manual_vlm_analyze_state["status"], "error")
+        self.assertEqual(window.manual_vlm_analyze_state["error"], "provider request timed out")
         self.assertEqual(window.refresh_current_info_dock.call_count, 2)
 
     def test_compute_manual_ml_prediction_result_uses_image_paths_for_manual_thumbnail_columns(self):

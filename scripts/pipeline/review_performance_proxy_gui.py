@@ -383,6 +383,63 @@ def resolve_manual_prediction_state(
     return next_state
 
 
+def build_idle_manual_vlm_analyze_state(
+    selected_photos: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    return {
+        "status": "idle",
+        "selected_photo_keys": manual_prediction_selected_photo_keys(selected_photos),
+    }
+
+
+def resolve_manual_vlm_runtime_args(
+    *,
+    day_dir: Path,
+    workspace_dir: Path,
+    payload: Mapping[str, Any],
+) -> argparse.Namespace:
+    args = probe_vlm_boundary.parse_args([str(day_dir), "--workspace-dir", str(workspace_dir)])
+    args = probe_vlm_boundary.apply_vocatio_defaults(args, day_dir)
+    args.window_radius = resolve_manual_prediction_window_config(payload)["window_radius"]
+    image_variant = str(payload.get("vlm_image_variant", "") or "").strip()
+    if image_variant:
+        args.image_variant = image_variant
+    ml_model_run_id = str(payload.get("ml_model_run_id", "") or "").strip()
+    if ml_model_run_id:
+        args.ml_model_run_id = ml_model_run_id
+    photo_pre_model_dir = str(payload.get("photo_pre_model_dir", "") or "").strip()
+    if photo_pre_model_dir:
+        args.photo_pre_model_dir = photo_pre_model_dir
+    return args
+
+
+def resolve_manual_vlm_analyze_state(
+    *,
+    day_dir: Path,
+    workspace_dir: Path,
+    payload: Mapping[str, Any],
+    selected_photos: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    next_state = build_idle_manual_vlm_analyze_state(selected_photos)
+    try:
+        next_state["window_config"] = resolve_manual_prediction_window_config(payload)
+        next_state["anchor_pair"] = resolve_manual_prediction_anchor_pair(
+            selected_photos,
+            load_manual_prediction_joined_rows(workspace_dir, payload),
+        )
+        runtime_args = resolve_manual_vlm_runtime_args(day_dir=day_dir, workspace_dir=workspace_dir, payload=payload)
+        next_state["runtime_config"] = {
+            "provider": str(runtime_args.provider),
+            "model": str(runtime_args.model),
+            "image_variant": str(runtime_args.image_variant),
+        }
+    except Exception as exc:
+        next_state["status"] = "error"
+        next_state["error"] = str(exc)
+        next_state["resolution_error"] = str(exc)
+    return next_state
+
+
 def format_manual_prediction_score(value: object) -> str:
     if value is None:
         return "-"
@@ -561,6 +618,232 @@ def compute_manual_ml_prediction_result(
         "window_config": dict(window_config),
     }
     result["result_text"] = format_manual_ml_prediction_result_text(result)
+    return result
+
+
+class ManualVlmAnalyzeError(RuntimeError):
+    def __init__(self, message: str, *, debug_file_paths: Optional[Sequence[str]] = None):
+        super().__init__(message)
+        self.debug_file_paths = [str(value).strip() for value in (debug_file_paths or []) if str(value).strip()]
+
+
+def extract_manual_vlm_response_payload(raw_response: str) -> Dict[str, Any]:
+    try:
+        return json.loads(probe_vlm_boundary.extract_json_object_text(raw_response))
+    except Exception:
+        return {}
+
+
+def resolve_manual_vlm_debug_dir(
+    workspace_dir: Path,
+    runtime_args: argparse.Namespace,
+    run_id: str,
+) -> Path:
+    configured_debug_dir = str(getattr(runtime_args, "dump_debug_dir", "") or "").strip()
+    if configured_debug_dir:
+        base_dir = probe_vlm_boundary.resolve_path(workspace_dir, configured_debug_dir)
+    else:
+        base_dir = workspace_dir / "_manual_vlm_analyze_debug"
+    return base_dir / run_id
+
+
+def build_manual_vlm_debug_file_paths(
+    debug_dir: Path,
+    run_id: str,
+    *,
+    batch_index: int = 1,
+    include_response: bool = False,
+    include_error: bool = False,
+) -> List[str]:
+    stem = f"vlm_probe_{run_id}_batch_{batch_index:03d}"
+    paths = [
+        debug_dir / f"{stem}_prompt.txt",
+        debug_dir / f"{stem}_request.json",
+    ]
+    if include_response:
+        paths.append(debug_dir / f"{stem}_response.json")
+    if include_error:
+        paths.append(debug_dir / f"{stem}_error.txt")
+    return [str(path) for path in paths]
+
+
+def load_manual_vlm_hint_lines(
+    *,
+    workspace_dir: Path,
+    payload: Mapping[str, Any],
+    reduced_rows: Sequence[Mapping[str, Any]],
+    cut_index: int,
+    runtime_window_radius: int,
+    runtime_args: argparse.Namespace,
+) -> List[str]:
+    try:
+        requested_ml_model_run_id = str(getattr(runtime_args, "ml_model_run_id", "") or "").strip()
+        effective_ml_model_run_id, resolved_ml_model_dir = probe_vlm_boundary.resolve_ml_model_run(
+            workspace_dir,
+            requested_ml_model_run_id,
+        )
+        ml_hint_context = probe_vlm_boundary.load_ml_hint_context(
+            ml_model_run_id=effective_ml_model_run_id,
+            ml_model_dir=resolved_ml_model_dir,
+        )
+        photo_pre_model_dir_value = str(
+            getattr(runtime_args, "photo_pre_model_dir", "") or probe_vlm_boundary.DEFAULT_PHOTO_PRE_MODEL_DIR
+        ).strip()
+        photo_pre_model_dir = probe_vlm_boundary.resolve_path(workspace_dir, photo_pre_model_dir_value)
+        day_id = str(payload.get("day", "") or "").strip() or workspace_dir.parent.name
+        return probe_vlm_boundary.build_ml_hint_lines_for_candidate(
+            day_id=day_id,
+            joined_rows=reduced_rows,
+            cut_index=cut_index,
+            boundary_rows_by_pair=probe_vlm_boundary.read_boundary_scores_by_pair(
+                workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME
+            ),
+            photo_pre_model_dir=photo_pre_model_dir,
+            ml_hint_context=ml_hint_context,
+            runtime_window_radius=runtime_window_radius,
+        )
+    except Exception:
+        return probe_vlm_boundary.build_ml_hint_lines(None)
+
+
+def compute_manual_vlm_analyze_result(
+    *,
+    day_dir: Path,
+    workspace_dir: Path,
+    payload: Mapping[str, Any],
+    joined_rows: Sequence[Mapping[str, Any]],
+    anchor_pair: Mapping[str, Any],
+    window_config: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if not window_config:
+        raise ValueError("manual VLM window config is unavailable")
+    runtime_args = resolve_manual_vlm_runtime_args(day_dir=day_dir, workspace_dir=workspace_dir, payload=payload)
+    runtime_window_radius = probe_vlm_boundary.positive_window_radius_arg(
+        str(window_config.get("window_radius", "") or "").strip()
+    )
+    runtime_args.window_radius = runtime_window_radius
+    reduced_rows, cut_index = build_manual_prediction_joined_rows(joined_rows, anchor_pair)
+    candidate_rows = probe_vlm_boundary._build_ml_candidate_window_rows(
+        joined_rows=reduced_rows,
+        cut_index=cut_index,
+        window_radius=runtime_window_radius,
+    )
+    if candidate_rows is None:
+        raise ValueError("manual VLM analyze needs enough surrounding context for inference")
+    extra_instructions = probe_vlm_boundary.load_extra_instructions(
+        str(getattr(runtime_args, "extra_instructions", "") or ""),
+        getattr(runtime_args, "extra_instructions_file", None),
+    )
+    response_schema_mode = str(getattr(runtime_args, "response_schema_mode", "off") or "off")
+    response_schema = (
+        probe_vlm_boundary.build_response_schema(len(candidate_rows))
+        if response_schema_mode == "on"
+        else None
+    )
+    prompt = probe_vlm_boundary.build_user_prompt(
+        window_size=len(candidate_rows),
+        ml_hint_lines=load_manual_vlm_hint_lines(
+            workspace_dir=workspace_dir,
+            payload=payload,
+            reduced_rows=reduced_rows,
+            cut_index=cut_index,
+            runtime_window_radius=runtime_window_radius,
+            runtime_args=runtime_args,
+        ),
+        extra_instructions=extra_instructions,
+        response_schema_mode=response_schema_mode,
+    )
+    request = probe_vlm_boundary.build_vlm_request(
+        provider=str(runtime_args.provider),
+        base_url=str(runtime_args.ollama_base_url),
+        response_schema_mode=response_schema_mode,
+        prompt=prompt,
+        image_paths=[Path(str(row.get("image_path", "") or "")).expanduser() for row in candidate_rows],
+        model=str(runtime_args.model),
+        timeout_seconds=float(runtime_args.timeout_seconds),
+        keep_alive=str(runtime_args.ollama_keep_alive),
+        temperature=float(runtime_args.temperature),
+        context_tokens=getattr(runtime_args, "ollama_num_ctx", None),
+        max_output_tokens=getattr(runtime_args, "ollama_num_predict", None),
+        reasoning_level=str(runtime_args.ollama_think),
+        response_schema=response_schema,
+    )
+    request_payload = probe_vlm_boundary.build_provider_request_payload(request)
+    run_id = probe_vlm_boundary.build_run_id()
+    debug_dir = resolve_manual_vlm_debug_dir(workspace_dir, runtime_args, run_id)
+    try:
+        response = probe_vlm_boundary.run_vlm_request(request)
+    except Exception as exc:
+        debug_file_paths = build_manual_vlm_debug_file_paths(
+            debug_dir,
+            run_id,
+            include_error=True,
+        )
+        probe_vlm_boundary.dump_debug_artifacts(
+            debug_dir=debug_dir,
+            run_id=run_id,
+            batch_index=1,
+            prompt=prompt,
+            request_payload=request_payload,
+            response_payload=None,
+            error_text=str(exc),
+        )
+        raise ManualVlmAnalyzeError(str(exc), debug_file_paths=debug_file_paths) from exc
+    raw_response = str(response.text)
+    response_payload = response.raw_response if isinstance(response.raw_response, Mapping) else None
+    parsed_response = probe_vlm_boundary.parse_model_response(
+        raw_response,
+        window_size=len(candidate_rows),
+        json_validation_mode=str(getattr(runtime_args, "json_validation_mode", "strict")),
+    )
+    if str(parsed_response.get("response_status", "") or "") != "ok":
+        debug_file_paths = build_manual_vlm_debug_file_paths(
+            debug_dir,
+            run_id,
+            include_response=response_payload is not None,
+            include_error=True,
+        )
+        probe_vlm_boundary.dump_debug_artifacts(
+            debug_dir=debug_dir,
+            run_id=run_id,
+            batch_index=1,
+            prompt=prompt,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            error_text=str(parsed_response.get("reason", "") or "invalid VLM response"),
+        )
+        raise ManualVlmAnalyzeError(
+            str(parsed_response.get("reason", "") or "invalid VLM response"),
+            debug_file_paths=debug_file_paths,
+        )
+    probe_vlm_boundary.dump_debug_artifacts(
+        debug_dir=debug_dir,
+        run_id=run_id,
+        batch_index=1,
+        prompt=prompt,
+        request_payload=request_payload,
+        response_payload=response_payload,
+        error_text=None,
+    )
+    response_json = extract_manual_vlm_response_payload(raw_response)
+    result = {
+        "provider": str(runtime_args.provider),
+        "model": str(runtime_args.model),
+        "run_id": run_id,
+        "decision": str(parsed_response.get("decision", "") or "").strip(),
+        "reason": str(parsed_response.get("reason", "") or "").strip(),
+        "response_status": str(parsed_response.get("response_status", "") or "").strip(),
+        "summary": str(response_json.get("summary", "") or "").strip(),
+        "left_segment_type": str(response_json.get("left_segment_type", "") or "").strip(),
+        "right_segment_type": str(response_json.get("right_segment_type", "") or "").strip(),
+        "raw_response": raw_response,
+        "debug_file_paths": build_manual_vlm_debug_file_paths(
+            debug_dir,
+            run_id,
+            include_response=response_payload is not None,
+        ),
+    }
+    result["result_text"] = format_manual_vlm_analyze_result_text(result)
     return result
 
 
@@ -892,6 +1175,10 @@ def should_show_manual_ml_prediction(selected_photos: Sequence[Mapping[str, Any]
     return len(selected_photos) == 2
 
 
+def should_show_manual_vlm_analyze(selected_photos: Sequence[Mapping[str, Any]]) -> bool:
+    return len(selected_photos) == 2
+
+
 def build_manual_ml_prediction_section(
     manual_prediction_state: Optional[Mapping[str, Any]],
 ) -> Dict[str, Any]:
@@ -919,7 +1206,69 @@ def build_manual_ml_prediction_section(
         key="manual_ml_prediction",
     )
     section["action_key"] = "run_manual_ml_prediction"
-    section["action_text"] = "Running..." if status == "running" else "Run manual ML prediction"
+    section["action_text"] = "Running..." if status == "running" else "Run"
+    section["action_enabled"] = status != "running"
+    return section
+
+
+def build_manual_vlm_debug_lines(debug_file_paths: Sequence[object]) -> List[str]:
+    normalized_paths = [str(value).strip() for value in debug_file_paths if str(value).strip()]
+    if not normalized_paths:
+        return []
+    lines = ["Debug files:"]
+    lines.extend([f"  {path}" for path in normalized_paths])
+    return lines
+
+
+def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
+    lines = [
+        f"Decision: {format_value(result.get('decision'))}",
+    ]
+    left_segment_type = str(result.get("left_segment_type", "") or "").strip()
+    right_segment_type = str(result.get("right_segment_type", "") or "").strip()
+    if left_segment_type or right_segment_type:
+        lines.append(
+            "Segments: "
+            f"{format_value(left_segment_type)} -> {format_value(right_segment_type)}"
+        )
+    summary = str(result.get("summary", "") or "").strip()
+    if summary:
+        lines.append(f"Summary: {summary}")
+    reason = str(result.get("reason", "") or "").strip()
+    if reason:
+        lines.append(f"Reason: {reason}")
+    return join_info_section_lines(lines)
+
+
+def build_manual_vlm_analyze_section(
+    manual_vlm_analyze_state: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    state = dict(manual_vlm_analyze_state or {})
+    status = str(state.get("status", "") or "idle").strip().lower() or "idle"
+    resolution_error = str(state.get("resolution_error", "") or "").strip()
+    error_text = str(state.get("error", "") or "").strip()
+    if resolution_error and status == "idle":
+        status = "error"
+        error_text = error_text or resolution_error
+    lines = [f"Status: {status}"]
+    if status == "running":
+        lines.append(f"Started: {format_value(state.get('started_at'))}")
+    elif status == "error":
+        lines.append(f"Error: {format_value(error_text or resolution_error)}")
+    elif status == "result":
+        result_text = str(state.get("result_text", "") or "").strip()
+        lines.extend(result_text.splitlines() if result_text else format_manual_vlm_analyze_result_text(state).splitlines())
+    else:
+        lines.append("Analyze run not started.")
+    append_info_block(lines, build_manual_vlm_debug_lines(state.get("debug_file_paths", [])))
+    section = build_info_section(
+        "Manual VLM analyze",
+        "Ephemeral runtime state for manual VLM boundary analysis.",
+        join_info_section_lines(lines),
+        key="manual_vlm_analyze",
+    )
+    section["action_key"] = "run_manual_vlm_analyze"
+    section["action_text"] = "Running..." if status == "running" else "Analyze"
     section["action_enabled"] = status != "running"
     return section
 
@@ -1185,6 +1534,8 @@ def build_image_only_multi_photo_info_sections(
     *,
     show_manual_ml_prediction: bool,
     manual_prediction_state: Optional[Mapping[str, Any]],
+    show_manual_vlm_analyze: bool = False,
+    manual_vlm_analyze_state: Optional[Mapping[str, Any]] = None,
 ) -> List[Dict[str, str]]:
     sections = [
         build_info_section(
@@ -1202,6 +1553,8 @@ def build_image_only_multi_photo_info_sections(
     ]
     if show_manual_ml_prediction:
         sections.append(build_manual_ml_prediction_section(manual_prediction_state))
+    if show_manual_vlm_analyze:
+        sections.append(build_manual_vlm_analyze_section(manual_vlm_analyze_state))
     return sections
 
 
@@ -1273,6 +1626,8 @@ def build_image_only_multi_photo_info_text(photos: Sequence[Mapping[str, Any]], 
             diagnostics,
             show_manual_ml_prediction=False,
             manual_prediction_state=None,
+            show_manual_vlm_analyze=False,
+            manual_vlm_analyze_state=None,
         )
     )
 
@@ -1668,6 +2023,7 @@ class MainWindow(QMainWindow):
         if self.source_mode == review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
             self.image_only_diagnostics["ml_diagnostics"] = load_ml_hint_diagnostics(self.workspace_dir, payload)
         self.manual_ml_prediction_state: Optional[Dict[str, Any]] = None
+        self.manual_vlm_analyze_state: Optional[Dict[str, Any]] = None
         self.thread_pool = QThreadPool.globalInstance()
         self.icon_cache: Dict[str, QPixmap] = {}
         self.preview_cache: OrderedDict[str, QPixmap] = OrderedDict()
@@ -2747,6 +3103,12 @@ class MainWindow(QMainWindow):
             return False
         return should_show_manual_ml_prediction(self.selected_photo_entries())
 
+    def should_show_manual_vlm_analyze(self) -> bool:
+        if self.source_mode != review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1:
+            self.manual_vlm_analyze_state = None
+            return False
+        return should_show_manual_vlm_analyze(self.selected_photo_entries())
+
     def manual_prediction_day_dir(self) -> Path:
         day_dir = getattr(self, "day_dir", None)
         if isinstance(day_dir, Path):
@@ -2769,6 +3131,20 @@ class MainWindow(QMainWindow):
         if current_keys != selected_photo_keys or not isinstance(current_state, Mapping):
             self.manual_ml_prediction_state = build_idle_manual_prediction_state(selected_photos)
         return self.manual_ml_prediction_state
+
+    def current_manual_vlm_analyze_state(self) -> Optional[Mapping[str, Any]]:
+        selected_photos = self.selected_photo_entries()
+        if self.source_mode != review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1 or not should_show_manual_vlm_analyze(selected_photos):
+            self.manual_vlm_analyze_state = None
+            return None
+        selected_photo_keys = manual_prediction_selected_photo_keys(selected_photos)
+        current_state = getattr(self, "manual_vlm_analyze_state", None)
+        current_keys = []
+        if isinstance(current_state, Mapping):
+            current_keys = [str(value) for value in current_state.get("selected_photo_keys", [])]
+        if current_keys != selected_photo_keys or not isinstance(current_state, Mapping):
+            self.manual_vlm_analyze_state = build_idle_manual_vlm_analyze_state(selected_photos)
+        return self.manual_vlm_analyze_state
 
     def current_selection_diagnostics_payload(
         self,
@@ -2829,6 +3205,8 @@ class MainWindow(QMainWindow):
                 self.image_only_diagnostics,
                 show_manual_ml_prediction=self.should_show_manual_ml_prediction(),
                 manual_prediction_state=self.current_manual_ml_prediction_state(),
+                show_manual_vlm_analyze=self.should_show_manual_vlm_analyze(),
+                manual_vlm_analyze_state=self.current_manual_vlm_analyze_state(),
             )
         if item.parent() is None:
             display_set = item.data(0, Qt.UserRole)
@@ -2899,6 +3277,60 @@ class MainWindow(QMainWindow):
             result_state.pop("error", None)
             result_state.pop("resolution_error", None)
             self.manual_ml_prediction_state = result_state
+
+        self.refresh_current_info_dock()
+
+    def run_manual_vlm_analyze(self) -> None:
+        current_state = self.current_manual_vlm_analyze_state()
+        if not isinstance(current_state, Mapping):
+            return
+        if str(current_state.get("status", "") or "").strip().lower() == "running":
+            return
+
+        resolution_state = resolve_manual_vlm_analyze_state(
+            day_dir=self.manual_prediction_day_dir(),
+            workspace_dir=self.workspace_dir,
+            payload=self.payload,
+            selected_photos=self.selected_photo_entries(),
+        )
+        next_state = dict(resolution_state)
+        next_state["status"] = "running"
+        next_state["started_at"] = datetime.now(timezone.utc).astimezone().replace(microsecond=0).isoformat()
+        next_state.pop("error", None)
+        next_state.pop("result_text", None)
+        next_state.pop("resolution_error", None)
+        next_state.pop("debug_file_paths", None)
+        self.manual_vlm_analyze_state = next_state
+        self.refresh_current_info_dock()
+        QApplication.processEvents()
+
+        try:
+            resolution_error = str(resolution_state.get("resolution_error", "") or "").strip()
+            if resolution_error:
+                raise ValueError(resolution_error)
+            result = compute_manual_vlm_analyze_result(
+                day_dir=self.manual_prediction_day_dir(),
+                workspace_dir=self.workspace_dir,
+                payload=self.payload,
+                joined_rows=load_manual_prediction_joined_rows(self.workspace_dir, self.payload),
+                anchor_pair=dict(resolution_state.get("anchor_pair", {}) or {}),
+                window_config=dict(resolution_state.get("window_config", {}) or {}),
+            )
+        except Exception as exc:
+            error_state = dict(next_state)
+            error_state["status"] = "error"
+            error_state["error"] = str(exc)
+            debug_file_paths = getattr(exc, "debug_file_paths", [])
+            if debug_file_paths:
+                error_state["debug_file_paths"] = [str(value) for value in debug_file_paths]
+            self.manual_vlm_analyze_state = error_state
+        else:
+            result_state = dict(next_state)
+            result_state["status"] = "result"
+            result_state.update(result)
+            result_state.pop("error", None)
+            result_state.pop("resolution_error", None)
+            self.manual_vlm_analyze_state = result_state
 
         self.refresh_current_info_dock()
 
@@ -2985,10 +3417,15 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(title_button, 1)
 
         action_key = str(section.get("action_key", "") or "").strip()
+        action_handler = None
         if action_key == "run_manual_ml_prediction" and hasattr(self, "run_manual_ml_prediction"):
+            action_handler = self.run_manual_ml_prediction
+        elif action_key == "run_manual_vlm_analyze" and hasattr(self, "run_manual_vlm_analyze"):
+            action_handler = self.run_manual_vlm_analyze
+        if action_handler is not None:
             action_button = QPushButton(str(section.get("action_text", "") or "Run"))
             action_button.setEnabled(bool(section.get("action_enabled", True)))
-            action_button.clicked.connect(self.run_manual_ml_prediction)
+            action_button.clicked.connect(action_handler)
             header_layout.addWidget(action_button, 0, Qt.AlignRight)
 
         header_widget.setLayout(header_layout)
