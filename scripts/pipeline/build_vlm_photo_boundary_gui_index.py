@@ -165,20 +165,20 @@ def build_ml_hint_pairs_for_run(
         }
         candidate_windows: list[list[Mapping[str, str]]] = []
         seen_pairs: set[tuple[str, str]] = set()
+        expected_window_size = probe.window_radius_to_window_size(runtime_window_radius)
         for result_row in run_rows:
             relative_paths_json = str(result_row.get("relative_paths_json", "") or "").strip()
             if not relative_paths_json:
                 continue
             try:
                 relative_paths = json.loads(relative_paths_json)
-            except Exception:
-                continue
-            if not isinstance(relative_paths, list) or len(relative_paths) < 3:
-                continue
+            except Exception as error:
+                raise ValueError(f"run row relative_paths_json is invalid JSON: {error}") from error
+            if not isinstance(relative_paths, list):
+                raise ValueError("run row relative_paths_json must decode to a list")
             normalized_relative_paths = [str(value or "").strip() for value in relative_paths]
             if any(not value for value in normalized_relative_paths):
-                continue
-            expected_window_size = probe.window_radius_to_window_size(runtime_window_radius)
+                raise ValueError("run row relative_paths_json must not contain blank relative paths")
             if len(normalized_relative_paths) != expected_window_size:
                 raise ValueError(
                     "run row window_radius mismatch: "
