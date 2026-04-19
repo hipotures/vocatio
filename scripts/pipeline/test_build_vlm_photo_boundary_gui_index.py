@@ -63,9 +63,10 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
             return builder.probe.MlHintPrediction(
                 boundary_prediction=True,
                 boundary_confidence=0.91,
-                boundary_positive_probability=0.91,
-                segment_type_prediction="ceremony",
-                segment_type_confidence=0.88,
+                left_segment_type_prediction="performance",
+                left_segment_type_confidence=0.88,
+                right_segment_type_prediction="ceremony",
+                right_segment_type_confidence=0.86,
             )
 
         with mock.patch.object(
@@ -121,9 +122,10 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                     "right_relative_path": "cam/d.hif",
                     "boundary_prediction": True,
                     "boundary_confidence": "0.91",
-                    "boundary_positive_probability": "0.91",
-                    "segment_type_prediction": "ceremony",
-                    "segment_type_confidence": "0.88",
+                    "left_segment_type_prediction": "performance",
+                    "left_segment_type_confidence": "0.88",
+                    "right_segment_type_prediction": "ceremony",
+                    "right_segment_type_confidence": "0.86",
                 }
             ],
         )
@@ -235,9 +237,10 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
             return builder.probe.MlHintPrediction(
                 boundary_prediction=False,
                 boundary_confidence=0.77,
-                boundary_positive_probability=0.23,
-                segment_type_prediction="dance",
-                segment_type_confidence=0.81,
+                left_segment_type_prediction="dance",
+                left_segment_type_confidence=0.81,
+                right_segment_type_prediction="dance",
+                right_segment_type_confidence=0.80,
             )
 
         with mock.patch.object(
@@ -285,9 +288,10 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                     "right_relative_path": "cam/b.hif",
                     "boundary_prediction": False,
                     "boundary_confidence": "0.77",
-                    "boundary_positive_probability": "0.23",
-                    "segment_type_prediction": "dance",
-                    "segment_type_confidence": "0.81",
+                    "left_segment_type_prediction": "dance",
+                    "left_segment_type_confidence": "0.81",
+                    "right_segment_type_prediction": "dance",
+                    "right_segment_type_confidence": "0.80",
                 }
             ],
         )
@@ -336,6 +340,85 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                     joined_rows=joined_rows,
                     ml_model_run_id="ml-run-001",
                 )
+
+    def test_build_gui_index_serializes_left_and_right_ml_predictions(self):
+        run_metadata = {
+            "run_id": "vlm-20260414053012",
+            "args": {
+                "image_variant": "thumb",
+                "window_radius": 1,
+                "effective_ml_model_run_id": "ml-run-001",
+                "photo_pre_model_dir": "photo-pre",
+            },
+            "embedded_manifest_csv": "/tmp/photo_embedded_manifest.csv",
+            "photo_manifest_csv": "/tmp/media_manifest.csv",
+        }
+        run_rows = [
+            {
+                "run_id": "vlm-20260414053012",
+                "window_radius": "1",
+                "relative_paths_json": json.dumps(["cam/a.hif", "cam/b.hif"]),
+            }
+        ]
+        joined_rows = [
+            {
+                "relative_path": "cam/a.hif",
+                "photo_id": "cam/a.hif",
+                "start_epoch_ms": "1000",
+                "thumb_path": "/tmp/a.jpg",
+            },
+            {
+                "relative_path": "cam/b.hif",
+                "photo_id": "cam/b.hif",
+                "start_epoch_ms": "2000",
+                "thumb_path": "/tmp/b.jpg",
+            },
+        ]
+
+        with mock.patch.object(builder.probe, "read_result_rows", return_value=run_rows), mock.patch.object(
+            builder.probe, "read_joined_rows", return_value=joined_rows
+        ), mock.patch.object(
+            builder.probe,
+            "build_gui_index_payload",
+            return_value={"performances": [], "photo_count": 2, "performance_count": 0},
+        ), mock.patch.object(
+            builder.probe,
+            "resolve_ml_model_run",
+            return_value=("ml-run-001", Path("/tmp/model-run")),
+        ), mock.patch.object(
+            builder.probe,
+            "load_ml_hint_context",
+            return_value=mock.Mock(window_radius=1),
+        ), mock.patch.object(
+            builder.probe,
+            "read_boundary_scores_by_pair",
+            return_value={},
+        ), mock.patch.object(
+            builder.probe,
+            "resolve_path",
+            return_value=Path("/tmp/photo-pre"),
+        ), mock.patch.object(
+            builder.probe,
+            "predict_ml_hint_for_candidate",
+            return_value=builder.probe.MlHintPrediction(
+                boundary_prediction=True,
+                boundary_confidence=0.93,
+                left_segment_type_prediction="performance",
+                left_segment_type_confidence=0.87,
+                right_segment_type_prediction="ceremony",
+                right_segment_type_confidence=0.85,
+            ),
+        ):
+            payload, _ = builder.build_gui_index_for_run(
+                day_dir=Path("/tmp/20260323"),
+                workspace_dir=Path("/tmp/workspace"),
+                run_metadata=run_metadata,
+                output_csv=Path("/tmp/vlm_boundary_results.csv"),
+            )
+
+        ml_pair = payload["ml_hint_pairs"][0]
+        self.assertEqual(ml_pair["left_segment_type_prediction"], "performance")
+        self.assertEqual(ml_pair["right_segment_type_prediction"], "ceremony")
 
     def test_build_gui_index_for_specific_run_filters_other_runs(self):
         with tempfile.TemporaryDirectory() as tmp:

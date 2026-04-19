@@ -359,7 +359,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     {
                         "image_feature_columns": [],
                         "boundary_feature_columns": ["gap_12", "gap_23"],
-                        "segment_type_feature_columns": ["gap_12", "gap_23"],
+                        "left_segment_type_feature_columns": ["gap_12", "gap_23"],
+                        "right_segment_type_feature_columns": ["gap_12", "gap_23"],
                     }
                 ),
                 encoding="utf-8",
@@ -397,7 +398,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     {
                         "image_feature_columns": [],
                         "boundary_feature_columns": ["gap_12", "gap_23"],
-                        "segment_type_feature_columns": ["gap_12", "gap_23"],
+                        "left_segment_type_feature_columns": ["gap_12", "gap_23"],
+                        "right_segment_type_feature_columns": ["gap_12", "gap_23"],
                     }
                 ),
                 encoding="utf-8",
@@ -423,16 +425,18 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             probe.MlHintPrediction(
                 boundary_prediction=True,
                 boundary_confidence=0.82,
-                boundary_positive_probability=0.82,
-                segment_type_prediction="performance",
-                segment_type_confidence=0.74,
+                left_segment_type_prediction="performance",
+                left_segment_type_confidence=0.74,
+                right_segment_type_prediction="ceremony",
+                right_segment_type_confidence=0.67,
             )
         )
         self.assertEqual(
             lines,
             [
-                "ML hint for the main candidate gap in this window: likely cut at the main candidate gap (confidence 0.82).",
-                "ML hint for the likely segment on the right side of the candidate gap: dance (confidence 0.74).",
+                "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
+                "ML hint for the left side of the candidate gap: likely dance (confidence 0.74).",
+                "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.67).",
             ],
         )
 
@@ -446,8 +450,9 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         prompt = probe.build_user_prompt(
             window_size=2,
             ml_hint_lines=[
-                "ML hint for the main candidate gap in this window: likely no cut at the main candidate gap (confidence 0.88).",
-                "ML hint for the likely segment on the right side of the candidate gap: ceremony (confidence 0.74).",
+                "ML hint for the main candidate gap in this window: likely no cut (confidence 0.88).",
+                "ML hint for the left side of the candidate gap: likely dance (confidence 0.73).",
+                "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.74).",
             ],
         )
         self.assertIn('"no_cut"', prompt)
@@ -461,8 +466,9 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIn("images", prompt)
         self.assertIn("ML hints", prompt)
         self.assertIn("ML hint for the main candidate gap in this window", prompt)
-        self.assertIn("likely no cut at the main candidate gap", prompt)
-        self.assertIn("likely segment on the right side of the candidate gap: ceremony", prompt)
+        self.assertIn("likely no cut", prompt)
+        self.assertIn("left side of the candidate gap: likely dance", prompt)
+        self.assertIn("right side of the candidate gap: likely ceremony", prompt)
         self.assertNotIn("Heuristic hints for consecutive gaps", prompt)
         self.assertNotIn("visual_distance=", prompt)
         self.assertIn("audience or backstage insert", prompt)
@@ -498,7 +504,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
     def test_build_user_prompt_schema_mode_mentions_boundary_after_frame(self):
         prompt = probe.build_user_prompt(
             window_size=3,
-            ml_hint_lines=["ML hint for the main candidate gap in this window: likely cut at the main candidate gap (confidence 0.82)."],
+            ml_hint_lines=["ML hint for the main candidate gap in this window: likely cut (confidence 0.82)."],
             extra_instructions="",
             response_schema_mode="on",
         )
@@ -517,12 +523,19 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             def predict_proba(self, _frame):
                 return [{"0": 0.18, "1": 0.82}]
 
-        class FakeSegmentPredictor:
+        class FakeLeftSegmentPredictor:
+            def predict(self, _frame):
+                return ["performance"]
+
+            def predict_proba(self, _frame):
+                return [{"performance": 0.74, "ceremony": 0.14, "warmup": 0.12}]
+
+        class FakeRightSegmentPredictor:
             def predict(self, _frame):
                 return ["ceremony"]
 
             def predict_proba(self, _frame):
-                return [{"performance": 0.12, "ceremony": 0.74, "warmup": 0.14}]
+                return [{"performance": 0.12, "ceremony": 0.67, "warmup": 0.21}]
 
         ml_hint_context = probe.MlHintContext(
             run_id="day-20260323",
@@ -530,9 +543,11 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             model_dir=Path("/tmp/fake-model"),
             window_radius=3,
             boundary_predictor=FakeBoundaryPredictor(),
-            segment_type_predictor=FakeSegmentPredictor(),
+            left_segment_type_predictor=FakeLeftSegmentPredictor(),
+            right_segment_type_predictor=FakeRightSegmentPredictor(),
             boundary_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
-            segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
+            left_segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
+            right_segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
             descriptor_field_registry={},
         )
         joined_rows = []
@@ -558,10 +573,128 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(
             lines,
             [
-                "ML hint for the main candidate gap in this window: likely cut at the main candidate gap (confidence 0.82).",
-                "ML hint for the likely segment on the right side of the candidate gap: ceremony (confidence 0.74).",
+                "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
+                "ML hint for the left side of the candidate gap: likely dance (confidence 0.74).",
+                "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.67).",
             ],
         )
+
+    def test_build_ml_hint_lines_for_candidate_renders_three_independent_lines(self):
+        class FakeBoundaryPredictor:
+            def predict(self, _frame):
+                return [1]
+
+            def predict_proba(self, _frame):
+                return [{"0": 0.10, "1": 0.90}]
+
+        class FakeLeftSegmentPredictor:
+            def predict(self, _frame):
+                return ["performance"]
+
+            def predict_proba(self, _frame):
+                return [{"performance": 0.73, "ceremony": 0.14, "warmup": 0.13}]
+
+        class FakeRightSegmentPredictor:
+            def predict(self, _frame):
+                return ["ceremony"]
+
+            def predict_proba(self, _frame):
+                return [{"performance": 0.15, "ceremony": 0.71, "warmup": 0.14}]
+
+        ml_hint_context = probe.MlHintContext(
+            run_id="day-20260323",
+            mode="tabular_only",
+            model_dir=Path("/tmp/fake-model"),
+            window_radius=2,
+            boundary_predictor=FakeBoundaryPredictor(),
+            left_segment_type_predictor=FakeLeftSegmentPredictor(),
+            right_segment_type_predictor=FakeRightSegmentPredictor(),
+            boundary_feature_columns=["gap_12", "gap_23", "gap_34"],
+            left_segment_type_feature_columns=["gap_12", "gap_23", "gap_34"],
+            right_segment_type_feature_columns=["gap_12", "gap_23", "gap_34"],
+            descriptor_field_registry={},
+        )
+        joined_rows = [
+            {
+                "day": "20260323",
+                "photo_id": f"cam/{name}.hif",
+                "relative_path": f"cam/{name}.hif",
+                "start_epoch_ms": str(index * 1000),
+                "thumb_path": f"/tmp/{name}.jpg",
+            }
+            for index, name in enumerate(("a", "b", "c", "d", "e"), start=1)
+        ]
+        lines = probe.build_ml_hint_lines_for_candidate(
+            day_id="20260323",
+            joined_rows=joined_rows,
+            cut_index=2,
+            boundary_rows_by_pair={},
+            photo_pre_model_dir=None,
+            ml_hint_context=ml_hint_context,
+            runtime_window_radius=2,
+        )
+        self.assertTrue(any("main candidate gap" in line for line in lines))
+        self.assertTrue(any("left side of the candidate gap" in line for line in lines))
+        self.assertTrue(any("right side of the candidate gap" in line for line in lines))
+
+    def test_predict_ml_hint_for_candidate_returns_left_right_and_boundary(self):
+        class FakeBoundaryPredictor:
+            def predict(self, _frame):
+                return [1]
+
+            def predict_proba(self, _frame):
+                return [{"0": 0.12, "1": 0.88}]
+
+        class FakeLeftSegmentPredictor:
+            def predict(self, _frame):
+                return ["performance"]
+
+            def predict_proba(self, _frame):
+                return [{"performance": 0.77, "ceremony": 0.13, "warmup": 0.10}]
+
+        class FakeRightSegmentPredictor:
+            def predict(self, _frame):
+                return ["ceremony"]
+
+            def predict_proba(self, _frame):
+                return [{"performance": 0.10, "ceremony": 0.79, "warmup": 0.11}]
+
+        ml_hint_context = probe.MlHintContext(
+            run_id="day-20260323",
+            mode="tabular_only",
+            model_dir=Path("/tmp/fake-model"),
+            window_radius=2,
+            boundary_predictor=FakeBoundaryPredictor(),
+            left_segment_type_predictor=FakeLeftSegmentPredictor(),
+            right_segment_type_predictor=FakeRightSegmentPredictor(),
+            boundary_feature_columns=["gap_12", "gap_23", "gap_34"],
+            left_segment_type_feature_columns=["gap_12", "gap_23", "gap_34"],
+            right_segment_type_feature_columns=["gap_12", "gap_23", "gap_34"],
+            descriptor_field_registry={},
+        )
+        candidate_row = probe._build_ml_candidate_row(
+            [
+                {
+                    "day": "20260323",
+                    "photo_id": f"cam/{name}.hif",
+                    "relative_path": f"cam/{name}.hif",
+                    "start_epoch_ms": str(index * 1000),
+                    "thumb_path": f"/tmp/{name}.jpg",
+                }
+                for index, name in enumerate(("a", "b", "c", "d"), start=1)
+            ],
+            day_id="20260323",
+            window_radius=2,
+        )
+        prediction = probe.predict_ml_hint_for_candidate(
+            ml_hint_context=ml_hint_context,
+            candidate_row=candidate_row,
+            boundary_rows_by_pair={},
+            photo_pre_model_dir=None,
+        )
+        self.assertEqual(prediction.left_segment_type_prediction, "performance")
+        self.assertEqual(prediction.right_segment_type_prediction, "ceremony")
+        self.assertTrue(prediction.boundary_prediction)
 
     def test_build_ml_hint_lines_for_candidate_rejects_runtime_radius_mismatch(self):
         ml_hint_context = probe.MlHintContext(
@@ -570,9 +703,11 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             model_dir=Path("/tmp/fake-model"),
             window_radius=3,
             boundary_predictor=mock.Mock(),
-            segment_type_predictor=mock.Mock(),
+            left_segment_type_predictor=mock.Mock(),
+            right_segment_type_predictor=mock.Mock(),
             boundary_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
-            segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
+            left_segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
+            right_segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
             descriptor_field_registry={},
         )
         joined_rows = [
@@ -2237,8 +2372,9 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 probe,
                 "build_ml_hint_lines_for_candidate",
                 return_value=[
-                    "ML hint for the main candidate gap in this window: likely cut at the main candidate gap (confidence 0.82).",
-                    "ML hint for the likely segment on the right side of the candidate gap: ceremony (confidence 0.74).",
+                    "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
+                    "ML hint for the left side of the candidate gap: likely dance (confidence 0.76).",
+                    "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.74).",
                 ],
             ), mock.patch.object(probe, "run_vlm_request", return_value=response) as run_vlm_mock, mock.patch.object(
                 probe, "build_run_id", return_value="vlm-20260414071000"

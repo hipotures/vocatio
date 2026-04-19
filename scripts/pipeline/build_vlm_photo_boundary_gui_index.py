@@ -250,9 +250,10 @@ def build_ml_hint_pairs_for_run(
                         "right_relative_path": right_relative_path,
                         "boundary_prediction": bool(prediction.boundary_prediction),
                         "boundary_confidence": f"{prediction.boundary_confidence:.2f}",
-                        "boundary_positive_probability": f"{prediction.boundary_positive_probability:.2f}",
-                        "segment_type_prediction": str(prediction.segment_type_prediction),
-                        "segment_type_confidence": f"{prediction.segment_type_confidence:.2f}",
+                        "left_segment_type_prediction": str(prediction.left_segment_type_prediction),
+                        "left_segment_type_confidence": f"{prediction.left_segment_type_confidence:.2f}",
+                        "right_segment_type_prediction": str(prediction.right_segment_type_prediction),
+                        "right_segment_type_confidence": f"{prediction.right_segment_type_confidence:.2f}",
                     }
                 )
                 progress.advance(task_id)

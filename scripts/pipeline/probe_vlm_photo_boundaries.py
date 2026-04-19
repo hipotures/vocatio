@@ -49,7 +49,8 @@ from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
 from train_ml_boundary_verifier import (
     BOUNDARY_MODEL_DIRNAME,
     FEATURE_COLUMNS_FILENAME,
-    SEGMENT_TYPE_MODEL_DIRNAME,
+    LEFT_SEGMENT_TYPE_MODEL_DIRNAME,
+    RIGHT_SEGMENT_TYPE_MODEL_DIRNAME,
     TRAINING_METADATA_FILENAME,
     load_multimodal_predictor_class,
     load_tabular_predictor_class,
@@ -156,18 +157,21 @@ class MlHintContext(NamedTuple):
     model_dir: Path
     window_radius: int
     boundary_predictor: object
-    segment_type_predictor: object
+    left_segment_type_predictor: object
+    right_segment_type_predictor: object
     boundary_feature_columns: list[str]
-    segment_type_feature_columns: list[str]
+    left_segment_type_feature_columns: list[str]
+    right_segment_type_feature_columns: list[str]
     descriptor_field_registry: dict[str, str]
 
 
 class MlHintPrediction(NamedTuple):
     boundary_prediction: bool
     boundary_confidence: float
-    boundary_positive_probability: float
-    segment_type_prediction: str
-    segment_type_confidence: float
+    left_segment_type_prediction: str
+    left_segment_type_confidence: float
+    right_segment_type_prediction: str
+    right_segment_type_confidence: float
 
 
 def _validate_ml_hint_feature_columns_contract(
@@ -176,7 +180,8 @@ def _validate_ml_hint_feature_columns_contract(
     window_radius: int,
     image_feature_columns: Sequence[str],
     boundary_feature_columns: Sequence[str],
-    segment_type_feature_columns: Sequence[str],
+    left_segment_type_feature_columns: Sequence[str],
+    right_segment_type_feature_columns: Sequence[str],
 ) -> None:
     expected_image_feature_columns = training_image_feature_columns_for_mode(
         mode,
@@ -188,7 +193,13 @@ def _validate_ml_hint_feature_columns_contract(
             f"window_radius={window_radius}: image_feature_columns mismatch"
         )
     descriptor_field_registry = _build_descriptor_field_registry_from_feature_columns(
-        sorted(set(boundary_feature_columns + segment_type_feature_columns))
+        sorted(
+            set(
+                boundary_feature_columns
+                + left_segment_type_feature_columns
+                + right_segment_type_feature_columns
+            )
+        )
     )
     synthetic_candidate_row: dict[str, object] = {"window_radius": window_radius}
     for frame_index in range(1, window_radius_to_window_size(window_radius) + 1):
@@ -214,7 +225,8 @@ def _validate_ml_hint_feature_columns_contract(
             )
 
     validate_predictor_columns("boundary_feature_columns", boundary_feature_columns)
-    validate_predictor_columns("segment_type_feature_columns", segment_type_feature_columns)
+    validate_predictor_columns("left_segment_type_feature_columns", left_segment_type_feature_columns)
+    validate_predictor_columns("right_segment_type_feature_columns", right_segment_type_feature_columns)
 
 SYSTEM_PROMPT = (
     "You analyze consecutive stage performance photos. "
@@ -795,31 +807,49 @@ def load_ml_hint_context(
         raise ValueError("window_radius must be at least 1")
     image_feature_columns = [str(value) for value in feature_columns_payload.get("image_feature_columns", [])]
     boundary_feature_columns = [str(value) for value in feature_columns_payload.get("boundary_feature_columns", [])]
-    segment_type_feature_columns = [str(value) for value in feature_columns_payload.get("segment_type_feature_columns", [])]
+    left_segment_type_feature_columns = [
+        str(value) for value in feature_columns_payload.get("left_segment_type_feature_columns", [])
+    ]
+    right_segment_type_feature_columns = [
+        str(value) for value in feature_columns_payload.get("right_segment_type_feature_columns", [])
+    ]
     _validate_ml_hint_feature_columns_contract(
         mode=mode,
         window_radius=window_radius,
         image_feature_columns=image_feature_columns,
         boundary_feature_columns=boundary_feature_columns,
-        segment_type_feature_columns=segment_type_feature_columns,
+        left_segment_type_feature_columns=left_segment_type_feature_columns,
+        right_segment_type_feature_columns=right_segment_type_feature_columns,
     )
     descriptor_field_registry = _build_descriptor_field_registry_from_feature_columns(
-        sorted(set(boundary_feature_columns + segment_type_feature_columns))
+        sorted(
+            set(
+                boundary_feature_columns
+                + left_segment_type_feature_columns
+                + right_segment_type_feature_columns
+            )
+        )
     )
     predictor_class = load_multimodal_predictor_class() if mode == "tabular_plus_thumbnail" else load_tabular_predictor_class()
     if not hasattr(predictor_class, "load"):
         raise ValueError(f"{predictor_class.__name__} does not support load()")
-    boundary_predictor = predictor_class.load(str(ml_model_dir / BOUNDARY_MODEL_DIRNAME))
-    segment_type_predictor = predictor_class.load(str(ml_model_dir / SEGMENT_TYPE_MODEL_DIRNAME))
+    left_segment_type_model_dir = ml_model_dir / LEFT_SEGMENT_TYPE_MODEL_DIRNAME
+    right_segment_type_model_dir = ml_model_dir / RIGHT_SEGMENT_TYPE_MODEL_DIRNAME
+    boundary_model_dir = ml_model_dir / BOUNDARY_MODEL_DIRNAME
+    left_segment_type_predictor = predictor_class.load(str(left_segment_type_model_dir))
+    right_segment_type_predictor = predictor_class.load(str(right_segment_type_model_dir))
+    boundary_predictor = predictor_class.load(str(boundary_model_dir))
     return MlHintContext(
         run_id=ml_model_run_id,
         mode=mode,
         model_dir=ml_model_dir,
         window_radius=window_radius,
         boundary_predictor=boundary_predictor,
-        segment_type_predictor=segment_type_predictor,
+        left_segment_type_predictor=left_segment_type_predictor,
+        right_segment_type_predictor=right_segment_type_predictor,
         boundary_feature_columns=boundary_feature_columns,
-        segment_type_feature_columns=segment_type_feature_columns,
+        left_segment_type_feature_columns=left_segment_type_feature_columns,
+        right_segment_type_feature_columns=right_segment_type_feature_columns,
         descriptor_field_registry=descriptor_field_registry,
     )
 
@@ -988,8 +1018,13 @@ def predict_ml_hint_for_candidate(
         heuristic_features=heuristic_features,
         window_radius=ml_hint_context.window_radius,
     )
-    segment_type_row = _build_predictor_feature_row(
-        feature_columns=ml_hint_context.segment_type_feature_columns,
+    left_segment_type_row = _build_predictor_feature_row(
+        feature_columns=ml_hint_context.left_segment_type_feature_columns,
+        candidate_row=candidate_row,
+        derived_features=derived_features,
+    )
+    right_segment_type_row = _build_predictor_feature_row(
+        feature_columns=ml_hint_context.right_segment_type_feature_columns,
         candidate_row=candidate_row,
         derived_features=derived_features,
     )
@@ -998,13 +1033,23 @@ def predict_ml_hint_for_candidate(
         candidate_row=candidate_row,
         derived_features=derived_features,
     )
-    segment_type_frame = _to_model_frame([segment_type_row])
+    left_segment_type_frame = _to_model_frame([left_segment_type_row])
+    right_segment_type_frame = _to_model_frame([right_segment_type_row])
     boundary_frame = _to_model_frame([boundary_row])
 
-    segment_type_prediction = str(_to_plain_list(ml_hint_context.segment_type_predictor.predict(segment_type_frame))[0]).strip()
-    segment_type_confidence = _extract_label_probability(
-        ml_hint_context.segment_type_predictor.predict_proba(segment_type_frame),
-        segment_type_prediction,
+    left_segment_type_prediction = str(
+        _to_plain_list(ml_hint_context.left_segment_type_predictor.predict(left_segment_type_frame))[0]
+    ).strip()
+    left_segment_type_confidence = _extract_label_probability(
+        ml_hint_context.left_segment_type_predictor.predict_proba(left_segment_type_frame),
+        left_segment_type_prediction,
+    )
+    right_segment_type_prediction = str(
+        _to_plain_list(ml_hint_context.right_segment_type_predictor.predict(right_segment_type_frame))[0]
+    ).strip()
+    right_segment_type_confidence = _extract_label_probability(
+        ml_hint_context.right_segment_type_predictor.predict_proba(right_segment_type_frame),
+        right_segment_type_prediction,
     )
 
     boundary_prediction = _normalize_boundary_prediction(
@@ -1017,9 +1062,10 @@ def predict_ml_hint_for_candidate(
     return MlHintPrediction(
         boundary_prediction=boundary_prediction,
         boundary_confidence=boundary_confidence,
-        boundary_positive_probability=positive_boundary_probability,
-        segment_type_prediction=segment_type_prediction,
-        segment_type_confidence=segment_type_confidence,
+        left_segment_type_prediction=left_segment_type_prediction,
+        left_segment_type_confidence=left_segment_type_confidence,
+        right_segment_type_prediction=right_segment_type_prediction,
+        right_segment_type_confidence=right_segment_type_confidence,
     )
 
 
@@ -1028,18 +1074,19 @@ def build_ml_hint_lines(
 ) -> List[str]:
     if prediction is None:
         return ["ML hints are unavailable for this window."]
-    boundary_text = (
-        "likely cut at the main candidate gap"
-        if prediction.boundary_prediction
-        else "likely no cut at the main candidate gap"
+    boundary_label = "cut" if prediction.boundary_prediction else "no cut"
+    left_segment_label = ML_SEGMENT_TYPE_TO_PROMPT_LABEL.get(
+        prediction.left_segment_type_prediction,
+        prediction.left_segment_type_prediction,
     )
     right_segment_label = ML_SEGMENT_TYPE_TO_PROMPT_LABEL.get(
-        prediction.segment_type_prediction,
-        prediction.segment_type_prediction,
+        prediction.right_segment_type_prediction,
+        prediction.right_segment_type_prediction,
     )
     return [
-        f"ML hint for the main candidate gap in this window: {boundary_text} (confidence {prediction.boundary_confidence:.2f}).",
-        f"ML hint for the likely segment on the right side of the candidate gap: {right_segment_label} (confidence {prediction.segment_type_confidence:.2f}).",
+        f"ML hint for the main candidate gap in this window: likely {boundary_label} (confidence {prediction.boundary_confidence:.2f}).",
+        f"ML hint for the left side of the candidate gap: likely {left_segment_label} (confidence {prediction.left_segment_type_confidence:.2f}).",
+        f"ML hint for the right side of the candidate gap: likely {right_segment_label} (confidence {prediction.right_segment_type_confidence:.2f}).",
     ]
 
 
