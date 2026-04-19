@@ -461,6 +461,8 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert "segment_type" not in feature_columns["shared_feature_columns"]
     assert "boundary" not in feature_columns["shared_feature_columns"]
     assert "split_name" not in feature_columns["shared_feature_columns"]
+    assert "frame_01_thumb_path" not in feature_columns["shared_feature_columns"]
+    assert "frame_04_thumb_path" not in feature_columns["shared_feature_columns"]
     assert feature_columns["segment_type_feature_columns"] == feature_columns["boundary_feature_columns"]
     assert training_summary == {
         "segment_type": {

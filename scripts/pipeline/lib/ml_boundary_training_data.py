@@ -246,10 +246,13 @@ def feature_columns_for_mode(
     window_radius: int,
 ) -> dict[str, list[str]]:
     image_feature_columns = image_feature_columns_for_mode(mode, window_radius=window_radius)
+    thumbnail_columns = set(thumbnail_image_columns_for_window_radius(window_radius))
     shared_feature_columns = [
         column
         for column in dataset_columns
-        if column not in NON_MODEL_FEATURE_COLUMNS and column not in image_feature_columns
+        if column not in NON_MODEL_FEATURE_COLUMNS
+        and column not in thumbnail_columns
+        and column not in image_feature_columns
     ]
     predictor_feature_columns = shared_feature_columns + image_feature_columns
     return {
