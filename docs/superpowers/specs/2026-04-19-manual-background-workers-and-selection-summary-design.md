@@ -83,7 +83,8 @@ Implementation model:
 The worker receives:
 
 - action type: `manual_ml` or `manual_vlm`
-- the exact runtime inputs already resolved by the GUI before dispatch
+- the exact runtime inputs needed by the current manual action
+- enough GUI-side snapshot data to resolve the rest of the work off the GUI thread
 
 The worker returns:
 
@@ -99,13 +100,13 @@ This design matches the existing file’s current use of `QThreadPool` for previ
 Both manual actions follow the same lifecycle:
 
 1. User clicks the section action button.
-2. GUI resolves the current manual state.
-3. GUI updates the section state to `running`.
-4. GUI disables only that section’s action button.
-5. GUI submits a worker to the thread pool.
-6. Worker computes the result off the GUI thread.
-7. Worker emits success or failure back to the main thread.
-8. GUI updates the section state to `result` or `error`.
+2. GUI immediately updates the section state to `running`.
+3. GUI disables both manual action buttons.
+4. GUI submits a worker to the thread pool.
+5. The worker performs all expensive work off the GUI thread, including runtime resolution, module reload, data loading, and inference/analysis.
+6. Worker emits success or failure back to the main thread.
+7. GUI updates the section state to `result` or `error`.
+8. GUI re-enables both manual action buttons.
 
 The GUI must remain responsive for:
 
@@ -128,7 +129,8 @@ Running-state behavior:
 
 - keep the short base label
 - show a small inline spinner indicator next to the label
-- disable that button while its worker is active
+- disable both manual action buttons while either worker is active
+- only the active section shows the spinner
 
 Examples:
 
@@ -146,27 +148,32 @@ Rules:
 - do not try to cancel, discard, or re-key results when selection changes
 - do not compare the finishing result against the current selection before applying it
 - the latest completed run for a section simply replaces the previous runtime result for that section
+- this applies even if the current selection is now a different pair or is no longer exactly two photos
 
 This is intentionally permissive. The user explicitly prefers to keep the finished result rather than have the GUI silently throw it away.
+
+To make provenance explicit, `Manual VLM analyze` must always render:
+
+```text
+Anchors:
+  <left_relative_path> -> <right_relative_path>
+```
+
+This anchor block is required in the finished VLM result so a stale-but-intentional result can still be interpreted correctly after selection changes.
 
 ## Concurrency Rules
 
 The asynchronous design removes the old implicit serialization from synchronous execution. The GUI needs one explicit rule:
 
-- at most one in-flight job per section
+- at most one in-flight manual job globally
 
 That means:
 
-- one `Manual ML prediction` job may run at a time
-- one `Manual VLM analyze` job may run at a time
-- ML and VLM may run concurrently with each other
+- if `Manual ML prediction` is running, `Manual VLM analyze` cannot start
+- if `Manual VLM analyze` is running, `Manual ML prediction` cannot start
+- both buttons remain disabled until the running job finishes with either `result` or `error`
 
-If a section is already running:
-
-- its own button remains disabled
-- no second job of the same type is queued from that section
-
-No global cross-section lock is required.
+This global serialization is required because the current manual actions rely on a shared module reload seam for `probe_vlm_photo_boundaries`, and concurrent reload/use would create undefined races.
 
 ## Status Feedback Rules
 
@@ -195,14 +202,15 @@ The section body remains the single source of truth:
 
 The asynchronous conversion must preserve the current manual ML logic:
 
-- same input resolution
+- same predictor execution semantics
 - same reload seam for `probe_vlm_photo_boundaries`
-- same predictor execution
 - same rendered fields
 
 Only execution mode changes:
 
 - synchronous on GUI thread -> background worker
+
+The expensive runtime resolution for manual ML also moves into the worker. The click handler does not perform heavy joined-row loading or compute preparation before setting `running`.
 
 No change to ML semantics is part of this design.
 
@@ -219,6 +227,8 @@ The asynchronous conversion must preserve the current manual VLM logic:
 Only execution mode changes:
 
 - synchronous on GUI thread -> background worker
+
+The expensive runtime resolution for manual VLM also moves into the worker. The click handler does not perform heavy joined-row loading, runtime argument resolution, or prompt preparation before setting `running`.
 
 No change to prompt semantics is part of this design.
 
@@ -259,11 +269,13 @@ Tests must prove:
 - selected-photo lines include `set=<display_name>`
 - both manual sections enter `running` without blocking the rest of the GUI update path
 - both manual sections use background workers instead of direct synchronous compute from the click handler
-- button state switches to disabled + spinner while running
+- starting either action disables both manual action buttons
+- only the active action shows the spinner while running
 - success updates section state back on the GUI thread
 - failure updates section state back on the GUI thread
-- ML and VLM can both be in `running` state at the same time
+- ML and VLM cannot both be in `running` state at the same time
 - changing selection during a running task does not discard the finished result
+- finished VLM results always render the multi-line `Anchors:` block
 
 ## Out Of Scope
 
