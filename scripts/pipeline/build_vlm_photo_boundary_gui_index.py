@@ -322,7 +322,7 @@ def build_gui_index_for_run(
         ml_model_run_id=requested_ml_model_run_id,
     )
     payload["ml_model_run_id"] = resolved_ml_model_run_id
-    payload["vlm_window_radius"] = runtime_window_radius
+    payload["window_radius"] = runtime_window_radius
     payload["ml_hint_pairs"] = ml_hint_pairs
     payload["ml_hints_error"] = ml_hints_error
     payload["embedded_manifest_csv"] = str(embedded_manifest_csv)

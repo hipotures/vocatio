@@ -421,7 +421,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
     def test_resolve_manual_prediction_window_config_uses_saved_index_radius(self):
         resolved = review_gui.resolve_manual_prediction_window_config(
             {
-                "vlm_window_radius": 4,
+                "window_radius": 4,
             }
         )
         self.assertEqual(resolved, {"window_radius": 4})
@@ -434,7 +434,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         with self.assertRaisesRegex(argparse.ArgumentTypeError, "must be a positive integer"):
             review_gui.resolve_manual_prediction_window_config(
                 {
-                    "vlm_window_radius": "0",
+                    "window_radius": "0",
                 }
             )
 
@@ -474,7 +474,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 workspace_dir=Path("/tmp/workspace"),
                 payload={
                     "day": "20260323",
-                    "vlm_window_radius": 2,
+                    "window_radius": 2,
                 },
                 selected_photos=selected_photos,
             )
@@ -1008,7 +1008,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "day": "20260323",
             "ml_model_run_id": "ml-run-001",
             "photo_pre_model_dir": "photo-pre",
-            "vlm_window_radius": 2,
+            "window_radius": 2,
         }
         window.index_path = Path("/tmp/performance_proxy_index.json")
         window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
@@ -1116,7 +1116,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.payload = {
             "day": "20260323",
             "ml_model_run_id": "ml-run-001",
-            "vlm_window_radius": 2,
+            "window_radius": 2,
         }
         window.index_path = Path("/tmp/performance_proxy_index.json")
         window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
@@ -1177,7 +1177,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.payload = {
             "day": "20260323",
             "ml_model_run_id": "ml-run-001",
-            "vlm_window_radius": 2,
+            "window_radius": 2,
         }
         window.index_path = Path("/tmp/performance_proxy_index.json")
         window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
@@ -1295,7 +1295,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     "day": "20260323",
                     "ml_model_run_id": "ml-run-001",
                     "photo_pre_model_dir": "photo-pre",
-                    "vlm_window_radius": 2,
+                    "window_radius": 2,
                 },
                 joined_rows=joined_rows,
                 anchor_pair={

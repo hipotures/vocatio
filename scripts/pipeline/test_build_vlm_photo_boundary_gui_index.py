@@ -441,7 +441,7 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
             self.assertEqual(run_row_count, 1)
             self.assertEqual(payload["performance_count"], 2)
             self.assertEqual(payload["ml_model_run_id"], "")
-            self.assertEqual(payload["vlm_window_radius"], 2)
+            self.assertEqual(payload["window_radius"], 2)
             self.assertEqual([photo["relative_path"] for photo in payload["performances"][0]["photos"]], ["cam/a.hif", "cam/b.hif"])
             self.assertEqual([photo["relative_path"] for photo in payload["performances"][1]["photos"]], ["cam/c.hif", "cam/d.hif"])
             self.assertEqual(payload["performances"][0]["photos"][0]["proxy_path"], "embedded_jpg/preview/cam/a.jpg")

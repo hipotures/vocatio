@@ -254,7 +254,7 @@ def resolve_selected_photo_context(selected_photos: Sequence[Mapping[str, Any]])
 
 
 def resolve_manual_prediction_window_config(payload: Mapping[str, Any]) -> Dict[str, int]:
-    configured_window_radius = str(payload.get("vlm_window_radius", "") or "").strip()
+    configured_window_radius = str(payload.get("window_radius", "") or "").strip()
     if not configured_window_radius:
         raise ValueError("review index window_radius is unavailable")
     window_radius = probe_vlm_boundary.positive_window_radius_arg(configured_window_radius)
