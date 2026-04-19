@@ -616,16 +616,18 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     "start_epoch_ms": "2000",
                 },
             ],
-            window_size=10,
-            overlap=2,
+            window_radius=2,
             raw_response='{"decision":"cut_after_1","frame_notes":{"frame_01":"black-white","frame_02":"red-black"},"primary_evidence":["different performer"],"summary":"New act."}',
             parsed_response={"decision": "cut_after_1", "reason": "Summary: New act.", "response_status": "ok"},
         )
         self.assertEqual(row["run_id"], "vlm-20260414033000")
+        self.assertEqual(row["window_radius"], "2")
         self.assertEqual(row["cut_after_local_index"], "1")
         self.assertEqual(row["cut_after_global_row"], "9")
         self.assertEqual(row["cut_left_relative_path"], "cam/a.jpg")
         self.assertEqual(row["cut_right_relative_path"], "cam/b.jpg")
+        self.assertNotIn("window_size", row)
+        self.assertNotIn("overlap", row)
 
     def test_build_vlm_request_maps_ollama_fields_to_transport_request(self):
         schema = probe.build_response_schema(window_size=2)
@@ -808,6 +810,9 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             )
             lines = output_csv.read_text(encoding="utf-8").splitlines()
             self.assertEqual(lines[0], ",".join(probe.OUTPUT_HEADERS))
+            self.assertIn("window_radius", probe.OUTPUT_HEADERS)
+            self.assertNotIn("window_size", probe.OUTPUT_HEADERS)
+            self.assertNotIn("overlap", probe.OUTPUT_HEADERS)
             self.assertEqual(len(lines), 2)
 
     def test_append_result_rows_appends_without_overwrite_mode(self):
@@ -901,20 +906,39 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(stored["args"]["response_schema_mode"], "on")
             self.assertEqual(stored["response_schema"], {"type": "object"})
 
-    def test_read_result_rows_accepts_legacy_header_with_new_run_rows(self):
+    def test_read_result_rows_rejects_legacy_header(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_csv = Path(tmp) / "vlm_boundary_results.csv"
+            legacy_headers = [
+                "generated_at",
+                "image_variant",
+                "model",
+                "temperature",
+                "batch_index",
+                "start_row",
+                "end_row",
+                "window_size",
+                "overlap",
+                "relative_paths_json",
+                "filenames_json",
+                "image_paths_json",
+                "delta_from_first_seconds_json",
+                "delta_from_previous_seconds_json",
+                "decision",
+                "cut_after_local_index",
+                "cut_after_global_row",
+                "cut_left_relative_path",
+                "cut_right_relative_path",
+                "reason",
+                "response_status",
+                "raw_response",
+            ]
             with output_csv.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
-                writer.writerow(probe.LEGACY_OUTPUT_HEADERS)
-                writer.writerow(["legacy"] * len(probe.LEGACY_OUTPUT_HEADERS))
-                writer.writerow(["current"] * len(probe.OUTPUT_HEADERS))
-            rows = probe.read_result_rows(output_csv)
-            self.assertEqual(len(rows), 2)
-            self.assertEqual(rows[0]["run_id"], "")
-            self.assertEqual(rows[0]["generated_at"], "legacy")
-            self.assertEqual(rows[1]["run_id"], "current")
-            self.assertEqual(rows[1]["generated_at"], "current")
+                writer.writerow(legacy_headers)
+                writer.writerow(["legacy"] * len(legacy_headers))
+            with self.assertRaisesRegex(ValueError, "unsupported header"):
+                probe.read_result_rows(output_csv)
 
     def test_append_result_rows_writes_config_hash_column(self):
         with tempfile.TemporaryDirectory() as tmp:

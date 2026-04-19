@@ -110,8 +110,7 @@ OUTPUT_HEADERS = [
     "batch_index",
     "start_row",
     "end_row",
-    "window_size",
-    "overlap",
+    "window_radius",
     "relative_paths_json",
     "filenames_json",
     "image_paths_json",
@@ -126,8 +125,6 @@ OUTPUT_HEADERS = [
     "response_status",
     "raw_response",
 ]
-MID_OUTPUT_HEADERS = [header for header in OUTPUT_HEADERS if header != "config_hash"]
-LEGACY_OUTPUT_HEADERS = [header for header in OUTPUT_HEADERS if header not in {"run_id", "config_hash"}]
 RESUME_CONFIG_KEYS = (
     "embedded_manifest_csv",
     "photo_manifest_csv",
@@ -1397,8 +1394,7 @@ def build_result_row(
     start_row: int,
     end_row: int,
     rows: Sequence[Mapping[str, str]],
-    window_size: int,
-    overlap: int,
+    window_radius: int,
     raw_response: str,
     parsed_response: Mapping[str, str],
     model: str = DEFAULT_MODEL_NAME,
@@ -1434,8 +1430,7 @@ def build_result_row(
         "batch_index": str(batch_index),
         "start_row": str(start_row),
         "end_row": str(end_row),
-        "window_size": str(window_size),
-        "overlap": str(overlap),
+        "window_radius": str(window_radius),
         "relative_paths_json": json.dumps([str(row["relative_path"]) for row in rows], ensure_ascii=True),
         "filenames_json": json.dumps([str(row["filename"]) for row in rows], ensure_ascii=True),
         "image_paths_json": json.dumps([str(row["image_path"]) for row in rows], ensure_ascii=True),
@@ -1727,48 +1722,7 @@ def read_result_rows(output_csv: Path) -> List[Dict[str, str]]:
                 padded = list(row) + [""] * max(0, len(OUTPUT_HEADERS) - len(row))
                 rows.append({key: padded[index] for index, key in enumerate(OUTPUT_HEADERS)})
             return rows
-        if header == MID_OUTPUT_HEADERS:
-            for row in reader:
-                if not row:
-                    continue
-                if len(row) == len(MID_OUTPUT_HEADERS):
-                    rows.append({key: row[index] for index, key in enumerate(MID_OUTPUT_HEADERS)} | {"config_hash": ""})
-                    continue
-                if len(row) == len(OUTPUT_HEADERS):
-                    rows.append({key: row[index] for index, key in enumerate(OUTPUT_HEADERS)})
-                    continue
-                raise ValueError(
-                    f"{output_csv.name} has unsupported row width {len(row)} for mid header; expected "
-                    f"{len(MID_OUTPUT_HEADERS)} or {len(OUTPUT_HEADERS)} columns"
-                )
-            return rows
-        if header == LEGACY_OUTPUT_HEADERS:
-            for row in reader:
-                if not row:
-                    continue
-                if len(row) == len(LEGACY_OUTPUT_HEADERS):
-                    rows.append(
-                        {key: row[index] for index, key in enumerate(LEGACY_OUTPUT_HEADERS)}
-                        | {"run_id": "", "config_hash": ""}
-                    )
-                    continue
-                if len(row) == len(MID_OUTPUT_HEADERS):
-                    rows.append(
-                        {key: row[index] for index, key in enumerate(MID_OUTPUT_HEADERS)}
-                        | {"config_hash": ""}
-                    )
-                    continue
-                if len(row) == len(OUTPUT_HEADERS):
-                    rows.append({key: row[index] for index, key in enumerate(OUTPUT_HEADERS)})
-                    continue
-                raise ValueError(
-                    f"{output_csv.name} has unsupported row width {len(row)} for legacy header; expected "
-                    f"{len(LEGACY_OUTPUT_HEADERS)}, {len(MID_OUTPUT_HEADERS)} or {len(OUTPUT_HEADERS)} columns"
-                )
-            return rows
-    raise ValueError(
-        f"{output_csv.name} has unsupported header; expected current or legacy VLM probe columns"
-    )
+    raise ValueError(f"{output_csv.name} has unsupported header; expected current VLM probe columns")
 
 
 def resolve_run_state(
@@ -2070,8 +2024,7 @@ def probe_vlm_photo_boundaries(
                 start_row=start_index + 1,
                 end_row=end_index,
                 rows=window_rows,
-                window_size=window_size,
-                overlap=window_radius,
+                window_radius=window_radius,
                 raw_response=raw_response,
                 parsed_response=parsed_response,
                 model=model,
