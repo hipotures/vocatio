@@ -47,7 +47,7 @@ def _recording_console(*, width: int) -> Console:
 def _candidate_row(
     *,
     day_id: str,
-    segment_type: str,
+    right_segment_type: str,
     boundary: str,
     offset: int = 0,
 ) -> dict[str, str]:
@@ -67,8 +67,7 @@ def _candidate_row(
             "left_segment_id": f"{day_id}-seg-a-{offset}",
             "right_segment_id": f"{day_id}-seg-b-{offset}",
             "left_segment_type": "performance",
-            "right_segment_type": segment_type,
-            "segment_type": segment_type,
+            "right_segment_type": right_segment_type,
             "boundary": boundary,
             "candidate_rule_name": "gap_threshold",
             "candidate_rule_version": "gap-v1",
@@ -275,12 +274,12 @@ def test_validate_dataset_contract_rejects_parquet_in_training_path(tmp_path: Pa
 def test_validate_dataset_contract_rejects_legacy_window_size_column(tmp_path: Path) -> None:
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     dataset_path.write_text(
-        "candidate_id,day_id,window_radius,window_size,segment_type,boundary,"
+        "candidate_id,day_id,window_radius,window_size,left_segment_type,right_segment_type,boundary,"
         "frame_01_timestamp,frame_02_timestamp,frame_03_timestamp,frame_04_timestamp,"
         "frame_01_photo_id,frame_02_photo_id,frame_03_photo_id,frame_04_photo_id,"
         "frame_01_relpath,frame_02_relpath,frame_03_relpath,frame_04_relpath,"
         "frame_01_thumb_path,frame_02_thumb_path,frame_03_thumb_path,frame_04_thumb_path\n"
-        "abc,20250325,2,4,performance,0,1,2,3,4,p1,p2,p3,p4,"
+        "abc,20250325,2,4,performance,ceremony,0,1,2,3,4,p1,p2,p3,p4,"
         "cam/p1.jpg,cam/p2.jpg,cam/p3.jpg,cam/p4.jpg,"
         "thumb/p1.jpg,thumb/p2.jpg,thumb/p3.jpg,thumb/p4.jpg\n",
         encoding="utf-8",
@@ -367,9 +366,9 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
-            _candidate_row(day_id="20250326", segment_type="warmup", boundary="0"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250326", right_segment_type="warmup", boundary="0"),
         ],
     )
     _write_split_manifest(
@@ -462,7 +461,8 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         },
     }
     assert feature_columns["image_feature_columns"] == []
-    assert "segment_type" not in feature_columns["shared_feature_columns"]
+    assert "left_segment_type" not in feature_columns["shared_feature_columns"]
+    assert "right_segment_type" not in feature_columns["shared_feature_columns"]
     assert "boundary" not in feature_columns["shared_feature_columns"]
     assert "split_name" not in feature_columns["shared_feature_columns"]
     assert "frame_01_thumb_path" not in feature_columns["shared_feature_columns"]
@@ -654,9 +654,9 @@ def test_train_cli_applies_explicit_training_options(monkeypatch, tmp_path: Path
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
-            _candidate_row(day_id="20250326", segment_type="warmup", boundary="0"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250326", right_segment_type="warmup", boundary="0"),
         ],
     )
     _write_split_manifest(
@@ -727,9 +727,9 @@ def test_train_cli_records_candidate_keyed_split_manifest_scope(
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
     output_dir = tmp_path / "models" / "run-candidate-keyed"
     candidate_rows = [
-        _candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=1),
-        _candidate_row(day_id="20250324", segment_type="ceremony", boundary="1", offset=2),
-        _candidate_row(day_id="20250325", segment_type="warmup", boundary="0", offset=3),
+        _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0", offset=1),
+        _candidate_row(day_id="20250324", right_segment_type="ceremony", boundary="1", offset=2),
+        _candidate_row(day_id="20250325", right_segment_type="warmup", boundary="0", offset=3),
     ]
     _write_candidate_csv(dataset_path, candidate_rows)
     _write_split_manifest(
@@ -785,8 +785,8 @@ def test_train_cli_report_falls_back_to_model_type_when_best_model_missing(
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
         ],
     )
     _write_split_manifest(
@@ -858,8 +858,8 @@ def test_train_cli_report_uses_model_best_when_present(
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
         ],
     )
     _write_split_manifest(
@@ -927,8 +927,8 @@ def test_train_cli_uses_multimodal_predictor_for_thumbnail_mode(
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
         ],
     )
     _write_split_manifest(
@@ -982,8 +982,8 @@ def test_training_metadata_records_window_radius(tmp_path: Path, monkeypatch) ->
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
         ],
     )
     _write_split_manifest(
@@ -1019,7 +1019,7 @@ def test_train_cli_rejects_existing_artifacts_without_overwrite(tmp_path: Path) 
     output_dir = tmp_path / "models" / "run-001"
     _write_candidate_csv(
         dataset_path,
-        [_candidate_row(day_id="20250324", segment_type="performance", boundary="0")],
+        [_candidate_row(day_id="20250324", right_segment_type="performance", boundary="0")],
     )
     _write_split_manifest(
         split_manifest_path,
@@ -1055,8 +1055,8 @@ def test_train_cli_allows_empty_existing_output_dir_without_overwrite(
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
         ],
     )
     _write_split_manifest(
@@ -1101,8 +1101,8 @@ def test_train_cli_overwrite_replaces_existing_artifacts(monkeypatch, tmp_path: 
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
         ],
     )
     _write_split_manifest(
@@ -1155,8 +1155,8 @@ def test_train_cli_overwrite_does_not_destroy_existing_artifacts_on_input_failur
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
         ],
     )
     _write_split_manifest(

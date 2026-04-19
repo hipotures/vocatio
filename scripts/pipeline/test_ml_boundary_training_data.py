@@ -22,7 +22,7 @@ from lib.ml_boundary_training_data import (
 def _candidate_row(
     *,
     day_id: str,
-    segment_type: str = "ceremony",
+    right_segment_type: str = "ceremony",
     boundary: str = "1",
     candidate_rule_version: str = "gap-v1",
 ) -> dict[str, str]:
@@ -42,8 +42,7 @@ def _candidate_row(
             "left_segment_id": f"{day_id}-seg-a",
             "right_segment_id": f"{day_id}-seg-b",
             "left_segment_type": "performance",
-            "right_segment_type": segment_type or "ceremony",
-            "segment_type": segment_type,
+            "right_segment_type": right_segment_type or "ceremony",
             "boundary": boundary,
             "candidate_rule_name": "gap_threshold",
             "candidate_rule_version": candidate_rule_version,
@@ -138,8 +137,8 @@ def test_load_candidate_training_frame_reads_csv_rows(tmp_path: Path) -> None:
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
         ],
     )
 
@@ -147,7 +146,7 @@ def test_load_candidate_training_frame_reads_csv_rows(tmp_path: Path) -> None:
 
     assert frame.shape == (2, len(CANDIDATE_ROW_HEADERS))
     assert frame["day_id"].tolist() == ["20250324", "20250325"]
-    assert frame["segment_type"].tolist() == ["performance", "ceremony"]
+    assert frame["right_segment_type"].tolist() == ["performance", "ceremony"]
 
 
 def test_load_training_data_bundle_joins_split_manifest_and_selects_train_validation_rows(
@@ -158,9 +157,9 @@ def test_load_training_data_bundle_joins_split_manifest_and_selects_train_valida
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
-            _candidate_row(day_id="20250326", segment_type="warmup", boundary="0"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250326", right_segment_type="warmup", boundary="0"),
         ],
     )
     _write_split_manifest(
@@ -208,8 +207,8 @@ def test_load_training_data_bundle_exposes_left_right_and_boundary_predictors(
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
         ],
     )
     _write_split_manifest(
@@ -237,8 +236,8 @@ def test_feature_columns_manifest_uses_left_and_right_keys(tmp_path: Path) -> No
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
         ],
     )
     _write_split_manifest(
@@ -267,8 +266,8 @@ def test_predictor_feature_sets_match_for_left_and_right(tmp_path: Path) -> None
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
         ],
     )
     _write_split_manifest(
@@ -296,19 +295,19 @@ def test_load_training_data_bundle_accepts_candidate_level_split_manifest(
     candidate_rows = [
         _candidate_row(
             day_id="20250325",
-            segment_type="performance",
+            right_segment_type="performance",
             boundary="0",
             candidate_rule_version="gap-v1",
         ),
         _candidate_row(
             day_id="20250325",
-            segment_type="ceremony",
+            right_segment_type="ceremony",
             boundary="1",
             candidate_rule_version="gap-v2",
         ),
         _candidate_row(
             day_id="20250325",
-            segment_type="warmup",
+            right_segment_type="warmup",
             boundary="0",
             candidate_rule_version="gap-v3",
         ),
@@ -341,8 +340,8 @@ def test_load_training_data_bundle_rejects_ambiguous_split_manifest_keys(
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
     candidate_rows = [
-        _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-        _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+        _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+        _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
     ]
     _write_candidate_csv(dataset_path, candidate_rows)
     _write_split_manifest(
@@ -377,16 +376,16 @@ def test_load_training_data_bundle_requires_base_columns_for_tabular_mode(
 ) -> None:
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
-    dataset_path.write_text("day_id,segment_type\n20250324,performance\n", encoding="utf-8")
+    dataset_path.write_text(
+        "day_id,left_segment_type,right_segment_type\n20250324,performance,ceremony\n",
+        encoding="utf-8",
+    )
     _write_split_manifest(
         split_manifest_path,
         [{"day_id": "20250324", "split_name": "train"}],
     )
 
-    with pytest.raises(
-        ValueError,
-        match="missing required columns: left_segment_type, right_segment_type, boundary, window_radius",
-    ):
+    with pytest.raises(ValueError, match="missing required columns: boundary, window_radius"):
         load_training_data_bundle(
             dataset_path,
             split_manifest_path=split_manifest_path,
@@ -399,7 +398,7 @@ def test_load_training_data_bundle_requires_thumbnail_columns_for_thumbnail_mode
 ) -> None:
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
-    row = _candidate_row(day_id="20250324", segment_type="performance", boundary="0")
+    row = _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0")
     row.pop("frame_04_thumb_path")
     headers = [header for header in CANDIDATE_ROW_HEADERS if header != "frame_04_thumb_path"]
     with dataset_path.open("w", newline="", encoding="utf-8") as handle:
@@ -424,7 +423,7 @@ def test_load_training_data_bundle_rejects_extra_frame_columns_for_declared_radi
 ) -> None:
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
-    row = _candidate_row(day_id="20250324", segment_type="performance", boundary="0")
+    row = _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0")
     row["frame_05_photo_id"] = "20250324-p5"
     row["frame_05_relpath"] = "cam/20250324-p5.jpg"
     row["frame_05_timestamp"] = "5.0"
@@ -459,7 +458,7 @@ def test_load_training_data_bundle_requires_relpath_columns_for_heuristic_joins(
 ) -> None:
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
-    row = _candidate_row(day_id="20250324", segment_type="performance", boundary="0")
+    row = _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0")
     missing_column = "frame_04_relpath"
     row.pop(missing_column)
     headers = [header for header in CANDIDATE_ROW_HEADERS if header != missing_column]
@@ -487,8 +486,8 @@ def test_training_bundle_reads_window_radius_from_candidates(tmp_path: Path) -> 
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
         ],
     )
     _write_split_manifest(
@@ -511,12 +510,12 @@ def test_training_bundle_reads_window_radius_from_candidates(tmp_path: Path) -> 
 def test_load_training_data_bundle_rejects_missing_labels(tmp_path: Path) -> None:
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
-    missing_label_row = _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1")
+    missing_label_row = _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1")
     missing_label_row["right_segment_type"] = ""
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
             missing_label_row,
         ],
     )
@@ -542,8 +541,8 @@ def test_load_training_data_bundle_requires_split_manifest_coverage(tmp_path: Pa
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1"),
         ],
     )
     _write_split_manifest(
@@ -565,7 +564,7 @@ def test_load_training_data_bundle_reports_missing_annotation_counts(tmp_path: P
     annotation_dir = tmp_path / "photo_pre_model_annotations"
     annotation_dir.mkdir()
 
-    row = _candidate_row(day_id="20250324", segment_type="performance", boundary="1")
+    row = _candidate_row(day_id="20250324", right_segment_type="performance", boundary="1")
     _write_candidate_csv(dataset_path, [row])
     _write_split_manifest(
         split_manifest_path,
@@ -612,11 +611,11 @@ def test_load_training_data_bundle_joins_heuristic_boundary_scores_and_counts_mi
     boundary_scores_path = workspace_dir / "photo_boundary_scores.csv"
     corpus_dir.mkdir(parents=True)
 
-    train_row = _candidate_row(day_id="20250324", segment_type="performance", boundary="1")
+    train_row = _candidate_row(day_id="20250324", right_segment_type="performance", boundary="1")
     validation_row = _shift_candidate_window(
         _candidate_row(
             day_id="20250324",
-            segment_type="ceremony",
+            right_segment_type="ceremony",
             boundary="0",
             candidate_rule_version="gap-v2",
         ),
@@ -738,7 +737,7 @@ def test_load_training_data_bundle_rejects_duplicate_heuristic_pair_rows(
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
     boundary_scores_path = tmp_path / "photo_boundary_scores.csv"
 
-    row = _candidate_row(day_id="20250324", segment_type="performance", boundary="1")
+    row = _candidate_row(day_id="20250324", right_segment_type="performance", boundary="1")
     _write_candidate_csv(dataset_path, [row])
     _write_split_manifest(
         split_manifest_path,
@@ -805,13 +804,13 @@ def test_load_training_data_bundle_extends_descriptor_registry_from_dataset_anno
 
     train_row = _candidate_row(
         day_id="20250324",
-        segment_type="performance",
+        right_segment_type="performance",
         boundary="0",
         candidate_rule_version="gap-v1",
     )
     validation_row = _candidate_row(
         day_id="20250325",
-        segment_type="ceremony",
+        right_segment_type="ceremony",
         boundary="1",
         candidate_rule_version="gap-v2",
     )
@@ -883,7 +882,7 @@ def test_load_training_data_bundle_resolves_default_annotation_dir_for_corpus_da
     annotation_dir = workspace_dir / "photo_pre_model_annotations"
     corpus_dir.mkdir(parents=True)
 
-    row = _candidate_row(day_id="20250324", segment_type="performance", boundary="1")
+    row = _candidate_row(day_id="20250324", right_segment_type="performance", boundary="1")
     _write_candidate_csv(dataset_path, [row])
     _write_split_manifest(
         split_manifest_path,
@@ -930,7 +929,7 @@ def test_load_training_data_bundle_skips_missing_counts_when_default_annotation_
     split_manifest_path = corpus_dir / "ml_boundary_splits.csv"
     corpus_dir.mkdir(parents=True)
 
-    row = _candidate_row(day_id="20250324", segment_type="performance", boundary="1")
+    row = _candidate_row(day_id="20250324", right_segment_type="performance", boundary="1")
     _write_candidate_csv(dataset_path, [row])
     _write_split_manifest(
         split_manifest_path,
