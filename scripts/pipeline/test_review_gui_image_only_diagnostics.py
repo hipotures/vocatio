@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QVBoxLayout, QWidget
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -224,6 +224,21 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 }
             ],
         )
+
+    def build_test_window_with_two_selected_rows(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.manual_vlm_analyze_state = {"status": "idle"}
+        window.manual_vlm_models = []
+        window.manual_vlm_models_md5 = None
+        window.manual_vlm_models_error = None
+        window.manual_vlm_selected_name = None
+        window.selected_photo_entries = Mock(
+            return_value=[
+                {"relative_path": "cam/a.jpg", "source_path": "/src/a.jpg"},
+                {"relative_path": "cam/b.jpg", "source_path": "/src/b.jpg"},
+            ]
+        )
+        return window
 
     def build_merge_test_window(self, merge_specs: list[dict[str, str]]):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
@@ -495,6 +510,34 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Debug files:", result_section["body"])
         self.assertIn("/tmp/manual-vlm/prompt.txt", result_section["body"])
         self.assertIn("/tmp/manual-vlm/response.json", result_section["body"])
+
+    def test_manual_vlm_section_uses_first_loaded_model_by_default(self):
+        window = self.build_test_window_with_two_selected_rows()
+        window.manual_vlm_models = [
+            {"VLM_NAME": "Preset A"},
+            {"VLM_NAME": "Preset B"},
+        ]
+        window.manual_vlm_models_md5 = "abc"
+
+        section = review_gui.build_manual_vlm_analyze_section(window)
+
+        self.assertEqual(section["choice_items"], ["Preset A", "Preset B"])
+        self.assertEqual(section["choice_value"], "Preset A")
+        self.assertTrue(section["choice_enabled"])
+        self.assertTrue(section["action_enabled"])
+
+    def test_manual_vlm_section_disables_analyze_when_model_config_error_exists(self):
+        window = self.build_test_window_with_two_selected_rows()
+        window.manual_vlm_models = []
+        window.manual_vlm_models_error = "bad yaml"
+
+        section = review_gui.build_manual_vlm_analyze_section(window)
+
+        self.assertFalse(section["action_enabled"])
+        self.assertFalse(section["choice_enabled"])
+        self.assertEqual(section["choice_items"], [])
+        self.assertIsNone(section["choice_value"])
+        self.assertIn("bad yaml", section["description"])
 
     def test_manual_vlm_debug_dir_always_uses_tmp_root(self):
         runtime_args = argparse.Namespace(dump_debug_dir="/tmp/vlm-probe-debug")
@@ -1261,6 +1304,29 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         manual_vlm_buttons = manual_vlm_widget.findChildren(QPushButton)
         self.assertEqual([button.text() for button in manual_ml_buttons], ["Manual ML prediction", "Run"])
         self.assertEqual([button.text() for button in manual_vlm_buttons], ["Manual VLM analyze", "Analyze"])
+
+    def test_build_info_section_widget_renders_manual_vlm_choice_combo_and_updates_selection(self):
+        window = self.build_test_window_with_two_selected_rows()
+        window.run_manual_vlm_analyze = Mock()
+        window.manual_vlm_models = [
+            {"VLM_NAME": "Preset A"},
+            {"VLM_NAME": "Preset B"},
+        ]
+        section = review_gui.build_manual_vlm_analyze_section(window)
+
+        widget = window.build_info_section_widget(section)
+        self.addCleanup(widget.deleteLater)
+        widget.show()
+        TEST_QT_APP.processEvents()
+
+        combo = widget.findChild(QComboBox, "infoSectionChoiceCombo")
+        self.assertIsNotNone(combo)
+        self.assertEqual([combo.itemText(index) for index in range(combo.count())], ["Preset A", "Preset B"])
+        self.assertEqual(combo.currentText(), "Preset A")
+
+        combo.setCurrentText("Preset B")
+        TEST_QT_APP.processEvents()
+        self.assertEqual(window.manual_vlm_selected_name, "Preset B")
 
     def test_run_manual_ml_prediction_success_path_updates_result_state(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)

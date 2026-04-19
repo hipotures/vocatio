@@ -11,13 +11,17 @@ import tempfile
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
 try:
     from lib import review_index_loader
 except ModuleNotFoundError:
     from scripts.pipeline.lib import review_index_loader
+try:
+    from lib import manual_vlm_models
+except ModuleNotFoundError:
+    from scripts.pipeline.lib import manual_vlm_models
 try:
     import probe_vlm_photo_boundaries as probe_vlm_boundary
 except ModuleNotFoundError:
@@ -67,6 +71,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDockWidget,
@@ -129,6 +134,8 @@ LEGACY_INDEX_FILENAMES = (
     "performance_proxy_index.image.vlm.json",
     "performance_proxy_index.image.json",
 )
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MANUAL_VLM_MODELS_PATH = Path("conf/manual_vlm_models.yaml")
 
 BOUNDARY_DIAGNOSTIC_REQUIRED_COLUMNS = frozenset(
     {
@@ -195,6 +202,15 @@ def parse_args() -> argparse.Namespace:
         help='UI scale factor like "1.25" or "auto". Default: auto',
     )
     return parser.parse_args()
+
+
+def load_manual_vlm_models_for_gui(repo_root: Path) -> Tuple[List[Dict[str, Any]], Optional[str], Optional[str]]:
+    config_path = repo_root / MANUAL_VLM_MODELS_PATH
+    try:
+        loaded = manual_vlm_models.load_manual_vlm_models(config_path)
+    except ValueError as exc:
+        return [], None, f"Model config error: {exc}"
+    return loaded.models, loaded.md5_hex, None
 
 
 def resolve_selection_output_path(workspace_dir: Path, value: str) -> Path:
@@ -1315,12 +1331,17 @@ def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
 
 
 def build_manual_vlm_analyze_section(
-    manual_vlm_analyze_state: Optional[Mapping[str, Any]],
+    manual_vlm_analyze_state: Optional[object],
     *,
     action_locked: bool = False,
     show_spinner: bool = False,
 ) -> Dict[str, Any]:
-    state = dict(manual_vlm_analyze_state or {})
+    window = None if isinstance(manual_vlm_analyze_state, Mapping) or manual_vlm_analyze_state is None else manual_vlm_analyze_state
+    if window is None:
+        state = dict(manual_vlm_analyze_state or {})
+    else:
+        current_state = getattr(window, "manual_vlm_analyze_state", None)
+        state = dict(current_state or {}) if isinstance(current_state, Mapping) else {}
     status = str(state.get("status", "") or "idle").strip().lower() or "idle"
     resolution_error = str(state.get("resolution_error", "") or "").strip()
     error_text = str(state.get("error", "") or "").strip()
@@ -1338,15 +1359,38 @@ def build_manual_vlm_analyze_section(
     else:
         lines.append("Analyze run not started.")
     append_info_block(lines, build_manual_vlm_debug_lines(state.get("debug_file_paths", [])))
+    preset_names = []
+    selected_name = None
+    description = "Ephemeral runtime state for manual VLM boundary analysis."
+    on_choice_changed = None
+    if window is not None:
+        preset_names = [
+            str(model.get("VLM_NAME", "") or "").strip()
+            for model in getattr(window, "manual_vlm_models", [])
+            if str(model.get("VLM_NAME", "") or "").strip()
+        ]
+        configured_name = str(getattr(window, "manual_vlm_selected_name", "") or "").strip()
+        if configured_name in preset_names:
+            selected_name = configured_name
+        elif preset_names:
+            selected_name = preset_names[0]
+            window.manual_vlm_selected_name = selected_name
+        description = str(getattr(window, "manual_vlm_models_error", "") or "").strip() or description
+        on_choice_changed = lambda value: setattr(window, "manual_vlm_selected_name", str(value).strip() or None)
+    active_action_locked = status == "running" or action_locked
     section = build_info_section(
         "Manual VLM analyze",
-        "Ephemeral runtime state for manual VLM boundary analysis.",
+        description,
         join_info_section_lines(lines),
         key="manual_vlm_analyze",
     )
+    section["choice_items"] = preset_names
+    section["choice_value"] = selected_name
+    section["choice_enabled"] = bool(preset_names) and not active_action_locked
+    section["on_choice_changed"] = on_choice_changed
     section["action_key"] = "run_manual_vlm_analyze"
     section["action_text"] = "Analyze"
-    section["action_enabled"] = status != "running" and not action_locked
+    section["action_enabled"] = bool(preset_names) and selected_name is not None and not active_action_locked
     section["action_show_spinner"] = show_spinner or status == "running"
     return section
 
@@ -1553,6 +1597,7 @@ def append_manual_runtime_sections(
     manual_prediction_state: Optional[Mapping[str, Any]],
     show_manual_vlm_analyze: bool,
     manual_vlm_analyze_state: Optional[Mapping[str, Any]],
+    manual_vlm_section_source: Optional[object] = None,
     active_action_key: str = "",
 ) -> List[Dict[str, Any]]:
     normalized_active_action_key = str(active_action_key or "").strip()
@@ -1568,7 +1613,7 @@ def append_manual_runtime_sections(
     if show_manual_vlm_analyze:
         sections.append(
             build_manual_vlm_analyze_section(
-                manual_vlm_analyze_state,
+                manual_vlm_section_source if manual_vlm_section_source is not None else manual_vlm_analyze_state,
                 action_locked=bool(normalized_active_action_key)
                 and normalized_active_action_key != "run_manual_vlm_analyze",
                 show_spinner=normalized_active_action_key == "run_manual_vlm_analyze",
@@ -1643,8 +1688,9 @@ def build_image_only_multi_photo_info_sections(
     manual_prediction_state: Optional[Mapping[str, Any]],
     show_manual_vlm_analyze: bool = False,
     manual_vlm_analyze_state: Optional[Mapping[str, Any]] = None,
+    manual_vlm_section_source: Optional[object] = None,
     active_action_key: str = "",
-) -> List[Dict[str, str]]:
+) -> List[Dict[str, Any]]:
     sections = [
         build_info_section(
             "Selection summary",
@@ -1665,6 +1711,7 @@ def build_image_only_multi_photo_info_sections(
         manual_prediction_state=manual_prediction_state,
         show_manual_vlm_analyze=show_manual_vlm_analyze,
         manual_vlm_analyze_state=manual_vlm_analyze_state,
+        manual_vlm_section_source=manual_vlm_section_source,
         active_action_key=active_action_key,
     )
 
@@ -2139,6 +2186,11 @@ class MainWindow(QMainWindow):
             self.image_only_diagnostics["ml_diagnostics"] = load_ml_hint_diagnostics(self.workspace_dir, payload)
         self.manual_ml_prediction_state: Optional[Dict[str, Any]] = None
         self.manual_vlm_analyze_state: Optional[Dict[str, Any]] = None
+        self.manual_vlm_models: List[Dict[str, Any]] = []
+        self.manual_vlm_models_md5: Optional[str] = None
+        self.manual_vlm_models_error: Optional[str] = None
+        self.manual_vlm_selected_name: Optional[str] = None
+        self.reload_manual_vlm_models(startup=True)
         self.thread_pool = QThreadPool.globalInstance()
         self.manual_action_running_key: Optional[str] = None
         self.manual_action_workers: Dict[str, QRunnable] = {}
@@ -3480,6 +3532,7 @@ class MainWindow(QMainWindow):
                 manual_prediction_state=manual_prediction_state,
                 show_manual_vlm_analyze=show_manual_vlm_analyze,
                 manual_vlm_analyze_state=manual_vlm_analyze_state,
+                manual_vlm_section_source=self,
                 active_action_key=active_action_key,
             )
         if item.parent() is None:
@@ -3498,6 +3551,7 @@ class MainWindow(QMainWindow):
                     manual_prediction_state=manual_prediction_state,
                     show_manual_vlm_analyze=show_manual_vlm_analyze,
                     manual_vlm_analyze_state=manual_vlm_analyze_state,
+                    manual_vlm_section_source=self,
                     active_action_key=active_action_key,
                 )
             first_photo_text = self.display_time(display_set["first_photo_local"]) if display_set["first_photo_local"] else "-"
@@ -3517,6 +3571,7 @@ class MainWindow(QMainWindow):
                 manual_prediction_state=manual_prediction_state,
                 show_manual_vlm_analyze=show_manual_vlm_analyze,
                 manual_vlm_analyze_state=manual_vlm_analyze_state,
+                manual_vlm_section_source=self,
                 active_action_key=active_action_key,
             )
         return build_default_photo_info_sections(photo)
@@ -3618,6 +3673,18 @@ class MainWindow(QMainWindow):
         )
         self.show_single_preview(photo["proxy_path"], "Selected")
 
+    def reload_manual_vlm_models(self, startup: bool = False) -> None:
+        models, md5_hex, error_text = load_manual_vlm_models_for_gui(REPO_ROOT)
+        self.manual_vlm_models = models
+        self.manual_vlm_models_md5 = md5_hex
+        self.manual_vlm_models_error = error_text
+        if models:
+            available_names = [str(model["VLM_NAME"]) for model in models]
+            if self.manual_vlm_selected_name not in available_names:
+                self.manual_vlm_selected_name = available_names[0]
+        else:
+            self.manual_vlm_selected_name = None
+
     def set_view_mode(self, mode: int) -> None:
         if self.view_mode == mode:
             return
@@ -3655,16 +3722,39 @@ class MainWindow(QMainWindow):
             action_handler = self.run_manual_ml_prediction
         elif action_key == "run_manual_vlm_analyze" and hasattr(self, "run_manual_vlm_analyze"):
             action_handler = self.run_manual_vlm_analyze
+        choice_items_value = section.get("choice_items")
+        normalized_choice_items = None
+        if choice_items_value is not None:
+            normalized_choice_items = [str(item) for item in choice_items_value]
+        controls_widget = QWidget()
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
+        if normalized_choice_items is not None:
+            combo = QComboBox(controls_widget)
+            combo.setObjectName("infoSectionChoiceCombo")
+            combo.addItems(normalized_choice_items)
+            choice_value = str(section.get("choice_value", "") or "").strip()
+            if choice_value in normalized_choice_items:
+                combo.setCurrentText(choice_value)
+            combo.setEnabled(bool(section.get("choice_enabled", True)))
+            on_choice_changed = section.get("on_choice_changed")
+            if callable(on_choice_changed):
+                combo.currentTextChanged.connect(on_choice_changed)
+            controls_layout.addWidget(combo)
         if action_handler is not None:
             if bool(section.get("action_show_spinner", False)):
                 spinner_label = QLabel("⏳")
                 spinner_label.setObjectName("manualActionSpinner")
                 spinner_label.setAlignment(Qt.AlignCenter)
-                header_layout.addWidget(spinner_label, 0, Qt.AlignRight)
+                controls_layout.addWidget(spinner_label)
             action_button = QPushButton(str(section.get("action_text", "") or "Run"))
             action_button.setEnabled(bool(section.get("action_enabled", True)))
             action_button.clicked.connect(action_handler)
-            header_layout.addWidget(action_button, 0, Qt.AlignRight)
+            controls_layout.addWidget(action_button)
+        if controls_layout.count():
+            controls_widget.setLayout(controls_layout)
+            header_layout.addWidget(controls_widget, 0, Qt.AlignRight)
 
         header_widget.setLayout(header_layout)
         card_layout.addWidget(header_widget)
