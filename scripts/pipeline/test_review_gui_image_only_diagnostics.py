@@ -108,6 +108,31 @@ class FakeRestoreTree:
         return previous
 
 
+def run_manual_action_inline(window, action_key: str, work_fn) -> None:
+    try:
+        result = work_fn()
+    except Exception as exc:
+        window.on_manual_action_failed(action_key, exc)
+    else:
+        window.on_manual_action_finished(action_key, result)
+
+
+def bind_manual_action_methods(window) -> None:
+    for name in (
+        "ensure_manual_action_runtime",
+        "manual_action_running",
+        "manual_action_state_attr",
+        "manual_action_state",
+        "set_manual_action_state",
+        "clear_manual_action_runtime",
+        "on_manual_action_finished",
+        "on_manual_action_failed",
+        "build_manual_ml_prediction_work_fn",
+        "build_manual_vlm_analyze_work_fn",
+    ):
+        setattr(window, name, getattr(review_gui.MainWindow, name).__get__(window, review_gui.MainWindow))
+
+
 class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
     def write_csv(self, path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
         with path.open("w", newline="", encoding="utf-8") as handle:
@@ -372,6 +397,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(idle_section["title"], "Manual ML prediction")
         self.assertIn("Status: idle", idle_section["body"])
         self.assertEqual(idle_section["action_text"], "Run")
+        self.assertFalse(idle_section["action_show_spinner"])
 
         running_section = review_gui.build_manual_ml_prediction_section(
             {
@@ -381,6 +407,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
         self.assertIn("Status: running", running_section["body"])
         self.assertIn("Started: 2026-04-19T12:34:56", running_section["body"])
+        self.assertEqual(running_section["action_text"], "Run")
+        self.assertTrue(running_section["action_show_spinner"])
 
         error_section = review_gui.build_manual_ml_prediction_section(
             {
@@ -418,6 +446,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Status: idle", idle_section["body"])
         self.assertIn("Analyze run not started.", idle_section["body"])
         self.assertEqual(idle_section["action_text"], "Analyze")
+        self.assertFalse(idle_section["action_show_spinner"])
 
         running_section = review_gui.build_manual_vlm_analyze_section(
             {
@@ -427,6 +456,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
         self.assertIn("Status: running", running_section["body"])
         self.assertIn("Started: 2026-04-19T12:34:56", running_section["body"])
+        self.assertEqual(running_section["action_text"], "Analyze")
+        self.assertTrue(running_section["action_show_spinner"])
 
         error_section = review_gui.build_manual_vlm_analyze_section(
             {
@@ -502,6 +533,13 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Primary evidence:", body)
         self.assertIn("  Transition occurs between frame_03 and frame_04.", body)
         self.assertNotIn("Reason: Left segment type: dance | Right segment type: rehearsal", body)
+        self.assertIn("Anchors:", review_gui.format_manual_vlm_analyze_result_text(
+            {
+                "decision": "cut_after_3",
+                "left_anchor": "cam/left.jpg",
+                "right_anchor": "cam/right.jpg",
+            }
+        ))
 
     def test_manual_ml_prediction_section_renders_left_right_and_boundary(self):
         state = review_gui.build_manual_ml_prediction_section(
@@ -1020,6 +1058,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             ["Selection summary", "Boundary diagnostics"],
         )
         self.assertIn("Selected photos: 2", sections[0]["body"])
+        self.assertIn("2026-03-23T10:00:00 | cam/a.jpg | set=-", sections[0]["body"])
+        self.assertNotIn("First time:", sections[0]["body"])
+        self.assertNotIn("Last time:", sections[0]["body"])
+        self.assertNotIn("Selected photo rows", sections[0]["body"])
 
     def test_build_image_only_multi_photo_info_sections_includes_manual_ml_prediction_section_when_enabled(self):
         diagnostics = {"available": False, "error": ""}
@@ -1191,8 +1233,11 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         TEST_QT_APP.processEvents()
 
         buttons = widget.findChildren(QPushButton)
-        self.assertEqual([button.text() for button in buttons], ["Manual ML prediction", "Running..."])
+        self.assertEqual([button.text() for button in buttons], ["Manual ML prediction", "Run"])
         self.assertFalse(buttons[1].isEnabled())
+        spinner = widget.findChild(QLabel, "manualActionSpinner")
+        self.assertIsNotNone(spinner)
+        self.assertEqual(spinner.text(), "⏳")
 
     def test_build_info_section_widget_uses_manual_action_button_labels(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
@@ -1248,6 +1293,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
         window.current_manual_ml_prediction_state = Mock(return_value=window.manual_ml_prediction_state)
         window.refresh_current_info_dock = Mock()
+        bind_manual_action_methods(window)
+        window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
         full_joined_rows = [
             {"relative_path": "cam/pre1.jpg", "start_epoch_ms": "1000"},
@@ -1265,6 +1312,21 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         ]
 
         with unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_prediction_state",
+            return_value={
+                "status": "idle",
+                "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+                "window_config": {"window_radius": 2},
+                "anchor_pair": {
+                    "left_relative_path": "cam/left.jpg",
+                    "right_relative_path": "cam/right.jpg",
+                    "left_row_index": 2,
+                    "right_row_index": 4,
+                    "gap_seconds": 8.0,
+                },
+            },
+        ), unittest.mock.patch.object(
             review_gui,
             "load_manual_prediction_joined_rows",
             return_value=full_joined_rows,
@@ -1307,11 +1369,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 right_segment_type_prediction="ceremony",
                 right_segment_type_confidence=0.88,
             ),
-        ), unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
-            window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(
-                window,
-                review_gui.MainWindow,
-            )
+        ):
+            window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(window, review_gui.MainWindow)
             window.run_manual_ml_prediction()
 
         reduced_rows = build_candidate_rows.call_args.kwargs["joined_rows"]
@@ -1330,6 +1389,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Boundary: cut (0.91)", window.manual_ml_prediction_state["result_text"])
         self.assertIn("Anchors: cam/left.jpg -> cam/right.jpg", window.manual_ml_prediction_state["result_text"])
         self.assertEqual(window.refresh_current_info_dock.call_count, 2)
+        self.assertIsNone(window.manual_action_running_key)
 
     def test_run_manual_ml_prediction_error_path_updates_error_state(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
@@ -1361,8 +1421,25 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
         window.current_manual_ml_prediction_state = Mock(return_value=window.manual_ml_prediction_state)
         window.refresh_current_info_dock = Mock()
+        bind_manual_action_methods(window)
+        window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
         with unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_prediction_state",
+            return_value={
+                "status": "idle",
+                "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+                "window_config": {"window_radius": 2},
+                "anchor_pair": {
+                    "left_relative_path": "cam/left.jpg",
+                    "right_relative_path": "cam/right.jpg",
+                    "left_row_index": 2,
+                    "right_row_index": 4,
+                    "gap_seconds": 8.0,
+                },
+            },
+        ), unittest.mock.patch.object(
             review_gui,
             "load_manual_prediction_joined_rows",
             return_value=[
@@ -1385,11 +1462,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             review_gui.probe_vlm_boundary,
             "load_ml_hint_context",
             side_effect=ValueError("predictor metadata is unreadable"),
-        ), unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
-            window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(
-                window,
-                review_gui.MainWindow,
-            )
+        ):
+            window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(window, review_gui.MainWindow)
             window.run_manual_ml_prediction()
 
         self.assertEqual(window.manual_ml_prediction_state["status"], "error")
@@ -1428,6 +1502,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
         window.current_manual_ml_prediction_state = Mock(return_value=window.manual_ml_prediction_state)
         window.refresh_current_info_dock = Mock()
+        bind_manual_action_methods(window)
+        window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
         with unittest.mock.patch.object(
             review_gui,
@@ -1465,11 +1541,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 "right_relative_path": "cam/right.jpg",
                 "result_text": "Boundary: cut (0.91)",
             },
-        ) as compute_result, unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
-            window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(
-                window,
-                review_gui.MainWindow,
-            )
+        ) as compute_result:
+            window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(window, review_gui.MainWindow)
             window.run_manual_ml_prediction()
 
         compute_result.assert_called_once()
@@ -1494,6 +1567,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             ]
         )
         window.refresh_current_info_dock = Mock()
+        bind_manual_action_methods(window)
+        window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
         with unittest.mock.patch.object(
             review_gui,
@@ -1524,11 +1599,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 "result_text": "Decision: cut_after_2\nSummary: Strong costume and performer change across the gap.",
                 "debug_file_paths": ["/tmp/manual-vlm/prompt.txt"],
             },
-        ), unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
-            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(
-                window,
-                review_gui.MainWindow,
-            )
+        ):
+            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(window, review_gui.MainWindow)
             window.run_manual_vlm_analyze()
 
         self.assertEqual(window.manual_vlm_analyze_state["status"], "result")
@@ -1553,6 +1625,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             ]
         )
         window.refresh_current_info_dock = Mock()
+        bind_manual_action_methods(window)
+        window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
         with unittest.mock.patch.object(
             review_gui,
@@ -1578,11 +1652,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             review_gui,
             "compute_manual_vlm_analyze_result",
             side_effect=RuntimeError("provider request timed out"),
-        ), unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
-            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(
-                window,
-                review_gui.MainWindow,
-            )
+        ):
+            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(window, review_gui.MainWindow)
             window.run_manual_vlm_analyze()
 
         self.assertEqual(window.manual_vlm_analyze_state["status"], "error")
@@ -1596,18 +1667,26 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "left_relative_path": "cam/a.jpg",
             "right_relative_path": "cam/b.jpg",
         }
-        window.current_manual_ml_prediction_state = Mock(return_value=window.manual_ml_prediction_state)
         window.manual_prediction_day_dir = Mock(return_value=Path("/day"))
         window.selected_photo_entries = Mock(return_value=[{"relative_path": "cam/a.jpg"}, {"relative_path": "cam/b.jpg"}])
         window.refresh_current_info_dock = Mock()
         window.workspace_dir = Path("/workspace")
         window.payload = {"day": "20260323"}
         window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        bind_manual_action_methods(window)
+        window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
         with unittest.mock.patch.object(review_gui, "reload_probe_vlm_boundary_module") as reload_mock, unittest.mock.patch.object(
             review_gui,
             "resolve_manual_prediction_state",
-            return_value={"status": "running"},
+            return_value={
+                "status": "idle",
+                "window_config": {"window_radius": 2},
+                "anchor_pair": {
+                    "left_relative_path": "cam/a.jpg",
+                    "right_relative_path": "cam/b.jpg",
+                },
+            },
         ), unittest.mock.patch.object(
             review_gui,
             "compute_manual_ml_prediction_result",
@@ -1616,11 +1695,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             review_gui,
             "load_manual_prediction_joined_rows",
             return_value=[],
-        ), unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
-            window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(
-                window,
-                review_gui.MainWindow,
-            )
+        ):
+            window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(window, review_gui.MainWindow)
             window.run_manual_ml_prediction()
 
         reload_mock.assert_called_once_with()
@@ -1632,18 +1708,26 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "left_relative_path": "cam/a.jpg",
             "right_relative_path": "cam/b.jpg",
         }
-        window.current_manual_vlm_analyze_state = Mock(return_value=window.manual_vlm_analyze_state)
         window.manual_prediction_day_dir = Mock(return_value=Path("/day"))
         window.selected_photo_entries = Mock(return_value=[{"relative_path": "cam/a.jpg"}, {"relative_path": "cam/b.jpg"}])
         window.refresh_current_info_dock = Mock()
         window.workspace_dir = Path("/workspace")
         window.payload = {"day": "20260323"}
         window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        bind_manual_action_methods(window)
+        window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
         with unittest.mock.patch.object(review_gui, "reload_probe_vlm_boundary_module") as reload_mock, unittest.mock.patch.object(
             review_gui,
             "resolve_manual_vlm_analyze_state",
-            return_value={"status": "running"},
+            return_value={
+                "status": "idle",
+                "window_config": {"window_radius": 2},
+                "anchor_pair": {
+                    "left_relative_path": "cam/a.jpg",
+                    "right_relative_path": "cam/b.jpg",
+                },
+            },
         ), unittest.mock.patch.object(
             review_gui,
             "compute_manual_vlm_analyze_result",
@@ -1652,11 +1736,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             review_gui,
             "load_manual_prediction_joined_rows",
             return_value=[],
-        ), unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
-            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(
-                window,
-                review_gui.MainWindow,
-            )
+        ):
+            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(window, review_gui.MainWindow)
             window.run_manual_vlm_analyze()
 
         reload_mock.assert_called_once_with()
@@ -1670,11 +1751,13 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "result_text": "old result",
             "resolution_error": "old resolution error",
         }
-        window.current_manual_ml_prediction_state = Mock(return_value=window.manual_ml_prediction_state)
-        window.refresh_info_panel = Mock()
+        window.selected_photo_entries = Mock(return_value=[{"relative_path": "cam/a.jpg"}, {"relative_path": "cam/b.jpg"}])
+        window.refresh_current_info_dock = Mock()
         window.workspace_dir = Path("/workspace")
         window.payload = {"day": "20260323"}
         window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        bind_manual_action_methods(window)
+        window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
         with unittest.mock.patch.object(
             review_gui,
@@ -1699,7 +1782,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("resolution_error", window.manual_ml_prediction_state)
         resolve_mock.assert_not_called()
         compute_mock.assert_not_called()
-        window.refresh_info_panel.assert_called_once_with()
+        self.assertEqual(window.refresh_current_info_dock.call_count, 2)
 
     def test_run_manual_vlm_analyze_reload_failure_sets_error_without_downstream_work(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
@@ -1711,11 +1794,13 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "resolution_error": "old resolution error",
             "debug_file_paths": ["/tmp/stale.txt"],
         }
-        window.current_manual_vlm_analyze_state = Mock(return_value=window.manual_vlm_analyze_state)
-        window.refresh_info_panel = Mock()
+        window.selected_photo_entries = Mock(return_value=[{"relative_path": "cam/a.jpg"}, {"relative_path": "cam/b.jpg"}])
+        window.refresh_current_info_dock = Mock()
         window.workspace_dir = Path("/workspace")
         window.payload = {"day": "20260323"}
         window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        bind_manual_action_methods(window)
+        window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
         with unittest.mock.patch.object(
             review_gui,
@@ -1741,7 +1826,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("debug_file_paths", window.manual_vlm_analyze_state)
         resolve_mock.assert_not_called()
         compute_mock.assert_not_called()
-        window.refresh_info_panel.assert_called_once_with()
+        self.assertEqual(window.refresh_current_info_dock.call_count, 2)
 
     def test_compute_manual_ml_prediction_result_uses_image_paths_for_manual_thumbnail_columns(self):
         joined_rows = [
