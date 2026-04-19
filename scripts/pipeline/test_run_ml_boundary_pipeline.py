@@ -369,6 +369,8 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
     )
     assert summary_payload["mode"] == "tabular_plus_thumbnail"
     assert summary_payload["prepare_only"] is False
+    assert summary_payload["window_radius"] == 2
+    assert summary_payload["candidate_rule_params_json"] == '{"gap_threshold_seconds":20.0,"window_radius":2}'
     assert summary_payload["model_dir"].endswith("ml_boundary_models/run-010")
     assert summary_payload["eval_dir"].endswith("ml_boundary_eval/run-010")
     assert summary_payload["evaluation_metrics"]["segment_type_macro_f1"] == 0.73
@@ -505,6 +507,8 @@ def test_main_forwards_training_options_and_records_pipeline_summary_fields(
             encoding="utf-8"
         )
     )
+    assert summary_payload["window_radius"] == 2
+    assert summary_payload["candidate_rule_params_json"] == '{"gap_threshold_seconds":20.0,"window_radius":2}'
     assert summary_payload["training_preset"] == "best_quality"
     assert summary_payload["train_minutes"] == 10.0
     assert summary_payload["time_limit_seconds"] == 600

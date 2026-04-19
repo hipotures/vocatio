@@ -428,8 +428,7 @@ Default behavior:
 python3 scripts/pipeline/probe_vlm_photo_boundaries.py DAY \
   --photo-manifest-csv DAY/_workspace/media_manifest.csv \
   --image-variant thumb \
-  --window-size 7 \
-  --overlap 2 \
+  --window-radius 2 \
   --boundary-gap-seconds 10 \
   --max-batches 100 \
   --response-schema-mode on \
@@ -441,6 +440,9 @@ python3 scripts/pipeline/probe_vlm_photo_boundaries.py DAY \
 Important behavior:
 
 - provider selection comes from `--provider` or `.vocatio` (`VLM_PROVIDER`, `VLM_BASE_URL`, `VLM_MODEL`)
+- symmetric VLM context is configured only through `--window-radius` or `.vocatio` `VLM_WINDOW_RADIUS`
+- `vlm_boundary_results.csv`, VLM run metadata, and downstream GUI/review artifacts persist `window_radius` only
+- legacy probe CSVs with `window_size` / `overlap` are not resumable; start a fresh run with `--new-run`
 - only gaps larger than `--boundary-gap-seconds` are probed
 - default `--max-batches` is `10`, so use a larger explicit value for real runs and rerun the same command or continue with `--run-id`
 - `--new-run` starts a fresh VLM run
@@ -458,8 +460,7 @@ Optional debugging:
 python3 scripts/pipeline/probe_vlm_photo_boundaries.py DAY \
   --photo-manifest-csv DAY/_workspace/media_manifest.csv \
   --image-variant thumb \
-  --window-size 7 \
-  --overlap 2 \
+  --window-radius 2 \
   --boundary-gap-seconds 10 \
   --max-batches 100 \
   --dump-debug-dir /tmp \
@@ -579,6 +580,7 @@ The default resolution path is:
 Verification:
 
 - inspect `FIRST_DAY_WORKSPACE/ml_boundary_corpus/ml_boundary_pipeline_summary.json`
+- check `window_radius` and `candidate_rule_params_json` to confirm the merged corpus and downstream training/eval artifacts stayed on the radius contract
 - check `requested_split_strategy` and `effective_split_strategy` to confirm whether the run stayed on `global_stratified` or fell back to `global_random`
 - inspect `required_heldout_classes` in the same summary to confirm which held-out coverage classes were enforced for the run
 

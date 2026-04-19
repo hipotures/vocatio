@@ -127,37 +127,6 @@ OUTPUT_HEADERS = [
     "response_status",
     "raw_response",
 ]
-PRE_FOLLOW_UP_OUTPUT_HEADERS = [
-    "generated_at",
-    "run_id",
-    "config_hash",
-    "image_variant",
-    "model",
-    "temperature",
-    "batch_index",
-    "start_row",
-    "end_row",
-    "window_size",
-    "overlap",
-    "relative_paths_json",
-    "filenames_json",
-    "image_paths_json",
-    "delta_from_first_seconds_json",
-    "delta_from_previous_seconds_json",
-    "decision",
-    "cut_after_local_index",
-    "cut_after_global_row",
-    "cut_left_relative_path",
-    "cut_right_relative_path",
-    "reason",
-    "response_status",
-    "raw_response",
-]
-PRE_FOLLOW_UP_MID_OUTPUT_HEADERS = [header for header in PRE_FOLLOW_UP_OUTPUT_HEADERS if header != "config_hash"]
-PRE_FOLLOW_UP_LEGACY_OUTPUT_HEADERS = [
-    header for header in PRE_FOLLOW_UP_OUTPUT_HEADERS if header not in {"run_id", "config_hash"}
-]
-IMAGE_VARIANTS = frozenset({"thumb", "preview"})
 RESUME_CONFIG_KEYS = (
     "embedded_manifest_csv",
     "photo_manifest_csv",
@@ -1847,13 +1816,8 @@ def read_result_rows(output_csv: Path) -> List[Dict[str, str]]:
         except StopIteration:
             return rows
         header = [str(value) for value in header_row]
-        if header not in (
-            OUTPUT_HEADERS,
-            PRE_FOLLOW_UP_OUTPUT_HEADERS,
-            PRE_FOLLOW_UP_MID_OUTPUT_HEADERS,
-            PRE_FOLLOW_UP_LEGACY_OUTPUT_HEADERS,
-        ):
-            raise ValueError(f"{output_csv.name} has unsupported header; expected current or pre-follow-up VLM probe columns")
+        if header != OUTPUT_HEADERS:
+            raise ValueError(f"{output_csv.name} has unsupported header; expected current VLM probe columns")
         for row in reader:
             if not row:
                 continue
@@ -1868,43 +1832,12 @@ def detect_result_row_headers(csv_name: str, file_header: Sequence[str], row: Se
     row_length = len(row)
     if header_list == OUTPUT_HEADERS and row_length <= len(OUTPUT_HEADERS):
         return OUTPUT_HEADERS
-    if header_list == PRE_FOLLOW_UP_OUTPUT_HEADERS and row_length < len(OUTPUT_HEADERS):
-        return PRE_FOLLOW_UP_OUTPUT_HEADERS
-    if header_list == PRE_FOLLOW_UP_MID_OUTPUT_HEADERS and row_length < len(OUTPUT_HEADERS):
-        return PRE_FOLLOW_UP_MID_OUTPUT_HEADERS
-    if header_list == PRE_FOLLOW_UP_LEGACY_OUTPUT_HEADERS and row_length < len(PRE_FOLLOW_UP_LEGACY_OUTPUT_HEADERS):
-        return PRE_FOLLOW_UP_LEGACY_OUTPUT_HEADERS
-    if row_length == len(PRE_FOLLOW_UP_OUTPUT_HEADERS):
-        return PRE_FOLLOW_UP_OUTPUT_HEADERS
-    if row_length == len(PRE_FOLLOW_UP_LEGACY_OUTPUT_HEADERS):
-        return PRE_FOLLOW_UP_LEGACY_OUTPUT_HEADERS
-    if row_length == len(OUTPUT_HEADERS):
-        row_index_2 = str(row[2]).strip() if row_length > 2 else ""
-        row_index_3 = str(row[3]).strip() if row_length > 3 else ""
-        if row_index_2 in IMAGE_VARIANTS and row_index_3 not in IMAGE_VARIANTS:
-            return PRE_FOLLOW_UP_MID_OUTPUT_HEADERS
-        if row_index_3 in IMAGE_VARIANTS and row_index_2 not in IMAGE_VARIANTS:
-            return OUTPUT_HEADERS
-        if header_list == PRE_FOLLOW_UP_MID_OUTPUT_HEADERS:
-            return PRE_FOLLOW_UP_MID_OUTPUT_HEADERS
-        if header_list == OUTPUT_HEADERS:
-            return OUTPUT_HEADERS
-        return OUTPUT_HEADERS
     raise ValueError(f"{csv_name} has unsupported row width {row_length}")
 
 
 def normalize_result_row(row: Mapping[str, str]) -> Dict[str, str]:
     normalized = {header: "" for header in OUTPUT_HEADERS}
     for header in OUTPUT_HEADERS:
-        if header == "window_radius":
-            if "window_radius" in row:
-                normalized[header] = str(row.get("window_radius", ""))
-            elif str(row.get("overlap", "") or "").strip():
-                normalized[header] = str(row.get("overlap", ""))
-            elif str(row.get("window_size", "") or "").strip():
-                window_size_value = int(str(row.get("window_size", "")))
-                normalized[header] = str(window_size_value // 2)
-            continue
         if header in row:
             normalized[header] = str(row.get(header, ""))
     return normalized

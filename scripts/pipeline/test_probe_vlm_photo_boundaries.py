@@ -1019,7 +1019,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(stored["args"]["response_schema_mode"], "on")
             self.assertEqual(stored["response_schema"], {"type": "object"})
 
-    def test_read_result_rows_accepts_pre_follow_up_headers(self):
+    def test_read_result_rows_rejects_pre_follow_up_headers(self):
         with tempfile.TemporaryDirectory() as tmp:
             base_row = {
                 "generated_at": "2026-04-14T05:30:12+02:00",
@@ -1076,7 +1076,6 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "response_status",
                         "raw_response",
                     ],
-                    {"run_id": "vlm-20260414053012", "config_hash": "oldhash", "window_radius": "2"},
                 ),
                 (
                     "old_mid",
@@ -1105,7 +1104,6 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "response_status",
                         "raw_response",
                     ],
-                    {"run_id": "vlm-20260414053012", "config_hash": "", "window_radius": "2"},
                 ),
                 (
                     "old_legacy",
@@ -1133,25 +1131,18 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "response_status",
                         "raw_response",
                     ],
-                    {"run_id": "", "config_hash": "", "window_radius": "2"},
                 ),
             ]
-            for name, headers, expected in cases:
+            for name, headers in cases:
                 output_csv = Path(tmp) / f"{name}.csv"
                 with output_csv.open("w", newline="", encoding="utf-8") as handle:
                     writer = csv.writer(handle)
                     writer.writerow(headers)
                     writer.writerow([base_row[header] for header in headers])
-                rows = probe.read_result_rows(output_csv)
-                self.assertEqual(len(rows), 1)
-                self.assertEqual(rows[0]["generated_at"], base_row["generated_at"])
-                self.assertEqual(rows[0]["image_variant"], "thumb")
-                self.assertEqual(rows[0]["decision"], "cut_after_1")
-                self.assertEqual(rows[0]["run_id"], expected["run_id"])
-                self.assertEqual(rows[0]["config_hash"], expected["config_hash"])
-                self.assertEqual(rows[0]["window_radius"], expected["window_radius"])
+                with self.assertRaisesRegex(ValueError, "unsupported header"):
+                    probe.read_result_rows(output_csv)
 
-    def test_read_result_rows_accepts_current_rows_appended_to_pre_follow_up_header(self):
+    def test_read_result_rows_rejects_current_rows_appended_to_pre_follow_up_header(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_csv = Path(tmp) / "vlm_boundary_results.csv"
             legacy_headers = [
@@ -1226,15 +1217,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 writer.writerow(legacy_headers)
                 writer.writerow([legacy_row[header] for header in legacy_headers])
                 writer.writerow([current_row[header] for header in probe.OUTPUT_HEADERS])
-            rows = probe.read_result_rows(output_csv)
-            self.assertEqual(len(rows), 2)
-            self.assertEqual(rows[0]["run_id"], "")
-            self.assertEqual(rows[0]["config_hash"], "")
-            self.assertEqual(rows[0]["window_radius"], "2")
-            self.assertEqual(rows[1]["run_id"], "vlm-20260414053112")
-            self.assertEqual(rows[1]["config_hash"], "newhash")
-            self.assertEqual(rows[1]["image_variant"], "preview")
-            self.assertEqual(rows[1]["window_radius"], "3")
+            with self.assertRaisesRegex(ValueError, "unsupported header"):
+                probe.read_result_rows(output_csv)
 
     def test_append_result_rows_writes_config_hash_column(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1280,7 +1264,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(state["run_id"], "vlm-20260414053113")
             self.assertEqual(state["completed_batches"], 1)
 
-    def test_resolve_run_state_counts_pre_follow_up_rows_for_resume(self):
+    def test_resolve_run_state_rejects_pre_follow_up_rows_for_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_dir = Path(tmp) / "_workspace"
             runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
@@ -1376,15 +1360,14 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     json.dumps({"run_id": run_id, "config_hash": "samehash", "args": {}}),
                     encoding="utf-8",
                 )
-            state = probe.resolve_run_state(
-                workspace_dir=workspace_dir,
-                output_csv=output_csv,
-                config_hash="samehash",
-                new_run=False,
-                run_id=None,
-            )
-            self.assertEqual(state["run_id"], "vlm-20260414053113")
-            self.assertEqual(state["completed_batches"], 1)
+            with self.assertRaisesRegex(ValueError, "unsupported header"):
+                probe.resolve_run_state(
+                    workspace_dir=workspace_dir,
+                    output_csv=output_csv,
+                    config_hash="samehash",
+                    new_run=False,
+                    run_id=None,
+                )
 
     def test_resolve_run_state_uses_explicit_run_id_when_provided(self):
         with tempfile.TemporaryDirectory() as tmp:
