@@ -206,6 +206,21 @@ def test_validate_candidate_row_rejects_legacy_window_size_column() -> None:
         validate_candidate_row(row, row_number=2)
 
 
+def test_validate_candidate_row_rejects_extra_frame_columns_for_declared_radius() -> None:
+    row = _candidate_row()
+    row["frame_05_photo_id"] = "p5"
+    row["frame_05_relpath"] = "cam/p5.jpg"
+    row["frame_05_timestamp"] = "26.0"
+    row["frame_05_thumb_path"] = "thumb/p5.jpg"
+    row["frame_05_preview_path"] = "preview/p5.jpg"
+
+    with pytest.raises(
+        ValueError,
+        match="unexpected columns are not allowed: frame_05_photo_id, frame_05_preview_path, frame_05_relpath, frame_05_thumb_path, frame_05_timestamp",
+    ):
+        validate_candidate_row(row, row_number=2)
+
+
 def test_validate_candidate_row_rejects_invalid_split_name() -> None:
     row = _candidate_row()
     row["split_name"] = "dev"

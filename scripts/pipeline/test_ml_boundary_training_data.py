@@ -328,6 +328,41 @@ def test_load_training_data_bundle_requires_thumbnail_columns_for_thumbnail_mode
         )
 
 
+def test_load_training_data_bundle_rejects_extra_frame_columns_for_declared_radius(
+    tmp_path: Path,
+) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    row = _candidate_row(day_id="20250324", segment_type="performance", boundary="0")
+    row["frame_05_photo_id"] = "20250324-p5"
+    row["frame_05_relpath"] = "cam/20250324-p5.jpg"
+    row["frame_05_timestamp"] = "5.0"
+    row["frame_05_thumb_path"] = "thumb/20250324-p5.jpg"
+    row["frame_05_preview_path"] = "preview/20250324-p5.jpg"
+    fieldnames = list(CANDIDATE_ROW_HEADERS) + [
+        "frame_05_photo_id",
+        "frame_05_relpath",
+        "frame_05_timestamp",
+        "frame_05_thumb_path",
+        "frame_05_preview_path",
+    ]
+    with dataset_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(row)
+    _write_split_manifest(
+        split_manifest_path,
+        [{"day_id": "20250324", "split_name": "train"}],
+    )
+
+    with pytest.raises(ValueError, match="unexpected columns are not allowed: frame_05_"):
+        load_training_data_bundle(
+            dataset_path,
+            split_manifest_path=split_manifest_path,
+            mode="tabular_plus_thumbnail",
+        )
+
+
 def test_load_training_data_bundle_requires_relpath_columns_for_heuristic_joins(
     tmp_path: Path,
 ) -> None:

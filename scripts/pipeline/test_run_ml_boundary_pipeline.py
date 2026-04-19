@@ -607,6 +607,42 @@ def test_main_prepare_only_preserves_dynamic_window_radius_headers(
     assert merged_rows[0]["frame_06_photo_id"].startswith(f"{day_dir.name}-p6-")
 
 
+def test_main_rejects_extra_frame_columns_for_declared_radius(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    day_dir = tmp_path / "20250324"
+    workspace_dir = tmp_path / "20250324DWC"
+    day_dir.mkdir(parents=True)
+    workspace_dir.mkdir(parents=True)
+    (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            row = _candidate_row(
+                day_id=day_dir.name,
+                segment_type="performance",
+                boundary="0",
+                offset=1,
+                window_radius=2,
+            )
+            row["frame_05_photo_id"] = f"{day_dir.name}-p5-1"
+            row["frame_05_relpath"] = f"cam/{day_dir.name}-p5-1.jpg"
+            row["frame_05_timestamp"] = "15.0"
+            row["frame_05_thumb_path"] = f"thumb/{day_dir.name}-p5-1.jpg"
+            row["frame_05_preview_path"] = f"preview/{day_dir.name}-p5-1.jpg"
+            _write_day_candidate_artifacts(workspace_dir, [row])
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+
+    exit_code = main([str(day_dir), "--prepare-only", "--split-strategy", "global_random"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "unexpected columns are not allowed" in output
+    assert "frame_05_photo_id" in output
+
+
 def test_render_eval_metrics_summary_labels_training_corpus_heuristics_when_available() -> None:
     rendered = _render_eval_metrics_summary(
         {

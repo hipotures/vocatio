@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +17,9 @@ from lib.window_radius_contract import window_radius_to_window_size
 TRAIN_MODES = ("tabular_only", "tabular_plus_thumbnail")
 DEFAULT_ML_WINDOW_RADIUS = 2
 LEGACY_EXTERNAL_COLUMNS = ("window_size", "overlap")
+FRAME_SCHEMA_COLUMN_RE = re.compile(
+    r"^frame_\d{2}_(photo_id|relpath|timestamp|thumb_path|preview_path)$"
+)
 
 
 def frame_numbers_for_window_radius(window_radius: int) -> list[int]:
@@ -389,6 +393,19 @@ def _require_columns(
         raise ValueError(f"{resource_name} missing required columns: {', '.join(missing)}")
 
 
+def _unexpected_schema_columns(
+    columns: list[str],
+    *,
+    expected_columns: list[str] | tuple[str, ...],
+) -> list[str]:
+    expected = set(expected_columns)
+    return sorted(
+        column
+        for column in set(columns)
+        if column not in expected and FRAME_SCHEMA_COLUMN_RE.match(column)
+    )
+
+
 def validate_candidate_training_columns(
     columns: list[str],
     *,
@@ -404,6 +421,40 @@ def validate_candidate_training_columns(
         required_columns=required_columns,
         resource_name=resource_name,
     )
+    allowed_columns = set(required_columns)
+    allowed_columns.update(
+        {
+            "candidate_id",
+            "center_left_photo_id",
+            "center_right_photo_id",
+            "left_segment_id",
+            "right_segment_id",
+            "left_segment_type",
+            "right_segment_type",
+            "candidate_rule_name",
+            "candidate_rule_version",
+            "candidate_rule_params_json",
+            "descriptor_schema_version",
+            "split_name",
+            "window_photo_ids",
+            "window_relative_paths",
+        }
+    )
+    allowed_columns.update(thumbnail_image_columns_for_window_radius(window_radius))
+    allowed_columns.update(
+        {
+            f"frame_{frame_index:02d}_preview_path"
+            for frame_index in frame_numbers_for_window_radius(window_radius)
+        }
+    )
+    unexpected_columns = _unexpected_schema_columns(
+        columns,
+        expected_columns=tuple(allowed_columns),
+    )
+    if unexpected_columns:
+        raise ValueError(
+            f"{resource_name} unexpected columns are not allowed: {', '.join(unexpected_columns)}"
+        )
 
 
 def _extract_window_radius_from_candidate_rows(

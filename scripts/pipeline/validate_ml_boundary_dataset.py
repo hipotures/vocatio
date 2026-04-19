@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
@@ -58,6 +59,9 @@ STATIC_CANDIDATE_HEADERS = [
     "window_photo_ids",
     "window_relative_paths",
 ]
+FRAME_SCHEMA_COLUMN_RE = re.compile(
+    r"^frame_\d{2}_(photo_id|relpath|timestamp|thumb_path|preview_path)$"
+)
 
 
 def _progress() -> Progress:
@@ -80,6 +84,19 @@ def _require_fieldnames(path: Path, fieldnames: Sequence[str], required: Sequenc
         raise ValueError(f"{path.name} missing required columns: {', '.join(missing)}")
 
 
+def _unexpected_schema_columns(
+    columns: Sequence[str],
+    *,
+    expected_headers: Sequence[str],
+) -> list[str]:
+    expected = set(expected_headers)
+    return sorted(
+        column
+        for column in set(columns)
+        if column not in expected and FRAME_SCHEMA_COLUMN_RE.match(column)
+    )
+
+
 def _read_csv_rows(path: Path, *, required_headers: Sequence[str]) -> list[dict[str, str]]:
     if not path.is_file():
         raise FileNotFoundError(f"CSV does not exist: {path}")
@@ -95,7 +112,34 @@ def _read_csv_rows(path: Path, *, required_headers: Sequence[str]) -> list[dict[
                 f"{path.name} legacy columns are not allowed: {', '.join(legacy_columns)}"
             )
         _require_fieldnames(path, reader.fieldnames or (), required_headers)
-        return [dict(row) for row in reader]
+        window_radius_text = None
+        if reader.fieldnames and "window_radius" in reader.fieldnames:
+            first_row = next(reader, None)
+            if first_row is not None:
+                window_radius_text = first_row.get("window_radius")
+                rows = [dict(first_row), *(dict(row) for row in reader)]
+            else:
+                rows = []
+        else:
+            rows = [dict(row) for row in reader]
+        if window_radius_text is not None:
+            window_radius = _parse_positive_int(
+                window_radius_text,
+                field_name=f"{path.name} window_radius",
+            )
+            expected_dynamic_headers = candidate_row_headers(
+                window_radius=window_radius,
+                include_thumbnail=True,
+            )
+            unexpected_columns = _unexpected_schema_columns(
+                reader.fieldnames or (),
+                expected_headers=expected_dynamic_headers,
+            )
+            if unexpected_columns:
+                raise ValueError(
+                    f"{path.name} unexpected columns are not allowed: {', '.join(unexpected_columns)}"
+                )
+        return rows
 
 
 def _detect_split_manifest_key(fieldnames: Sequence[str]) -> str:
@@ -331,6 +375,14 @@ def validate_candidate_row(row: Mapping[str, object], *, row_number: int) -> Non
     if missing_dynamic_headers:
         raise ValueError(
             f"row {row_number}: missing required columns: {', '.join(missing_dynamic_headers)}"
+        )
+    unexpected_columns = _unexpected_schema_columns(
+        row.keys(),
+        expected_headers=expected_headers,
+    )
+    if unexpected_columns:
+        raise ValueError(
+            f"row {row_number}: unexpected columns are not allowed: {', '.join(unexpected_columns)}"
         )
     if candidate_rule_params.get("window_radius") != window_radius:
         raise ValueError(

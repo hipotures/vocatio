@@ -289,6 +289,26 @@ def test_validate_dataset_contract_rejects_legacy_window_size_column(tmp_path: P
         validate_dataset_contract(dataset_path, "tabular_plus_thumbnail")
 
 
+def test_validate_dataset_contract_rejects_extra_frame_columns_for_declared_radius(
+    tmp_path: Path,
+) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    dataset_path.write_text(
+        "candidate_id,day_id,window_radius,segment_type,boundary,"
+        "frame_01_timestamp,frame_02_timestamp,frame_03_timestamp,frame_04_timestamp,frame_05_timestamp,"
+        "frame_01_photo_id,frame_02_photo_id,frame_03_photo_id,frame_04_photo_id,frame_05_photo_id,"
+        "frame_01_relpath,frame_02_relpath,frame_03_relpath,frame_04_relpath,frame_05_relpath,"
+        "frame_01_thumb_path,frame_02_thumb_path,frame_03_thumb_path,frame_04_thumb_path,frame_05_thumb_path\n"
+        "abc,20250325,2,performance,0,1,2,3,4,5,p1,p2,p3,p4,p5,"
+        "cam/p1.jpg,cam/p2.jpg,cam/p3.jpg,cam/p4.jpg,cam/p5.jpg,"
+        "thumb/p1.jpg,thumb/p2.jpg,thumb/p3.jpg,thumb/p4.jpg,thumb/p5.jpg\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unexpected columns are not allowed: frame_05_"):
+        validate_dataset_contract(dataset_path, "tabular_plus_thumbnail")
+
+
 def test_validate_dataset_contract_requires_thumbnail_columns_for_thumbnail_mode(
     tmp_path: Path,
 ) -> None:

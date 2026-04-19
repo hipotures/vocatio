@@ -7,6 +7,7 @@ import csv
 import json
 import math
 import random
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -61,6 +62,9 @@ DATASET_CONTRACT_KEYS = (
     "candidate_rule_params_json",
     "descriptor_schema_version",
     "window_radius",
+)
+FRAME_SCHEMA_COLUMN_RE = re.compile(
+    r"^frame_\d{2}_(photo_id|relpath|timestamp|thumb_path|preview_path)$"
 )
 
 
@@ -411,6 +415,19 @@ def _load_dataset_contract(day_workspaces: Sequence[Path]) -> dict[str, object]:
     return shared_contract
 
 
+def _unexpected_schema_columns(
+    columns: Sequence[str],
+    *,
+    expected_headers: Sequence[str],
+) -> list[str]:
+    expected = set(expected_headers)
+    return sorted(
+        column
+        for column in set(columns)
+        if column not in expected and FRAME_SCHEMA_COLUMN_RE.match(column)
+    )
+
+
 def _read_candidate_rows(path: Path, *, expected_headers: Sequence[str]) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -426,6 +443,14 @@ def _read_candidate_rows(path: Path, *, expected_headers: Sequence[str]) -> list
         missing = [header for header in expected_headers if header not in (reader.fieldnames or [])]
         if missing:
             raise ValueError(f"{path.name} missing required columns: {', '.join(missing)}")
+        unexpected_columns = _unexpected_schema_columns(
+            reader.fieldnames or (),
+            expected_headers=expected_headers,
+        )
+        if unexpected_columns:
+            raise ValueError(
+                f"{path.name} unexpected columns are not allowed: {', '.join(unexpected_columns)}"
+            )
         rows = [dict(row) for row in reader]
     return rows
 
