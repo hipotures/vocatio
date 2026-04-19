@@ -899,7 +899,6 @@ def _build_ml_candidate_row(
             rows[window_radius].get("photo_id", "") or rows[window_radius].get("relative_path", "")
         ).strip(),
         "boundary": False,
-        "segment_type": "",
         "split_name": "",
     }
     for frame_index, row in enumerate(rows, start=1):
@@ -1634,8 +1633,9 @@ def build_user_prompt_template(
     response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
 ) -> str:
     ml_hint_lines = [
-        "ML hint for the main candidate gap in this window: likely cut at the main candidate gap (confidence 0.82).",
-        "ML hint for the likely segment on the right side of the candidate gap: dance (confidence 0.74).",
+        "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
+        "ML hint for the left side of the candidate gap: likely dance (confidence 0.74).",
+        "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.73).",
     ]
     return build_user_prompt(
         window_size=window_size,

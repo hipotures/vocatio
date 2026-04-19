@@ -420,6 +420,72 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         ml_model_dir=model_dir,
                     )
 
+    def test_load_ml_hint_context_loads_left_right_and_boundary_predictors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp)
+            (model_dir / probe.TRAINING_METADATA_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "mode": "tabular_only",
+                        "window_radius": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (model_dir / probe.FEATURE_COLUMNS_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "image_feature_columns": [],
+                        "boundary_feature_columns": ["gap_12"],
+                        "left_segment_type_feature_columns": ["gap_12"],
+                        "right_segment_type_feature_columns": ["gap_12"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            loaded_paths: list[str] = []
+
+            class FakePredictor:
+                @classmethod
+                def load(cls, path):
+                    loaded_paths.append(str(path))
+                    return f"predictor::{path}"
+
+            with mock.patch.object(probe, "_validate_ml_hint_feature_columns_contract"), mock.patch.object(
+                probe, "load_tabular_predictor_class", return_value=FakePredictor
+            ):
+                context = probe.load_ml_hint_context(
+                    ml_model_run_id="ml-run-001",
+                    ml_model_dir=model_dir,
+                )
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertEqual(
+                context.left_segment_type_predictor,
+                f"predictor::{model_dir / probe.LEFT_SEGMENT_TYPE_MODEL_DIRNAME}",
+            )
+            self.assertEqual(
+                context.right_segment_type_predictor,
+                f"predictor::{model_dir / probe.RIGHT_SEGMENT_TYPE_MODEL_DIRNAME}",
+            )
+            self.assertEqual(
+                context.boundary_predictor,
+                f"predictor::{model_dir / probe.BOUNDARY_MODEL_DIRNAME}",
+            )
+            self.assertEqual(
+                loaded_paths,
+                [
+                    str(model_dir / probe.LEFT_SEGMENT_TYPE_MODEL_DIRNAME),
+                    str(model_dir / probe.RIGHT_SEGMENT_TYPE_MODEL_DIRNAME),
+                    str(model_dir / probe.BOUNDARY_MODEL_DIRNAME),
+                ],
+            )
+            self.assertEqual(context.boundary_feature_columns, ["gap_12"])
+            self.assertEqual(context.left_segment_type_feature_columns, ["gap_12"])
+            self.assertEqual(context.right_segment_type_feature_columns, ["gap_12"])
+
     def test_build_ml_hint_lines_renders_task_language(self):
         lines = probe.build_ml_hint_lines(
             probe.MlHintPrediction(
@@ -695,6 +761,23 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(prediction.left_segment_type_prediction, "performance")
         self.assertEqual(prediction.right_segment_type_prediction, "ceremony")
         self.assertTrue(prediction.boundary_prediction)
+
+    def test_build_ml_candidate_row_omits_legacy_segment_type_key(self):
+        candidate_row = probe._build_ml_candidate_row(
+            [
+                {
+                    "day": "20260323",
+                    "photo_id": f"cam/{name}.hif",
+                    "relative_path": f"cam/{name}.hif",
+                    "start_epoch_ms": str(index * 1000),
+                    "thumb_path": f"/tmp/{name}.jpg",
+                }
+                for index, name in enumerate(("a", "b", "c", "d"), start=1)
+            ],
+            day_id="20260323",
+            window_radius=2,
+        )
+        self.assertNotIn("segment_type", candidate_row)
 
     def test_build_ml_hint_lines_for_candidate_rejects_runtime_radius_mismatch(self):
         ml_hint_context = probe.MlHintContext(
@@ -1080,6 +1163,14 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
     def test_build_run_id_uses_vlm_prefix_and_second_precision(self):
         run_id = probe.build_run_id(datetime_text="2026-04-14T05:30:12+02:00")
         self.assertEqual(run_id, "vlm-20260414053012")
+
+    def test_build_user_prompt_template_uses_boundary_left_and_right_ml_hints(self):
+        template = probe.build_user_prompt_template(window_size=4)
+        self.assertIn("ML hint for the main candidate gap in this window: likely cut", template)
+        self.assertIn("ML hint for the left side of the candidate gap: likely", template)
+        self.assertIn("ML hint for the right side of the candidate gap: likely", template)
+        self.assertNotIn("likely segment on the right side of the candidate gap", template)
+        self.assertNotIn("likely cut at the main candidate gap", template)
 
     def test_build_config_hash_is_stable(self):
         first = probe.build_config_hash(
