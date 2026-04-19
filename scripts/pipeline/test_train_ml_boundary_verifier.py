@@ -295,12 +295,12 @@ def test_validate_dataset_contract_rejects_extra_frame_columns_for_declared_radi
 ) -> None:
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     dataset_path.write_text(
-        "candidate_id,day_id,window_radius,segment_type,boundary,"
+        "candidate_id,day_id,window_radius,left_segment_type,right_segment_type,boundary,"
         "frame_01_timestamp,frame_02_timestamp,frame_03_timestamp,frame_04_timestamp,frame_05_timestamp,"
         "frame_01_photo_id,frame_02_photo_id,frame_03_photo_id,frame_04_photo_id,frame_05_photo_id,"
         "frame_01_relpath,frame_02_relpath,frame_03_relpath,frame_04_relpath,frame_05_relpath,"
         "frame_01_thumb_path,frame_02_thumb_path,frame_03_thumb_path,frame_04_thumb_path,frame_05_thumb_path\n"
-        "abc,20250325,2,performance,0,1,2,3,4,5,p1,p2,p3,p4,p5,"
+        "abc,20250325,2,performance,ceremony,0,1,2,3,4,5,p1,p2,p3,p4,p5,"
         "cam/p1.jpg,cam/p2.jpg,cam/p3.jpg,cam/p4.jpg,cam/p5.jpg,"
         "thumb/p1.jpg,thumb/p2.jpg,thumb/p3.jpg,thumb/p4.jpg,thumb/p5.jpg\n",
         encoding="utf-8",
@@ -315,15 +315,15 @@ def test_validate_dataset_contract_rejects_blank_window_radius_in_any_row(
 ) -> None:
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     dataset_path.write_text(
-        "candidate_id,day_id,window_radius,segment_type,boundary,"
+        "candidate_id,day_id,window_radius,left_segment_type,right_segment_type,boundary,"
         "frame_01_timestamp,frame_02_timestamp,frame_03_timestamp,frame_04_timestamp,"
         "frame_01_photo_id,frame_02_photo_id,frame_03_photo_id,frame_04_photo_id,"
         "frame_01_relpath,frame_02_relpath,frame_03_relpath,frame_04_relpath,"
         "frame_01_thumb_path,frame_02_thumb_path,frame_03_thumb_path,frame_04_thumb_path\n"
-        "abc,20250325,2,performance,0,1,2,3,4,p1,p2,p3,p4,"
+        "abc,20250325,2,performance,ceremony,0,1,2,3,4,p1,p2,p3,p4,"
         "cam/p1.jpg,cam/p2.jpg,cam/p3.jpg,cam/p4.jpg,"
         "thumb/p1.jpg,thumb/p2.jpg,thumb/p3.jpg,thumb/p4.jpg\n"
-        "def,20250325,,performance,1,5,6,7,8,p5,p6,p7,p8,"
+        "def,20250325,,performance,warmup,1,5,6,7,8,p5,p6,p7,p8,"
         "cam/p5.jpg,cam/p6.jpg,cam/p7.jpg,cam/p8.jpg,"
         "thumb/p5.jpg,thumb/p6.jpg,thumb/p7.jpg,thumb/p8.jpg\n",
         encoding="utf-8",
@@ -339,11 +339,11 @@ def test_validate_dataset_contract_requires_thumbnail_columns_for_thumbnail_mode
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     dataset_path.write_text(
         (
-            "day_id,segment_type,boundary,"
+            "day_id,left_segment_type,right_segment_type,boundary,"
             "window_radius,"
             "frame_01_timestamp,frame_02_timestamp,frame_03_timestamp,frame_04_timestamp,"
             "frame_01_photo_id,frame_02_photo_id,frame_03_photo_id,frame_04_photo_id\n"
-            "20250324,performance,0,2,1,2,3,4,p1,p2,p3,p4\n"
+            "20250324,performance,ceremony,0,2,1,2,3,4,p1,p2,p3,p4\n"
         ),
         encoding="utf-8",
     )
@@ -822,20 +822,25 @@ def test_train_cli_report_falls_back_to_model_type_when_best_model_missing(
     assert exit_code == 0
     training_summary = json.loads((output_dir / TRAINING_SUMMARY_FILENAME).read_text(encoding="utf-8"))
     training_report = json.loads((output_dir / TRAINING_REPORT_FILENAME).read_text(encoding="utf-8"))
-    assert training_summary["segment_type"]["model_type"] == "FakeMultiModalPredictor"
+    assert training_summary["left_segment_type"]["model_type"] == "FakeMultiModalPredictor"
+    assert training_summary["right_segment_type"]["model_type"] == "FakeMultiModalPredictor"
     assert training_summary["boundary"]["model_type"] == "FakeMultiModalPredictor"
-    assert training_report["segment_type"]["best_model"] == "FakeMultiModalPredictor"
+    assert training_report["left_segment_type"]["best_model"] == "FakeMultiModalPredictor"
+    assert training_report["right_segment_type"]["best_model"] == "FakeMultiModalPredictor"
     assert training_report["boundary"]["best_model"] == "FakeMultiModalPredictor"
-    assert training_report["segment_type"]["validation_metric"] == "macro_f1"
+    assert training_report["left_segment_type"]["validation_metric"] == "macro_f1"
+    assert training_report["right_segment_type"]["validation_metric"] == "macro_f1"
     assert training_report["boundary"]["validation_metric"] == "f1"
     captured = capsys.readouterr()
     rendered = rendered_console.export_text()
     assert captured.out == ""
     assert captured.err == ""
     assert "===" not in rendered
-    assert "Train predictor: Segment type" in rendered
+    assert "Train predictor: Left segment type" in rendered
+    assert "Train predictor: Right segment type" in rendered
     assert "Train predictor: Boundary" in rendered
-    assert "Segment type: best_model=FakeMultiModalPredictor" in rendered
+    assert "Left segment type: best_model=FakeMultiModalPredictor" in rendered
+    assert "Right segment type: best_model=FakeMultiModalPredictor" in rendered
     assert "validation_macro_f1=0.79" in rendered
     assert "Boundary: best_model=FakeMultiModalPredictor" in rendered
     assert "validation_f1=0.88" in rendered
@@ -889,18 +894,22 @@ def test_train_cli_report_uses_model_best_when_present(
 
     assert exit_code == 0
     training_report = json.loads((output_dir / TRAINING_REPORT_FILENAME).read_text(encoding="utf-8"))
-    assert training_report["segment_type"]["best_model"] == "segment_type_winner"
+    assert training_report["left_segment_type"]["best_model"] == "left_segment_type_winner"
+    assert training_report["right_segment_type"]["best_model"] == "right_segment_type_winner"
     assert training_report["boundary"]["best_model"] == "boundary_winner"
-    assert training_report["segment_type"]["validation_metric"] == "macro_f1"
+    assert training_report["left_segment_type"]["validation_metric"] == "macro_f1"
+    assert training_report["right_segment_type"]["validation_metric"] == "macro_f1"
     assert training_report["boundary"]["validation_metric"] == "f1"
     captured = capsys.readouterr()
     rendered = rendered_console.export_text()
     assert captured.out == ""
     assert captured.err == ""
     assert "===" not in rendered
-    assert "Train predictor: Segment type" in rendered
+    assert "Train predictor: Left segment type" in rendered
+    assert "Train predictor: Right segment type" in rendered
     assert "Train predictor: Boundary" in rendered
-    assert "Segment type: best_model=segment_type_winner" in rendered
+    assert "Left segment type: best_model=left_segment_type_winner" in rendered
+    assert "Right segment type: best_model=right_segment_type_winner" in rendered
     assert "validation_macro_f1=0.83" in rendered
     assert "Boundary: best_model=boundary_winner" in rendered
     assert "validation_f1=0.91" in rendered
@@ -952,7 +961,7 @@ def test_train_cli_uses_multimodal_predictor_for_thumbnail_mode(
 
     assert exit_code == 0
     assert len(FakeTabularPredictor.instances) == 0
-    assert len(FakeMultiModalPredictor.instances) == 2
+    assert len(FakeMultiModalPredictor.instances) == 3
     train_columns = FakeMultiModalPredictor.instances[0].fit_calls[0]["train_columns"]
     assert "gap_23" in train_columns
     assert "candidate_id" not in train_columns
