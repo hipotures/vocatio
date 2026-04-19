@@ -581,6 +581,22 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertNotIn('"decision"', prompt)
         self.assertIn("<one of: null, frame_01, frame_02>", prompt)
 
+    def test_build_user_prompt_forbids_background_and_lighting_for_boundary_and_segment_change(self):
+        prompt = probe.build_user_prompt(
+            window_size=6,
+            ml_hint_lines=[],
+            response_schema_mode="on",
+        )
+
+        self.assertIn(
+            "Background change and lighting change, whether alone or together, never justify a boundary.",
+            prompt,
+        )
+        self.assertIn(
+            "Background change and lighting change, whether alone or together, never justify a segment-type change.",
+            prompt,
+        )
+
     def test_build_ml_hint_lines_for_candidate_uses_model_predictions_for_arbitrary_window_radius(self):
         class FakeBoundaryPredictor:
             def predict(self, _frame):
