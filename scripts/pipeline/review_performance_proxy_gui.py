@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import importlib
 import json
 import os
 import shutil
@@ -21,6 +22,12 @@ try:
     import probe_vlm_photo_boundaries as probe_vlm_boundary
 except ModuleNotFoundError:
     from scripts.pipeline import probe_vlm_photo_boundaries as probe_vlm_boundary
+
+
+def reload_probe_vlm_boundary_module():
+    global probe_vlm_boundary
+    probe_vlm_boundary = importlib.reload(probe_vlm_boundary)
+    return probe_vlm_boundary
 
 
 def ensure_venv_python() -> None:
@@ -3265,6 +3272,16 @@ class MainWindow(QMainWindow):
         current_state = self.current_manual_ml_prediction_state()
         if not isinstance(current_state, Mapping):
             return
+        try:
+            reload_probe_vlm_boundary_module()
+        except Exception as exc:
+            self.manual_ml_prediction_state = {
+                **dict(current_state),
+                "status": "error",
+                "error": f"module reload failed: {exc}",
+            }
+            self.refresh_current_info_dock()
+            return
         if str(current_state.get("status", "") or "").strip().lower() == "running":
             return
 
@@ -3313,6 +3330,16 @@ class MainWindow(QMainWindow):
     def run_manual_vlm_analyze(self) -> None:
         current_state = self.current_manual_vlm_analyze_state()
         if not isinstance(current_state, Mapping):
+            return
+        try:
+            reload_probe_vlm_boundary_module()
+        except Exception as exc:
+            self.manual_vlm_analyze_state = {
+                **dict(current_state),
+                "status": "error",
+                "error": f"module reload failed: {exc}",
+            }
+            self.refresh_current_info_dock()
             return
         if str(current_state.get("status", "") or "").strip().lower() == "running":
             return

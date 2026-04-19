@@ -1269,6 +1269,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "load_manual_prediction_joined_rows",
             return_value=full_joined_rows,
         ), unittest.mock.patch.object(
+            review_gui,
+            "reload_probe_vlm_boundary_module",
+            return_value=review_gui.probe_vlm_boundary,
+        ), unittest.mock.patch.object(
             review_gui.probe_vlm_boundary,
             "resolve_ml_model_run",
             return_value=("ml-run-001", Path("/tmp/model-run")),
@@ -1370,6 +1374,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 {"relative_path": "cam/post1.jpg", "start_epoch_ms": "12000"},
             ],
         ), unittest.mock.patch.object(
+            review_gui,
+            "reload_probe_vlm_boundary_module",
+            return_value=review_gui.probe_vlm_boundary,
+        ), unittest.mock.patch.object(
             review_gui.probe_vlm_boundary,
             "resolve_ml_model_run",
             return_value=("ml-run-001", Path("/tmp/model-run")),
@@ -1428,6 +1436,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 {"relative_path": "cam/left.jpg", "start_epoch_ms": "1000"},
                 {"relative_path": "cam/right.jpg", "start_epoch_ms": "2000"},
             ],
+        ), unittest.mock.patch.object(
+            review_gui,
+            "reload_probe_vlm_boundary_module",
+            return_value=review_gui.probe_vlm_boundary,
         ), unittest.mock.patch.object(
             review_gui,
             "resolve_manual_prediction_anchor_pair",
@@ -1494,6 +1506,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             },
         ), unittest.mock.patch.object(
             review_gui,
+            "reload_probe_vlm_boundary_module",
+            return_value=review_gui.probe_vlm_boundary,
+        ), unittest.mock.patch.object(
+            review_gui,
             "load_manual_prediction_joined_rows",
             return_value=[
                 {"relative_path": "cam/left.jpg", "start_epoch_ms": "1000"},
@@ -1549,6 +1565,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             },
         ), unittest.mock.patch.object(
             review_gui,
+            "reload_probe_vlm_boundary_module",
+            return_value=review_gui.probe_vlm_boundary,
+        ), unittest.mock.patch.object(
+            review_gui,
             "load_manual_prediction_joined_rows",
             return_value=[
                 {"relative_path": "cam/left.jpg", "start_epoch_ms": "1000"},
@@ -1568,6 +1588,78 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(window.manual_vlm_analyze_state["status"], "error")
         self.assertEqual(window.manual_vlm_analyze_state["error"], "provider request timed out")
         self.assertEqual(window.refresh_current_info_dock.call_count, 2)
+
+    def test_run_manual_ml_prediction_reloads_probe_module_before_inference(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.manual_ml_prediction_state = {
+            "status": "idle",
+            "left_relative_path": "cam/a.jpg",
+            "right_relative_path": "cam/b.jpg",
+        }
+        window.current_manual_ml_prediction_state = Mock(return_value=window.manual_ml_prediction_state)
+        window.manual_prediction_day_dir = Mock(return_value=Path("/day"))
+        window.selected_photo_entries = Mock(return_value=[{"relative_path": "cam/a.jpg"}, {"relative_path": "cam/b.jpg"}])
+        window.refresh_current_info_dock = Mock()
+        window.workspace_dir = Path("/workspace")
+        window.payload = {"day": "20260323"}
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+
+        with unittest.mock.patch.object(review_gui, "reload_probe_vlm_boundary_module") as reload_mock, unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_prediction_state",
+            return_value={"status": "running"},
+        ), unittest.mock.patch.object(
+            review_gui,
+            "compute_manual_ml_prediction_result",
+            return_value={"status": "result", "result_text": "ok"},
+        ), unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_joined_rows",
+            return_value=[],
+        ), unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
+            window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(
+                window,
+                review_gui.MainWindow,
+            )
+            window.run_manual_ml_prediction()
+
+        reload_mock.assert_called_once_with()
+
+    def test_run_manual_vlm_analyze_reloads_probe_module_before_analysis(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.manual_vlm_analyze_state = {
+            "status": "idle",
+            "left_relative_path": "cam/a.jpg",
+            "right_relative_path": "cam/b.jpg",
+        }
+        window.current_manual_vlm_analyze_state = Mock(return_value=window.manual_vlm_analyze_state)
+        window.manual_prediction_day_dir = Mock(return_value=Path("/day"))
+        window.selected_photo_entries = Mock(return_value=[{"relative_path": "cam/a.jpg"}, {"relative_path": "cam/b.jpg"}])
+        window.refresh_current_info_dock = Mock()
+        window.workspace_dir = Path("/workspace")
+        window.payload = {"day": "20260323"}
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+
+        with unittest.mock.patch.object(review_gui, "reload_probe_vlm_boundary_module") as reload_mock, unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_vlm_analyze_state",
+            return_value={"status": "running"},
+        ), unittest.mock.patch.object(
+            review_gui,
+            "compute_manual_vlm_analyze_result",
+            return_value={"status": "result", "result_text": "ok"},
+        ), unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_joined_rows",
+            return_value=[],
+        ), unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
+            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(
+                window,
+                review_gui.MainWindow,
+            )
+            window.run_manual_vlm_analyze()
+
+        reload_mock.assert_called_once_with()
 
     def test_compute_manual_ml_prediction_result_uses_image_paths_for_manual_thumbnail_columns(self):
         joined_rows = [
