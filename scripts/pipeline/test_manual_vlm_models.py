@@ -45,6 +45,12 @@ class ManualVlmModelsTest(unittest.TestCase):
             "VLM_JSON_VALIDATION_MODE": "strict",
         }
 
+    def test_checked_in_sample_config_loads(self) -> None:
+        path = REPO_ROOT / "conf" / "manual_vlm_models.yaml"
+        loaded = manual_vlm_models.load_manual_vlm_models(path)
+        self.assertEqual(len(loaded.models), 3)
+        self.assertTrue(loaded.md5_hex)
+
     def test_load_models_parses_complete_entries(self) -> None:
         path = self.write_yaml(
             """
@@ -124,6 +130,24 @@ models:
         ):
             manual_vlm_models.load_manual_vlm_models(path)
 
+    def test_load_models_rejects_blank_required_strings(self) -> None:
+        cases = (
+            ("VLM_BASE_URL", ""),
+            ("VLM_BASE_URL", "   "),
+            ("VLM_MODEL", ""),
+            ("VLM_MODEL", "   "),
+        )
+        for field_name, value in cases:
+            with self.subTest(field_name=field_name, value=value):
+                model = self.build_model()
+                model[field_name] = value
+                path = self.write_models([model])
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f'{field_name} must be a non-empty string in preset "Preset A"',
+                ):
+                    manual_vlm_models.load_manual_vlm_models(path)
+
     def test_load_models_rejects_non_positive_numeric_limits(self) -> None:
         cases = (
             ("VLM_CONTEXT_TOKENS", 0),
@@ -141,6 +165,28 @@ models:
                 with self.assertRaisesRegex(
                     ValueError,
                     f'{field_name} must be > 0 in preset "Preset A"',
+                ):
+                    manual_vlm_models.load_manual_vlm_models(path)
+
+    def test_load_models_rejects_malformed_numeric_text(self) -> None:
+        cases = (
+            ("VLM_CONTEXT_TOKENS", "nope"),
+            ("VLM_MAX_OUTPUT_TOKENS", "bad"),
+            ("VLM_TIMEOUT_SECONDS", "oops"),
+        )
+        expected_types = {
+            "VLM_CONTEXT_TOKENS": "integer",
+            "VLM_MAX_OUTPUT_TOKENS": "integer",
+            "VLM_TIMEOUT_SECONDS": "number",
+        }
+        for field_name, value in cases:
+            with self.subTest(field_name=field_name, value=value):
+                model = self.build_model()
+                model[field_name] = value
+                path = self.write_models([model])
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f'{field_name} must be a positive {expected_types[field_name]} in preset "Preset A"',
                 ):
                     manual_vlm_models.load_manual_vlm_models(path)
 

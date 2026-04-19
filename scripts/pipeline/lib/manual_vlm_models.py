@@ -37,15 +37,32 @@ def compute_manual_vlm_models_md5(path: Path) -> str:
     return hashlib.md5(payload).hexdigest()
 
 
+def _validate_non_empty_string(value: Any, field_name: str, preset_name: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ValueError(f'{field_name} must be a non-empty string in preset "{preset_name}"')
+    return normalized
+
+
 def _validate_positive_int(value: Any, field_name: str, preset_name: str) -> int:
-    normalized = int(value)
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f'{field_name} must be a positive integer in preset "{preset_name}"'
+        ) from None
     if normalized <= 0:
         raise ValueError(f'{field_name} must be > 0 in preset "{preset_name}"')
     return normalized
 
 
 def _validate_positive_float(value: Any, field_name: str, preset_name: str) -> float:
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f'{field_name} must be a positive number in preset "{preset_name}"'
+        ) from None
     if normalized <= 0:
         raise ValueError(f'{field_name} must be > 0 in preset "{preset_name}"')
     return normalized
@@ -67,6 +84,16 @@ def _validate_model_entry(model: Any, index: int) -> dict[str, Any]:
 
     normalized["VLM_NAME"] = name
     normalized["VLM_PROVIDER"] = provider
+    normalized["VLM_BASE_URL"] = _validate_non_empty_string(
+        normalized["VLM_BASE_URL"],
+        "VLM_BASE_URL",
+        name,
+    )
+    normalized["VLM_MODEL"] = _validate_non_empty_string(
+        normalized["VLM_MODEL"],
+        "VLM_MODEL",
+        name,
+    )
     normalized["VLM_CONTEXT_TOKENS"] = _validate_positive_int(
         normalized["VLM_CONTEXT_TOKENS"],
         "VLM_CONTEXT_TOKENS",
@@ -88,7 +115,8 @@ def _validate_model_entry(model: Any, index: int) -> dict[str, Any]:
 def load_manual_vlm_models(path: Path) -> ManualVlmModelsConfig:
     if not path.is_file():
         raise ValueError(f"manual VLM model config does not exist: {path}")
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    payload = path.read_bytes()
+    raw = yaml.safe_load(payload.decode("utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("manual VLM model config must be a mapping")
     models = raw.get("models")
@@ -107,5 +135,5 @@ def load_manual_vlm_models(path: Path) -> ManualVlmModelsConfig:
 
     return ManualVlmModelsConfig(
         models=normalized_models,
-        md5_hex=compute_manual_vlm_models_md5(path),
+        md5_hex=hashlib.md5(payload).hexdigest(),
     )
