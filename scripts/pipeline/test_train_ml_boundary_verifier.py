@@ -172,7 +172,7 @@ class FakeMultiModalPredictor:
         return self
 
     def evaluate(self, data):
-        return {"accuracy": 0.79 if self.label == "segment_type" else 0.88}
+        return {"accuracy": 0.88 if self.label == "boundary" else 0.79}
 
     def fit_summary(self):
         return {
@@ -192,9 +192,10 @@ class FakeTabularPredictorModelBest(FakeTabularPredictor):
         }
 
 
-def test_build_training_plan_uses_two_independent_predictors() -> None:
+def test_build_training_plan_uses_three_independent_predictors() -> None:
     assert build_training_plan("tabular_only") == [
-        {"name": "segment_type", "problem_type": "multiclass"},
+        {"name": "left_segment_type", "problem_type": "multiclass"},
+        {"name": "right_segment_type", "problem_type": "multiclass"},
         {"name": "boundary", "problem_type": "binary"},
     ]
 
@@ -403,8 +404,9 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     )
 
     assert exit_code == 0
-    assert len(FakeTabularPredictor.instances) == 2
-    assert (output_dir / "segment_type_model").is_dir()
+    assert len(FakeTabularPredictor.instances) == 3
+    assert (output_dir / "left_segment_type_model").is_dir()
+    assert (output_dir / "right_segment_type_model").is_dir()
     assert (output_dir / "boundary_model").is_dir()
 
     training_plan = json.loads((output_dir / TRAINING_PLAN_FILENAME).read_text(encoding="utf-8"))
@@ -422,7 +424,8 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "train_minutes": None,
         "time_limit_seconds": None,
         "predictors": [
-            {"name": "segment_type", "problem_type": "multiclass"},
+            {"name": "left_segment_type", "problem_type": "multiclass"},
+            {"name": "right_segment_type", "problem_type": "multiclass"},
             {"name": "boundary", "problem_type": "binary"},
         ],
         "image_feature_columns": [],
@@ -432,7 +435,7 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "output_dir": str(output_dir),
         "mode": "tabular_only",
         "window_radius": 2,
-        "predictor_names": ["segment_type", "boundary"],
+        "predictor_names": ["left_segment_type", "right_segment_type", "boundary"],
         "train_row_count": 1,
         "validation_row_count": 1,
         "split_manifest_scope": "day_id",
@@ -453,7 +456,8 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
             "feature_columns": str(output_dir / FEATURE_COLUMNS_FILENAME),
             "training_report": str(output_dir / TRAINING_REPORT_FILENAME),
             "training_summary": str(output_dir / TRAINING_SUMMARY_FILENAME),
-            "segment_type_model_dir": str(output_dir / "segment_type_model"),
+            "left_segment_type_model_dir": str(output_dir / "left_segment_type_model"),
+            "right_segment_type_model_dir": str(output_dir / "right_segment_type_model"),
             "boundary_model_dir": str(output_dir / "boundary_model"),
         },
     }
@@ -463,15 +467,27 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert "split_name" not in feature_columns["shared_feature_columns"]
     assert "frame_01_thumb_path" not in feature_columns["shared_feature_columns"]
     assert "frame_04_thumb_path" not in feature_columns["shared_feature_columns"]
-    assert feature_columns["segment_type_feature_columns"] == feature_columns["boundary_feature_columns"]
+    assert feature_columns["left_segment_type_feature_columns"] == feature_columns["boundary_feature_columns"]
+    assert feature_columns["right_segment_type_feature_columns"] == feature_columns["boundary_feature_columns"]
     assert training_summary == {
-        "segment_type": {
+        "left_segment_type": {
             "model_type": "FakeTabularPredictor",
-            "path": str(output_dir / "segment_type_model"),
+            "path": str(output_dir / "left_segment_type_model"),
             "eval_metric": "f1_macro",
             "validation_score": 0.83,
             "fit_summary_excerpt": {
-                "best_model": "segment_type_best",
+                "best_model": "left_segment_type_best",
+                "num_models_trained": 1,
+                "problem_type": "multiclass",
+            },
+        },
+        "right_segment_type": {
+            "model_type": "FakeTabularPredictor",
+            "path": str(output_dir / "right_segment_type_model"),
+            "eval_metric": "f1_macro",
+            "validation_score": 0.83,
+            "fit_summary_excerpt": {
+                "best_model": "right_segment_type_best",
                 "num_models_trained": 1,
                 "problem_type": "multiclass",
             },
@@ -515,11 +531,17 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
             "complete_candidate_count": 0,
             "missing_candidate_count": 3,
         },
-        "segment_type": {
-            "best_model": "segment_type_best",
+        "left_segment_type": {
+            "best_model": "left_segment_type_best",
             "validation_metric": "macro_f1",
             "validation_score": 0.83,
-            "model_dir": str(output_dir / "segment_type_model"),
+            "model_dir": str(output_dir / "left_segment_type_model"),
+        },
+        "right_segment_type": {
+            "best_model": "right_segment_type_best",
+            "validation_metric": "macro_f1",
+            "validation_score": 0.83,
+            "model_dir": str(output_dir / "right_segment_type_model"),
         },
         "boundary": {
             "best_model": "boundary_best",
@@ -533,7 +555,8 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
             "feature_columns": str(output_dir / FEATURE_COLUMNS_FILENAME),
             "training_report": str(output_dir / TRAINING_REPORT_FILENAME),
             "training_summary": str(output_dir / TRAINING_SUMMARY_FILENAME),
-            "segment_type_model_dir": str(output_dir / "segment_type_model"),
+            "left_segment_type_model_dir": str(output_dir / "left_segment_type_model"),
+            "right_segment_type_model_dir": str(output_dir / "right_segment_type_model"),
             "boundary_model_dir": str(output_dir / "boundary_model"),
         },
     }
@@ -553,7 +576,10 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert FakeTabularPredictor.instances[0].eval_metric == "f1_macro"
     assert FakeTabularPredictor.instances[1].fit_calls[0]["presets"] == "medium_quality"
     assert FakeTabularPredictor.instances[1].fit_calls[0]["time_limit"] is None
-    assert FakeTabularPredictor.instances[1].eval_metric == "f1"
+    assert FakeTabularPredictor.instances[1].eval_metric == "f1_macro"
+    assert FakeTabularPredictor.instances[2].fit_calls[0]["presets"] == "medium_quality"
+    assert FakeTabularPredictor.instances[2].fit_calls[0]["time_limit"] is None
+    assert FakeTabularPredictor.instances[2].eval_metric == "f1"
     train_columns = FakeTabularPredictor.instances[0].fit_calls[0]["train_columns"]
     assert "gap_23" in train_columns
     assert "candidate_id" not in train_columns
@@ -569,8 +595,10 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert "Training complete" in rendered
     assert "Output dir:" in rendered
     assert output_dir.name in rendered
-    assert "Segment type:" in rendered
-    assert "segment_type_best" in rendered
+    assert "Left segment type:" in rendered
+    assert "left_segment_type_best" in rendered
+    assert "Right segment type:" in rendered
+    assert "right_segment_type_best" in rendered
     assert "Boundary:" in rendered
     assert "boundary_best" in rendered
     assert "validation_macro_f1=0.83" in rendered
@@ -589,8 +617,9 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert TRAINING_REPORT_FILENAME in rendered
     assert len(rendered_lines) > 7
     assert rendered.index("Training complete") < rendered.index("Output dir:")
-    assert rendered.index("Output dir:") < rendered.index("Segment type:")
-    assert rendered.index("Segment type:") < rendered.index("Boundary:")
+    assert rendered.index("Output dir:") < rendered.index("Left segment type:")
+    assert rendered.index("Left segment type:") < rendered.index("Right segment type:")
+    assert rendered.index("Right segment type:") < rendered.index("Boundary:")
     assert rendered.index("Boundary:") < rendered.index("Feature counts:")
     assert rendered.index("Feature counts:") < rendered.index("Missing annotations:")
     assert rendered.index("Missing annotations:") < rendered.index("Heuristic coverage:")

@@ -37,11 +37,13 @@ TRAINING_METADATA_FILENAME = "training_metadata.json"
 FEATURE_COLUMNS_FILENAME = "feature_columns.json"
 TRAINING_SUMMARY_FILENAME = "training_summary.json"
 TRAINING_REPORT_FILENAME = "training_report.json"
-SEGMENT_TYPE_MODEL_DIRNAME = "segment_type_model"
+LEFT_SEGMENT_TYPE_MODEL_DIRNAME = "left_segment_type_model"
+RIGHT_SEGMENT_TYPE_MODEL_DIRNAME = "right_segment_type_model"
 BOUNDARY_MODEL_DIRNAME = "boundary_model"
 DEFAULT_CORPUS_DATASET_FILENAME = "ml_boundary_candidates.corpus.csv"
 DEFAULT_SPLIT_MANIFEST_FILENAME = "ml_boundary_splits.csv"
 DEFAULT_MODEL_ROOT_DIRNAME = "ml_boundary_models"
+PREDICTOR_NAMES = ("left_segment_type", "right_segment_type", "boundary")
 
 
 def build_training_plan(mode: str) -> list[dict[str, str]]:
@@ -51,7 +53,7 @@ def build_training_plan(mode: str) -> list[dict[str, str]]:
             "name": predictor_name,
             "problem_type": predictor_metric_spec(predictor_name).problem_type,
         }
-        for predictor_name in ("segment_type", "boundary")
+        for predictor_name in PREDICTOR_NAMES
     ]
 
 
@@ -274,12 +276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         atomic_write_json(
             staged_output_dir / FEATURE_COLUMNS_FILENAME,
-            {
-                "shared_feature_columns": training_bundle.shared_feature_columns,
-                "segment_type_feature_columns": training_bundle.segment_type.feature_columns,
-                "boundary_feature_columns": training_bundle.boundary.feature_columns,
-                "image_feature_columns": training_bundle.image_feature_columns,
-            },
+            training_bundle.feature_columns_by_mode[args.mode],
         )
         atomic_write_json(
             staged_output_dir / TRAINING_SUMMARY_FILENAME,
@@ -320,7 +317,8 @@ def _artifact_paths(output_dir: Path) -> dict[str, Path]:
         "feature_columns": output_dir / FEATURE_COLUMNS_FILENAME,
         "training_report": output_dir / TRAINING_REPORT_FILENAME,
         "training_summary": output_dir / TRAINING_SUMMARY_FILENAME,
-        "segment_type_model_dir": output_dir / SEGMENT_TYPE_MODEL_DIRNAME,
+        "left_segment_type_model_dir": output_dir / LEFT_SEGMENT_TYPE_MODEL_DIRNAME,
+        "right_segment_type_model_dir": output_dir / RIGHT_SEGMENT_TYPE_MODEL_DIRNAME,
         "boundary_model_dir": output_dir / BOUNDARY_MODEL_DIRNAME,
     }
 
@@ -443,7 +441,8 @@ def _train_predictors(
 ) -> dict[str, object]:
     summary: dict[str, object] = {}
     predictor_specs = {
-        "segment_type": training_bundle.segment_type,
+        "left_segment_type": training_bundle.left_segment_type,
+        "right_segment_type": training_bundle.right_segment_type,
         "boundary": training_bundle.boundary,
     }
     for predictor_plan in build_training_plan(mode):
@@ -507,7 +506,8 @@ def _build_training_report_payload(
         "missing_annotation_photo_count": training_bundle.missing_annotation_photo_count,
         "missing_annotation_candidate_count": training_bundle.missing_annotation_candidate_count,
         "heuristic_boundary_coverage": _heuristic_boundary_coverage_payload(training_bundle),
-        "segment_type": _report_predictor_payload(training_summary, "segment_type"),
+        "left_segment_type": _report_predictor_payload(training_summary, "left_segment_type"),
+        "right_segment_type": _report_predictor_payload(training_summary, "right_segment_type"),
         "boundary": _report_predictor_payload(training_summary, "boundary"),
         "artifact_paths": {
             name: str(path)
@@ -618,7 +618,8 @@ def _final_console_block(
             f"train_minutes={training_options['train_minutes']}, "
             f"time_limit_seconds={training_options['time_limit_seconds']}"
         ),
-        _predictor_console_line(training_summary, "segment_type", "Segment type"),
+        _predictor_console_line(training_summary, "left_segment_type", "Left segment type"),
+        _predictor_console_line(training_summary, "right_segment_type", "Right segment type"),
         _predictor_console_line(training_summary, "boundary", "Boundary"),
         (
             "Feature counts: "
