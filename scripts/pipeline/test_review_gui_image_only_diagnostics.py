@@ -526,18 +526,24 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertTrue(section["choice_enabled"])
         self.assertTrue(section["action_enabled"])
 
-    def test_manual_vlm_section_disables_analyze_when_model_config_error_exists(self):
+    def test_manual_vlm_section_widget_shows_config_error_and_disables_analyze(self):
         window = self.build_test_window_with_two_selected_rows()
         window.manual_vlm_models = []
-        window.manual_vlm_models_error = "bad yaml"
+        window.manual_vlm_models_error = "Model config error: bad yaml"
+        window.run_manual_vlm_analyze = Mock()
 
         section = review_gui.build_manual_vlm_analyze_section(window)
+        widget = window.build_info_section_widget(section)
+        self.addCleanup(widget.deleteLater)
+        widget.show()
+        TEST_QT_APP.processEvents()
 
-        self.assertFalse(section["action_enabled"])
-        self.assertFalse(section["choice_enabled"])
-        self.assertEqual(section["choice_items"], [])
-        self.assertIsNone(section["choice_value"])
-        self.assertIn("bad yaml", section["description"])
+        labels = widget.findChildren(QLabel)
+        buttons = widget.findChildren(QPushButton)
+
+        self.assertEqual([button.text() for button in buttons], ["Manual VLM analyze", "Analyze"])
+        self.assertFalse(buttons[1].isEnabled())
+        self.assertIn("Model config error: bad yaml", [label.text() for label in labels])
 
     def test_manual_vlm_debug_dir_always_uses_tmp_root(self):
         runtime_args = argparse.Namespace(dump_debug_dir="/tmp/vlm-probe-debug")
@@ -563,7 +569,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIsNotNone(error_text)
         self.assertIn("Model config error:", error_text)
 
-    def test_reload_manual_vlm_models_loads_startup_preset_from_config(self):
+    def test_main_window_init_loads_startup_manual_vlm_preset_from_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = Path(temp_dir)
             config_path = repo_root / "conf" / "manual_vlm_models.yaml"
@@ -588,11 +594,32 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            window = review_gui.MainWindow.__new__(review_gui.MainWindow)
-            window.manual_vlm_selected_name = "Missing Preset"
+            index_path = repo_root / "workspace" / "performance_proxy_index.json"
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path = repo_root / "workspace" / "review_state.json"
+            payload = {
+                "day": "20260323",
+                "performances": [],
+                "source_mode": "proxy",
+            }
 
-            with unittest.mock.patch.object(review_gui, "REPO_ROOT", repo_root):
-                review_gui.MainWindow.reload_manual_vlm_models(window, startup=True)
+            with unittest.mock.patch.object(review_gui, "REPO_ROOT", repo_root), unittest.mock.patch.object(
+                review_gui.MainWindow, "rebuild_display_sets", autospec=True, return_value=None
+            ), unittest.mock.patch.object(
+                review_gui.MainWindow, "migrate_review_state_keys", autospec=True, return_value=None
+            ), unittest.mock.patch.object(
+                review_gui.MainWindow, "build_tree", autospec=True, return_value=None
+            ), unittest.mock.patch.object(
+                review_gui.MainWindow, "install_actions", autospec=True, return_value=None
+            ), unittest.mock.patch.object(
+                review_gui.MainWindow, "preload_set_images", autospec=True, return_value=None
+            ), unittest.mock.patch.object(
+                review_gui.MainWindow, "apply_view_mode", autospec=True, return_value=None
+            ):
+                window = review_gui.MainWindow(index_path, state_path, payload, 1.0, repo_root)
+                self.addCleanup(window.close)
+                self.addCleanup(window.deleteLater)
+                self.addCleanup(window.autosave_timer.stop)
 
         self.assertEqual([model["VLM_NAME"] for model in window.manual_vlm_models], ["Preset B"])
         self.assertIsNotNone(window.manual_vlm_models_md5)
