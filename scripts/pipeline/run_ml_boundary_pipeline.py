@@ -547,15 +547,16 @@ def _build_day_metadata_rows(merged_rows: Sequence[dict[str, str]]) -> list[dict
     segment_types_by_day: dict[str, set[str]] = {}
     for row in merged_rows:
         day_id = str(row.get("day_id", "")).strip()
-        segment_type = str(row.get("segment_type", "")).strip()
-        if day_id == "" or segment_type == "":
-            raise ValueError("merged candidate rows must include non-blank day_id and segment_type")
-        if segment_type not in VALID_SEGMENT_TYPES:
+        right_segment_type = str(row.get("right_segment_type", "")).strip()
+        if day_id == "" or right_segment_type == "":
+            raise ValueError("merged candidate rows must include non-blank day_id and right_segment_type")
+        if right_segment_type not in VALID_SEGMENT_TYPES:
             choices = ", ".join(sorted(VALID_SEGMENT_TYPES))
             raise ValueError(
-                f"merged candidate rows include unsupported segment_type {segment_type!r}; expected one of {choices}"
+                "merged candidate rows include unsupported right_segment_type "
+                f"{right_segment_type!r}; expected one of {choices}"
             )
-        segment_types_by_day.setdefault(day_id, set()).add(segment_type)
+        segment_types_by_day.setdefault(day_id, set()).add(right_segment_type)
 
     metadata_rows: list[dict[str, str]] = []
     for day_id in sorted(segment_types_by_day):
@@ -696,10 +697,10 @@ def _validate_candidate_row(row: dict[str, str]) -> tuple[str, str, str]:
     boundary = str(row.get("boundary", "")).strip().lower()
     if boundary == "":
         raise ValueError("merged candidate rows must include non-blank boundary values")
-    segment_type = str(row.get("segment_type", "")).strip()
-    if segment_type == "":
-        raise ValueError("merged candidate rows must include non-blank segment_type values")
-    return candidate_id, boundary, segment_type
+    right_segment_type = str(row.get("right_segment_type", "")).strip()
+    if right_segment_type == "":
+        raise ValueError("merged candidate rows must include non-blank right_segment_type values")
+    return candidate_id, boundary, right_segment_type
 
 
 def _validate_unique_candidate_ids(candidate_rows: Sequence[dict[str, str]]) -> None:
@@ -763,14 +764,14 @@ def _shuffle_strata(
 ) -> tuple[dict[tuple[str, str], list[str]], dict[str, str]]:
     random_generator = random.Random(split_config.seed)
     strata: dict[tuple[str, str], list[str]] = {}
-    segment_type_by_candidate_id: dict[str, str] = {}
+    right_segment_type_by_candidate_id: dict[str, str] = {}
     for row in candidate_rows:
-        candidate_id, boundary, segment_type = _validate_candidate_row(row)
-        strata.setdefault((boundary, segment_type), []).append(candidate_id)
-        segment_type_by_candidate_id[candidate_id] = segment_type
+        candidate_id, boundary, right_segment_type = _validate_candidate_row(row)
+        strata.setdefault((boundary, right_segment_type), []).append(candidate_id)
+        right_segment_type_by_candidate_id[candidate_id] = right_segment_type
     for stratum_key in sorted(strata):
         random_generator.shuffle(strata[stratum_key])
-    return strata, segment_type_by_candidate_id
+    return strata, right_segment_type_by_candidate_id
 
 
 def _reserve_required_heldout_assignments(
@@ -972,14 +973,14 @@ def _allocate_remaining_stratified_counts(
 def _has_required_heldout_coverage(
     assignments: dict[str, str],
     *,
-    segment_type_by_candidate_id: dict[str, str],
+    right_segment_type_by_candidate_id: dict[str, str],
     required_heldout_classes: Sequence[str],
 ) -> bool:
     if not required_heldout_classes:
         return True
     classes_by_split: dict[str, set[str]] = {}
     for candidate_id, split_name in assignments.items():
-        classes_by_split.setdefault(split_name, set()).add(segment_type_by_candidate_id[candidate_id])
+        classes_by_split.setdefault(split_name, set()).add(right_segment_type_by_candidate_id[candidate_id])
     for split_name in HELDOUT_SPLIT_NAMES:
         if not set(required_heldout_classes).issubset(classes_by_split.get(split_name, set())):
             return False
@@ -1021,7 +1022,7 @@ def _build_global_stratified_split_rows(
 ) -> tuple[list[dict[str, str]], str]:
     _validate_corpus_size(candidate_rows)
     _validate_unique_candidate_ids(candidate_rows)
-    strata, segment_type_by_candidate_id = _shuffle_strata(
+    strata, right_segment_type_by_candidate_id = _shuffle_strata(
         candidate_rows,
         split_config=split_config,
     )
@@ -1090,7 +1091,7 @@ def _build_global_stratified_split_rows(
 
     if not _has_required_heldout_coverage(
         assignments,
-        segment_type_by_candidate_id=segment_type_by_candidate_id,
+        right_segment_type_by_candidate_id=right_segment_type_by_candidate_id,
         required_heldout_classes=required_heldout_classes,
     ):
         if required_heldout_classes:
@@ -1249,15 +1250,20 @@ def _heuristic_coverage_summary_payload(
     return None
 
 
-def _build_segment_type_confusion_table(metrics_payload: dict[str, object]) -> Table:
-    confusion_payload = metrics_payload.get("segment_type_confusion_matrix")
+def _build_predictor_confusion_table(
+    metrics_payload: dict[str, object],
+    predictor_name: str,
+) -> Table:
+    confusion_key = f"{predictor_name}_confusion_matrix"
+    confusion_payload = metrics_payload.get(confusion_key)
     if not isinstance(confusion_payload, dict):
-        raise ValueError("evaluation metrics missing segment_type_confusion_matrix object")
+        raise ValueError(f"evaluation metrics missing {confusion_key} object")
     row_count = int(metrics_payload.get("row_count", 0) or 0)
+    predictor_spec = predictor_metric_spec(predictor_name)
 
     labels = sorted(VALID_SEGMENT_TYPES)
     table = Table(
-        title=f"Segment Type Confusion Matrix (test split, n={row_count})",
+        title=f"{predictor_spec.console_label} Confusion Matrix (test split, n={row_count})",
         expand=False,
     )
     table.add_column("truth\\pred", justify="left")
@@ -1290,15 +1296,28 @@ def _render_eval_metrics_summary(
     review_cost_metrics = metrics_payload.get("review_cost_metrics")
     if not isinstance(review_cost_metrics, dict):
         raise ValueError("evaluation metrics missing review_cost_metrics object")
-    segment_type_metric_spec = predictor_metric_spec("segment_type")
+    left_segment_type_metric_spec = predictor_metric_spec("left_segment_type")
+    right_segment_type_metric_spec = predictor_metric_spec("right_segment_type")
     boundary_metric_spec = predictor_metric_spec("boundary")
     train_row_count = _training_split_count(training_metadata, "train")
     validation_row_count = _training_split_count(training_metadata, "validation")
     test_row_count = _training_split_count(training_metadata, "test")
-    segment_type_primary_value = _primary_eval_metric_value(metrics_payload, "segment_type")
-    segment_type_accuracy = float(metrics_payload.get("segment_type_accuracy", 0.0) or 0.0)
-    segment_type_correct_count = int(metrics_payload.get("segment_type_correct_count", 0) or 0)
-    segment_type_incorrect_count = int(metrics_payload.get("segment_type_incorrect_count", 0) or 0)
+    left_segment_type_primary_value = _primary_eval_metric_value(metrics_payload, "left_segment_type")
+    left_segment_type_accuracy = float(metrics_payload.get("left_segment_type_accuracy", 0.0) or 0.0)
+    left_segment_type_correct_count = int(
+        metrics_payload.get("left_segment_type_correct_count", 0) or 0
+    )
+    left_segment_type_incorrect_count = int(
+        metrics_payload.get("left_segment_type_incorrect_count", 0) or 0
+    )
+    right_segment_type_primary_value = _primary_eval_metric_value(metrics_payload, "right_segment_type")
+    right_segment_type_accuracy = float(metrics_payload.get("right_segment_type_accuracy", 0.0) or 0.0)
+    right_segment_type_correct_count = int(
+        metrics_payload.get("right_segment_type_correct_count", 0) or 0
+    )
+    right_segment_type_incorrect_count = int(
+        metrics_payload.get("right_segment_type_incorrect_count", 0) or 0
+    )
     boundary_primary_value = _primary_eval_metric_value(metrics_payload, "boundary")
     boundary_correct_count = int(metrics_payload.get("boundary_correct_count", 0) or 0)
     boundary_incorrect_count = int(metrics_payload.get("boundary_incorrect_count", 0) or 0)
@@ -1320,10 +1339,16 @@ def _render_eval_metrics_summary(
     lines.extend(
         [
             (
-                "Segment type: "
-                f"{segment_type_metric_spec.validation_metric_name}={segment_type_primary_value:.4f}, "
-                f"accuracy={segment_type_accuracy:.4f}, "
-                f"correct={segment_type_correct_count}, incorrect={segment_type_incorrect_count}"
+                "Left segment type: "
+                f"{left_segment_type_metric_spec.validation_metric_name}={left_segment_type_primary_value:.4f}, "
+                f"accuracy={left_segment_type_accuracy:.4f}, "
+                f"correct={left_segment_type_correct_count}, incorrect={left_segment_type_incorrect_count}"
+            ),
+            (
+                "Right segment type: "
+                f"{right_segment_type_metric_spec.validation_metric_name}={right_segment_type_primary_value:.4f}, "
+                f"accuracy={right_segment_type_accuracy:.4f}, "
+                f"correct={right_segment_type_correct_count}, incorrect={right_segment_type_incorrect_count}"
             ),
             (
                 "Boundary: "
@@ -1337,8 +1362,17 @@ def _render_eval_metrics_summary(
     )
     return Group(
         *(Text(line, no_wrap=False, overflow="fold") for line in lines),
-        _build_segment_type_confusion_table(metrics_payload),
+        _build_predictor_confusion_table(metrics_payload, "left_segment_type"),
+        _build_predictor_confusion_table(metrics_payload, "right_segment_type"),
     )
+
+
+def render_final_summary(
+    *,
+    evaluation_metrics: dict[str, object],
+    training_metadata: dict[str, object] | None = None,
+) -> None:
+    console.print(_render_eval_metrics_summary(evaluation_metrics, training_metadata))
 
 
 def _run_training_and_evaluation(
@@ -1399,7 +1433,7 @@ def _run_training_and_evaluation(
     if not metrics_path.is_file():
         raise FileNotFoundError(f"Expected evaluation metrics artifact: {metrics_path}")
     metrics_payload = _load_json_object(metrics_path)
-    console.print(_render_eval_metrics_summary(metrics_payload, training_metadata))
+    render_final_summary(evaluation_metrics=metrics_payload, training_metadata=training_metadata)
     return metrics_payload, training_metadata
 
 

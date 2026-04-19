@@ -9,6 +9,7 @@ from rich.console import Console
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
+import run_ml_boundary_pipeline
 from build_ml_boundary_candidate_dataset import candidate_row_headers
 from lib.ml_boundary_dataset import canonical_candidate_id
 from lib.workspace_dir import resolve_workspace_dir
@@ -51,7 +52,6 @@ def _candidate_row(
             "right_segment_id": f"{day_id}-seg-right",
             "left_segment_type": "performance",
             "right_segment_type": segment_type,
-            "segment_type": segment_type,
             "boundary": boundary,
             "candidate_rule_name": "gap_threshold",
             "candidate_rule_version": "gap-v1",
@@ -161,7 +161,7 @@ def _segment_types_by_split(
     split_rows: list[dict[str, str]],
 ) -> dict[str, set[str]]:
     segment_type_by_candidate_id = {
-        row["candidate_id"]: row["segment_type"]
+        row["candidate_id"]: row["right_segment_type"]
         for row in candidate_rows
     }
     grouped: dict[str, set[str]] = {}
@@ -189,7 +189,7 @@ def _full_strata_by_split(
     split_rows: list[dict[str, str]],
 ) -> dict[str, set[tuple[str, str]]]:
     stratum_by_candidate_id = {
-        row["candidate_id"]: (row["boundary"], row["segment_type"])
+        row["candidate_id"]: (row["boundary"], row["right_segment_type"])
         for row in candidate_rows
     }
     grouped: dict[str, set[tuple[str, str]]] = {}
@@ -198,15 +198,165 @@ def _full_strata_by_split(
     return grouped
 
 
+def _run_pipeline_and_read_summary(tmp_path: Path, monkeypatch) -> dict[str, object]:
+    day_dir = tmp_path / "20250325"
+    workspace_dir = tmp_path / "20250325DWC"
+    day_dir.mkdir(parents=True)
+    workspace_dir.mkdir(parents=True)
+    (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        command_text = " ".join(command_values)
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            rows = [
+                _candidate_row(day_id=day_dir.name, segment_type="performance", boundary="0", offset=1),
+                _candidate_row(day_id=day_dir.name, segment_type="ceremony", boundary="1", offset=2),
+                _candidate_row(day_id=day_dir.name, segment_type="warmup", boundary="0", offset=3),
+            ]
+            _write_day_candidate_artifacts(workspace_dir, rows)
+        if "train_ml_boundary_verifier.py" in command_text:
+            script_index = command_values.index("scripts/pipeline/train_ml_boundary_verifier.py")
+            corpus_dir = Path(command_values[script_index + 1])
+            model_run_id = command_values[command_values.index("--model-run-id") + 1]
+            model_dir = corpus_dir / "ml_boundary_models" / model_run_id
+            model_dir.mkdir(parents=True, exist_ok=True)
+            (model_dir / "training_metadata.json").write_text(
+                json.dumps(
+                    {
+                        "split_counts_by_name": {"train": 1, "validation": 1, "test": 1},
+                        "heuristic_scores_source_available": True,
+                        "total_heuristic_pair_count": 12,
+                        "missing_heuristic_pair_count": 2,
+                        "total_heuristic_candidate_count": 3,
+                        "missing_heuristic_candidate_count": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        if "evaluate_ml_boundary_verifier.py" in command_text:
+            script_index = command_values.index("scripts/pipeline/evaluate_ml_boundary_verifier.py")
+            corpus_dir = Path(command_values[script_index + 1])
+            model_run_id = command_values[command_values.index("--model-run-id") + 1]
+            eval_dir = corpus_dir / "ml_boundary_eval" / model_run_id
+            eval_dir.mkdir(parents=True, exist_ok=True)
+            (eval_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "left_segment_type_macro_f1": 0.61,
+                        "left_segment_type_accuracy": 0.71,
+                        "left_segment_type_correct_count": 12,
+                        "left_segment_type_incorrect_count": 5,
+                        "left_segment_type_confusion_matrix": {
+                            "ceremony": {"ceremony": 1, "performance": 0, "warmup": 0},
+                            "performance": {"ceremony": 1, "performance": 5, "warmup": 0},
+                            "warmup": {"ceremony": 0, "performance": 1, "warmup": 1},
+                        },
+                        "right_segment_type_macro_f1": 0.72,
+                        "right_segment_type_accuracy": 0.8,
+                        "right_segment_type_correct_count": 13,
+                        "right_segment_type_incorrect_count": 4,
+                        "right_segment_type_confusion_matrix": {
+                            "ceremony": {"ceremony": 1, "performance": 0, "warmup": 0},
+                            "performance": {"ceremony": 0, "performance": 6, "warmup": 0},
+                            "warmup": {"ceremony": 0, "performance": 1, "warmup": 1},
+                        },
+                        "boundary_f1": 0.85,
+                        "boundary_correct_count": 15,
+                        "boundary_incorrect_count": 2,
+                        "boundary_true_positive_count": 6,
+                        "boundary_false_positive_count": 1,
+                        "boundary_false_negative_count": 1,
+                        "boundary_true_negative_count": 9,
+                        "review_cost_metrics": {
+                            "merge_run_count": 1,
+                            "split_run_count": 2,
+                            "estimated_correction_actions": 3,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+    assert main(
+        [str(day_dir), "--model-run-id", "run-001", "--split-strategy", "global_random"]
+    ) == 0
+    summary_path = (workspace_dir / "ml_boundary_corpus") / "ml_boundary_pipeline_summary.json"
+    return json.loads(summary_path.read_text(encoding="utf-8"))
+
+
+def test_pipeline_summary_uses_left_and_right_metric_keys(tmp_path: Path, monkeypatch) -> None:
+    summary = _run_pipeline_and_read_summary(tmp_path, monkeypatch)
+    metrics = summary["evaluation_metrics"]
+    assert "left_segment_type_macro_f1" in metrics
+    assert "right_segment_type_macro_f1" in metrics
+    assert "segment_type_macro_f1" not in metrics
+
+
+def test_console_summary_renders_all_three_predictors(capsys) -> None:
+    run_ml_boundary_pipeline.render_final_summary(
+        evaluation_metrics={
+            "row_count": 17,
+            "left_segment_type_macro_f1": 0.61,
+            "left_segment_type_accuracy": 0.71,
+            "left_segment_type_correct_count": 12,
+            "left_segment_type_incorrect_count": 5,
+            "left_segment_type_confusion_matrix": {
+                "ceremony": {"ceremony": 1, "performance": 0, "warmup": 0},
+                "performance": {"ceremony": 1, "performance": 5, "warmup": 0},
+                "warmup": {"ceremony": 0, "performance": 1, "warmup": 1},
+            },
+            "right_segment_type_macro_f1": 0.72,
+            "right_segment_type_accuracy": 0.8,
+            "right_segment_type_correct_count": 13,
+            "right_segment_type_incorrect_count": 4,
+            "right_segment_type_confusion_matrix": {
+                "ceremony": {"ceremony": 1, "performance": 0, "warmup": 0},
+                "performance": {"ceremony": 0, "performance": 6, "warmup": 0},
+                "warmup": {"ceremony": 0, "performance": 1, "warmup": 1},
+            },
+            "boundary_f1": 0.85,
+            "boundary_correct_count": 15,
+            "boundary_incorrect_count": 2,
+            "boundary_true_positive_count": 6,
+            "boundary_false_positive_count": 1,
+            "boundary_false_negative_count": 1,
+            "boundary_true_negative_count": 9,
+            "review_cost_metrics": {
+                "merge_run_count": 1,
+                "split_run_count": 2,
+                "estimated_correction_actions": 3,
+            },
+        },
+        training_metadata={
+            "split_counts_by_name": {"train": 6, "validation": 5, "test": 17},
+        },
+    )
+    text = capsys.readouterr().out
+    assert "Left segment type" in text
+    assert "Right segment type" in text
+    assert "Boundary" in text
+
+
 def test_render_eval_metrics_summary_uses_human_readable_precision() -> None:
     rendered = _render_eval_metrics_summary(
         {
             "row_count": 46,
-            "segment_type_macro_f1": 0.7777777777777778,
-            "segment_type_accuracy": 0.8478260869565217,
-            "segment_type_correct_count": 39,
-            "segment_type_incorrect_count": 7,
-            "segment_type_confusion_matrix": {
+            "left_segment_type_macro_f1": 0.6666666666666666,
+            "left_segment_type_accuracy": 0.782608695652174,
+            "left_segment_type_correct_count": 36,
+            "left_segment_type_incorrect_count": 10,
+            "left_segment_type_confusion_matrix": {
+                "ceremony": {"ceremony": 3, "performance": 3, "warmup": 1},
+                "performance": {"ceremony": 3, "performance": 31, "warmup": 4},
+                "warmup": {"ceremony": 0, "performance": 2, "warmup": 0},
+            },
+            "right_segment_type_macro_f1": 0.7777777777777778,
+            "right_segment_type_accuracy": 0.8478260869565217,
+            "right_segment_type_correct_count": 39,
+            "right_segment_type_incorrect_count": 7,
+            "right_segment_type_confusion_matrix": {
                 "ceremony": {"ceremony": 4, "performance": 2, "warmup": 1},
                 "performance": {"ceremony": 3, "performance": 33, "warmup": 2},
                 "warmup": {"ceremony": 0, "performance": 1, "warmup": 0},
@@ -243,10 +393,12 @@ def test_render_eval_metrics_summary_uses_human_readable_precision() -> None:
     assert "photo_boundary_scores.csv not found" in output
     assert "expected_pairs=184" in output
     assert "expected_candidates=46" in output
-    assert "Segment type: macro_f1=0.7778, accuracy=0.8478, correct=39, incorrect=7" in output
+    assert "Left segment type: macro_f1=0.6667, accuracy=0.7826, correct=36, incorrect=10" in output
+    assert "Right segment type: macro_f1=0.7778, accuracy=0.8478, correct=39, incorrect=7" in output
     assert "Boundary: f1=0.8163, correct=37, incorrect=9, tp=20, fp=3, fn=6, tn=17" in output
     assert "Review cost: merge_runs=4, split_runs=5, estimated_actions=9" in output
-    assert "Segment Type Confusion Matrix (test split, n=46)" in output
+    assert "Left segment type Confusion Matrix" in output
+    assert "Right segment type Confusion Matrix" in output
     assert "truth\\pred" in output
     assert "performance" in output
     assert "ceremony" in output
@@ -309,11 +461,20 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
             (eval_dir / "metrics.json").write_text(
                 json.dumps(
                     {
-                        "segment_type_macro_f1": 0.73,
-                        "segment_type_accuracy": 0.81,
-                        "segment_type_correct_count": 7,
-                        "segment_type_incorrect_count": 2,
-                        "segment_type_confusion_matrix": {
+                        "left_segment_type_macro_f1": 0.69,
+                        "left_segment_type_accuracy": 0.77,
+                        "left_segment_type_correct_count": 6,
+                        "left_segment_type_incorrect_count": 3,
+                        "left_segment_type_confusion_matrix": {
+                            "ceremony": {"ceremony": 1, "performance": 0, "warmup": 0},
+                            "performance": {"ceremony": 1, "performance": 4, "warmup": 1},
+                            "warmup": {"ceremony": 0, "performance": 1, "warmup": 1},
+                        },
+                        "right_segment_type_macro_f1": 0.73,
+                        "right_segment_type_accuracy": 0.81,
+                        "right_segment_type_correct_count": 7,
+                        "right_segment_type_incorrect_count": 2,
+                        "right_segment_type_confusion_matrix": {
                             "ceremony": {"ceremony": 1, "performance": 0, "warmup": 0},
                             "performance": {"ceremony": 1, "performance": 5, "warmup": 0},
                             "warmup": {"ceremony": 0, "performance": 1, "warmup": 1},
@@ -373,8 +534,9 @@ def test_main_runs_end_to_end_pipeline_with_vocatio_workspaces(tmp_path: Path, m
     assert summary_payload["candidate_rule_params_json"] == '{"gap_threshold_seconds":20.0,"window_radius":2}'
     assert summary_payload["model_dir"].endswith("ml_boundary_models/run-010")
     assert summary_payload["eval_dir"].endswith("ml_boundary_eval/run-010")
-    assert summary_payload["evaluation_metrics"]["segment_type_macro_f1"] == 0.73
-    assert summary_payload["evaluation_metrics"]["segment_type_accuracy"] == 0.81
+    assert summary_payload["evaluation_metrics"]["left_segment_type_macro_f1"] == 0.69
+    assert summary_payload["evaluation_metrics"]["right_segment_type_macro_f1"] == 0.73
+    assert "segment_type_macro_f1" not in summary_payload["evaluation_metrics"]
     assert summary_payload["evaluation_metrics"]["boundary_f1"] == 0.67
     assert summary_payload["evaluation_metrics"]["review_cost_metrics"]["estimated_correction_actions"] == 9
     assert summary_payload["heuristic_boundary_coverage"] == {
@@ -449,11 +611,20 @@ def test_main_forwards_training_options_and_records_pipeline_summary_fields(
             (eval_dir / "metrics.json").write_text(
                 json.dumps(
                     {
-                        "segment_type_macro_f1": 0.73,
-                        "segment_type_accuracy": 0.81,
-                        "segment_type_correct_count": 2,
-                        "segment_type_incorrect_count": 1,
-                        "segment_type_confusion_matrix": {
+                        "left_segment_type_macro_f1": 0.71,
+                        "left_segment_type_accuracy": 0.8,
+                        "left_segment_type_correct_count": 2,
+                        "left_segment_type_incorrect_count": 1,
+                        "left_segment_type_confusion_matrix": {
+                            "ceremony": {"ceremony": 1, "performance": 0, "warmup": 0},
+                            "performance": {"ceremony": 0, "performance": 1, "warmup": 0},
+                            "warmup": {"ceremony": 0, "performance": 0, "warmup": 1},
+                        },
+                        "right_segment_type_macro_f1": 0.73,
+                        "right_segment_type_accuracy": 0.81,
+                        "right_segment_type_correct_count": 2,
+                        "right_segment_type_incorrect_count": 1,
+                        "right_segment_type_confusion_matrix": {
                             "ceremony": {"ceremony": 1, "performance": 0, "warmup": 0},
                             "performance": {"ceremony": 0, "performance": 1, "warmup": 0},
                             "warmup": {"ceremony": 0, "performance": 0, "warmup": 1},
@@ -702,11 +873,20 @@ def test_render_eval_metrics_summary_labels_training_corpus_heuristics_when_avai
     rendered = _render_eval_metrics_summary(
         {
             "row_count": 10,
-            "segment_type_macro_f1": 0.5,
-            "segment_type_accuracy": 0.7,
-            "segment_type_correct_count": 7,
-            "segment_type_incorrect_count": 3,
-            "segment_type_confusion_matrix": {
+            "left_segment_type_macro_f1": 0.46,
+            "left_segment_type_accuracy": 0.6,
+            "left_segment_type_correct_count": 6,
+            "left_segment_type_incorrect_count": 4,
+            "left_segment_type_confusion_matrix": {
+                "ceremony": {"ceremony": 1, "performance": 1, "warmup": 0},
+                "performance": {"ceremony": 1, "performance": 4, "warmup": 1},
+                "warmup": {"ceremony": 0, "performance": 1, "warmup": 1},
+            },
+            "right_segment_type_macro_f1": 0.5,
+            "right_segment_type_accuracy": 0.7,
+            "right_segment_type_correct_count": 7,
+            "right_segment_type_incorrect_count": 3,
+            "right_segment_type_confusion_matrix": {
                 "ceremony": {"ceremony": 1, "performance": 1, "warmup": 0},
                 "performance": {"ceremony": 1, "performance": 5, "warmup": 0},
                 "warmup": {"ceremony": 0, "performance": 1, "warmup": 1},
@@ -888,10 +1068,20 @@ def test_main_single_day_global_random_is_allowed(tmp_path: Path, monkeypatch) -
             (eval_dir / "metrics.json").write_text(
                 json.dumps(
                     {
-                        "segment_type_accuracy": 0.75,
-                        "segment_type_correct_count": 15,
-                        "segment_type_incorrect_count": 5,
-                        "segment_type_confusion_matrix": {
+                        "left_segment_type_macro_f1": 0.7,
+                        "left_segment_type_accuracy": 0.75,
+                        "left_segment_type_correct_count": 15,
+                        "left_segment_type_incorrect_count": 5,
+                        "left_segment_type_confusion_matrix": {
+                            "ceremony": {"ceremony": 0, "performance": 0, "warmup": 0},
+                            "performance": {"ceremony": 2, "performance": 13, "warmup": 3},
+                            "warmup": {"ceremony": 0, "performance": 0, "warmup": 2},
+                        },
+                        "right_segment_type_macro_f1": 0.72,
+                        "right_segment_type_accuracy": 0.8,
+                        "right_segment_type_correct_count": 16,
+                        "right_segment_type_incorrect_count": 4,
+                        "right_segment_type_confusion_matrix": {
                             "ceremony": {"ceremony": 0, "performance": 0, "warmup": 0},
                             "performance": {"ceremony": 2, "performance": 13, "warmup": 3},
                             "warmup": {"ceremony": 0, "performance": 0, "warmup": 2},
