@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -190,12 +191,38 @@ models:
                 ):
                     manual_vlm_models.load_manual_vlm_models(path)
 
+    def test_load_models_rejects_non_integer_yaml_values_for_int_fields(self) -> None:
+        cases = (
+            ("VLM_CONTEXT_TOKENS", True),
+            ("VLM_CONTEXT_TOKENS", False),
+            ("VLM_CONTEXT_TOKENS", 1.0),
+            ("VLM_MAX_OUTPUT_TOKENS", 1.5),
+        )
+        for field_name, value in cases:
+            with self.subTest(field_name=field_name, value=value):
+                model = self.build_model()
+                model[field_name] = value
+                path = self.write_models([model])
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f'{field_name} must be a positive integer in preset "Preset A"',
+                ):
+                    manual_vlm_models.load_manual_vlm_models(path)
+
     def test_compute_models_md5_changes_with_file_content(self) -> None:
         path = self.write_yaml("models: []\n")
         before = manual_vlm_models.compute_manual_vlm_models_md5(path)
         path.write_text("models:\n  - VLM_NAME: \"Changed\"\n", encoding="utf-8")
         after = manual_vlm_models.compute_manual_vlm_models_md5(path)
         self.assertNotEqual(before, after)
+
+    def test_load_models_md5_matches_exact_file_bytes(self) -> None:
+        path = self.write_models([self.build_model()])
+        expected = hashlib.md5(path.read_bytes()).hexdigest()
+
+        loaded = manual_vlm_models.load_manual_vlm_models(path)
+
+        self.assertEqual(loaded.md5_hex, expected)
 
 
 if __name__ == "__main__":

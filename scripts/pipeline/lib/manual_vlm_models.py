@@ -45,12 +45,23 @@ def _validate_non_empty_string(value: Any, field_name: str, preset_name: str) ->
 
 
 def _validate_positive_int(value: Any, field_name: str, preset_name: str) -> int:
-    try:
-        normalized = int(value)
-    except (TypeError, ValueError):
+    if isinstance(value, bool):
         raise ValueError(
             f'{field_name} must be a positive integer in preset "{preset_name}"'
-        ) from None
+        )
+    if isinstance(value, int):
+        normalized = value
+    elif isinstance(value, str):
+        try:
+            normalized = int(value.strip())
+        except ValueError:
+            raise ValueError(
+                f'{field_name} must be a positive integer in preset "{preset_name}"'
+            ) from None
+    else:
+        raise ValueError(
+            f'{field_name} must be a positive integer in preset "{preset_name}"'
+        )
     if normalized <= 0:
         raise ValueError(f'{field_name} must be > 0 in preset "{preset_name}"')
     return normalized
