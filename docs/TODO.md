@@ -175,3 +175,4 @@ result = whisperx.align(
 - Keep `boundary` and `right_segment_type` as separate predictors; do not try to force a fake multilabel setup in AutoGluon.
 - Revisit how `left_segment_type` and `right_segment_type` should be exposed to the downstream VLM prompt after the extra model exists.
 - For manual single-gap prediction flows, `VLM_OVERLAP` likely has no value; either remove it from that path or document the exact scenario where it still helps.
+- Consider replacing manual-gap `overlap` with a more direct symmetric-context parameter, for example `gap_side_span`, where `1 -> window 2`, `2 -> window 4`, `3 -> window 6`, and the cut is always centered between `L` and `P`.
