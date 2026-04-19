@@ -645,6 +645,37 @@ def build_candidate_window_start_indexes(
     ]
 
 
+def build_manual_vlm_window_rows(
+    joined_rows: Sequence[Mapping[str, str]],
+    *,
+    anchor_pair: Mapping[str, Any],
+    window_radius: int,
+) -> List[Mapping[str, str]]:
+    left_row_index = int(anchor_pair.get("left_row_index", -1))
+    right_row_index = int(anchor_pair.get("right_row_index", -1))
+    if left_row_index < 0 or right_row_index < 0:
+        raise ValueError("manual VLM anchor rows are unavailable")
+    if left_row_index >= right_row_index:
+        raise ValueError("manual VLM anchors must be ordered by joined rows")
+    if right_row_index >= len(joined_rows):
+        raise ValueError("manual VLM anchor rows are outside the joined manifest")
+    context_count = window_radius - 1
+    if left_row_index < context_count or right_row_index + context_count >= len(joined_rows):
+        raise ValueError(
+            "manual VLM window requires "
+            f"{context_count} rows before the left anchor and {context_count} rows after the right anchor"
+        )
+    window_rows = (
+        list(joined_rows[left_row_index - context_count : left_row_index])
+        + [joined_rows[left_row_index], joined_rows[right_row_index]]
+        + list(joined_rows[right_row_index + 1 : right_row_index + context_count + 1])
+    )
+    expected_window_size = window_radius_to_window_size(window_radius)
+    if len(window_rows) != expected_window_size:
+        raise ValueError(f"manual VLM window must contain exactly {expected_window_size} rows")
+    return [dict(row) for row in window_rows]
+
+
 def rounded_seconds(delta_ms: int) -> int:
     return int(round(delta_ms / 1000.0))
 
@@ -1089,6 +1120,33 @@ def build_ml_hint_lines(
     ]
 
 
+def build_ml_hint_lines_for_window_rows(
+    *,
+    day_id: str,
+    window_rows: Sequence[Mapping[str, str]],
+    boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
+    photo_pre_model_dir: Optional[Path],
+    ml_hint_context: Optional[MlHintContext],
+    runtime_window_radius: int,
+) -> List[str]:
+    if ml_hint_context is None:
+        return build_ml_hint_lines(None)
+    expected_window_size = window_radius_to_window_size(runtime_window_radius)
+    if len(window_rows) != expected_window_size:
+        return build_ml_hint_lines(None)
+    prediction = predict_ml_hint_for_candidate(
+        ml_hint_context=ml_hint_context,
+        candidate_row=_build_ml_candidate_row(
+            list(window_rows),
+            day_id=day_id,
+            window_radius=runtime_window_radius,
+        ),
+        boundary_rows_by_pair=boundary_rows_by_pair,
+        photo_pre_model_dir=photo_pre_model_dir,
+    )
+    return build_ml_hint_lines(prediction)
+
+
 def build_ml_hint_lines_for_candidate(
     *,
     day_id: str,
@@ -1108,17 +1166,14 @@ def build_ml_hint_lines_for_candidate(
     )
     if candidate_rows is None:
         return build_ml_hint_lines(None)
-    prediction = predict_ml_hint_for_candidate(
-        ml_hint_context=ml_hint_context,
-        candidate_row=_build_ml_candidate_row(
-            candidate_rows,
-            day_id=day_id,
-            window_radius=runtime_window_radius,
-        ),
+    return build_ml_hint_lines_for_window_rows(
+        day_id=day_id,
+        window_rows=candidate_rows,
         boundary_rows_by_pair=boundary_rows_by_pair,
         photo_pre_model_dir=photo_pre_model_dir,
+        ml_hint_context=ml_hint_context,
+        runtime_window_radius=runtime_window_radius,
     )
-    return build_ml_hint_lines(prediction)
 
 
 def load_extra_instructions(inline_value: str, file_value: Optional[str]) -> str:
@@ -1985,6 +2040,163 @@ def build_batch_result_message(
     )
 
 
+def run_vlm_window_analysis(
+    *,
+    window_rows: Sequence[Mapping[str, str]],
+    ml_hint_lines: Sequence[str],
+    provider: str,
+    base_url: str,
+    model: str,
+    timeout_seconds: float,
+    keep_alive: str,
+    temperature: float,
+    context_tokens: Optional[int],
+    max_output_tokens: Optional[int],
+    reasoning_level: str,
+    extra_instructions: str,
+    response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
+    json_validation_mode: str = DEFAULT_JSON_VALIDATION_MODE,
+    debug_dir: Optional[Path] = None,
+    debug_run_id: str = "",
+    debug_batch_index: int = 1,
+) -> Dict[str, Any]:
+    window_size = len(window_rows)
+    response_schema = build_response_schema(window_size) if response_schema_mode == "on" else None
+    prompt = build_user_prompt(
+        window_size=window_size,
+        ml_hint_lines=ml_hint_lines,
+        extra_instructions=extra_instructions,
+        response_schema_mode=response_schema_mode,
+    )
+    request = build_vlm_request(
+        provider=provider,
+        base_url=base_url,
+        response_schema_mode=response_schema_mode,
+        prompt=prompt,
+        image_paths=[Path(str(row["image_path"])) for row in window_rows],
+        model=model,
+        timeout_seconds=timeout_seconds,
+        keep_alive=keep_alive,
+        temperature=temperature,
+        context_tokens=context_tokens,
+        max_output_tokens=max_output_tokens,
+        reasoning_level=reasoning_level,
+        response_schema=response_schema,
+    )
+    request_payload = build_provider_request_payload(request) if debug_dir is not None else None
+    try:
+        response = run_vlm_request(request)
+    except Exception as error:
+        if debug_dir is not None:
+            dump_debug_artifacts(
+                debug_dir=debug_dir,
+                run_id=debug_run_id,
+                batch_index=debug_batch_index,
+                prompt=prompt,
+                request_payload=request_payload or {},
+                response_payload=None,
+                error_text=str(error),
+            )
+        raise
+    if debug_dir is not None:
+        dump_debug_artifacts(
+            debug_dir=debug_dir,
+            run_id=debug_run_id,
+            batch_index=debug_batch_index,
+            prompt=prompt,
+            request_payload=request_payload or {},
+            response_payload=response.raw_response,
+            error_text=None,
+        )
+    raw_response = response.text
+    parsed_response = parse_model_response(
+        raw_response,
+        window_size=window_size,
+        json_validation_mode=json_validation_mode,
+    )
+    return {
+        "prompt": prompt,
+        "request": request,
+        "raw_response": raw_response,
+        "parsed_response": parsed_response,
+    }
+
+
+def build_manual_vlm_debug_run_id(anchor_pair: Mapping[str, Any]) -> str:
+    payload = {
+        "left_relative_path": str(anchor_pair.get("left_relative_path", "") or "").strip(),
+        "right_relative_path": str(anchor_pair.get("right_relative_path", "") or "").strip(),
+        "left_row_index": int(anchor_pair.get("left_row_index", -1)),
+        "right_row_index": int(anchor_pair.get("right_row_index", -1)),
+    }
+    digest = hashlib.md5(
+        json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:12]
+    return f"manual_{payload['left_row_index']}_{payload['right_row_index']}_{digest}"
+
+
+def run_manual_vlm_anchor_analysis(
+    *,
+    day_id: str,
+    joined_rows: Sequence[Mapping[str, str]],
+    anchor_pair: Mapping[str, Any],
+    window_radius: int,
+    boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
+    photo_pre_model_dir: Optional[Path],
+    ml_hint_context: Optional[MlHintContext],
+    provider: str,
+    base_url: str,
+    model: str,
+    timeout_seconds: float,
+    keep_alive: str,
+    temperature: float,
+    context_tokens: Optional[int],
+    max_output_tokens: Optional[int],
+    reasoning_level: str,
+    extra_instructions: str = "",
+    response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
+    json_validation_mode: str = DEFAULT_JSON_VALIDATION_MODE,
+) -> Dict[str, Any]:
+    window_rows = build_manual_vlm_window_rows(
+        joined_rows,
+        anchor_pair=anchor_pair,
+        window_radius=window_radius,
+    )
+    ml_hint_lines = build_ml_hint_lines_for_window_rows(
+        day_id=day_id,
+        window_rows=window_rows,
+        boundary_rows_by_pair=boundary_rows_by_pair,
+        photo_pre_model_dir=photo_pre_model_dir,
+        ml_hint_context=ml_hint_context,
+        runtime_window_radius=window_radius,
+    )
+    analysis = run_vlm_window_analysis(
+        window_rows=window_rows,
+        ml_hint_lines=ml_hint_lines,
+        provider=provider,
+        base_url=base_url,
+        model=model,
+        timeout_seconds=timeout_seconds,
+        keep_alive=keep_alive,
+        temperature=temperature,
+        context_tokens=context_tokens,
+        max_output_tokens=max_output_tokens,
+        reasoning_level=reasoning_level,
+        extra_instructions=extra_instructions,
+        response_schema_mode=response_schema_mode,
+        json_validation_mode=json_validation_mode,
+        debug_dir=Path("/tmp"),
+        debug_run_id=build_manual_vlm_debug_run_id(anchor_pair),
+        debug_batch_index=1,
+    )
+    analysis["window_rows"] = [dict(row) for row in window_rows]
+    analysis["window_relative_paths"] = [str(row["relative_path"]) for row in window_rows]
+    analysis["ml_hint_lines"] = list(ml_hint_lines)
+    analysis["left_anchor"] = str(anchor_pair.get("left_relative_path", "") or "").strip()
+    analysis["right_anchor"] = str(anchor_pair.get("right_relative_path", "") or "").strip()
+    return analysis
+
+
 def probe_vlm_photo_boundaries(
     *,
     day_id: str,
@@ -2097,7 +2309,6 @@ def probe_vlm_photo_boundaries(
     cut_count = sum(1 for row in existing_result_rows if str(row.get("decision", "") or "").startswith("cut_after_"))
     no_cut_count = sum(1 for row in existing_result_rows if str(row.get("decision", "") or "") == "no_cut")
     invalid_count = sum(1 for row in existing_result_rows if str(row.get("response_status", "") or "") != "ok")
-    response_schema = build_response_schema(window_size) if str(args_payload.get("response_schema_mode", "off")) == "on" else None
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -2126,18 +2337,11 @@ def probe_vlm_photo_boundaries(
                 ml_hint_context=ml_hint_context,
                 runtime_window_radius=window_radius,
             )
-            prompt = build_user_prompt(
-                window_size=window_size,
+            analysis = run_vlm_window_analysis(
+                window_rows=window_rows,
                 ml_hint_lines=ml_hint_lines,
-                extra_instructions=extra_instructions,
-                response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
-            )
-            request = build_vlm_request(
                 provider=provider,
                 base_url=ollama_base_url,
-                response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
-                prompt=prompt,
-                image_paths=[Path(str(row["image_path"])) for row in window_rows],
                 model=model,
                 timeout_seconds=timeout_seconds,
                 keep_alive=ollama_keep_alive,
@@ -2145,39 +2349,15 @@ def probe_vlm_photo_boundaries(
                 context_tokens=ollama_num_ctx,
                 max_output_tokens=ollama_num_predict,
                 reasoning_level=ollama_think,
-                response_schema=response_schema,
-            )
-            request_payload = build_provider_request_payload(request) if dump_debug_dir is not None else None
-            try:
-                response = run_vlm_request(request)
-            except Exception as error:
-                if dump_debug_dir is not None:
-                    dump_debug_artifacts(
-                        debug_dir=dump_debug_dir,
-                        run_id=run_id,
-                        batch_index=batch_index,
-                        prompt=prompt,
-                        request_payload=request_payload or {},
-                        response_payload=None,
-                        error_text=str(error),
-                    )
-                raise
-            if dump_debug_dir is not None:
-                dump_debug_artifacts(
-                    debug_dir=dump_debug_dir,
-                    run_id=run_id,
-                    batch_index=batch_index,
-                    prompt=prompt,
-                    request_payload=request_payload or {},
-                    response_payload=response.raw_response,
-                    error_text=None,
-                )
-            raw_response = response.text
-            parsed_response = parse_model_response(
-                raw_response,
-                window_size=window_size,
+                extra_instructions=extra_instructions,
+                response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
                 json_validation_mode=json_validation_mode,
+                debug_dir=dump_debug_dir,
+                debug_run_id=run_id,
+                debug_batch_index=batch_index,
             )
+            raw_response = str(analysis["raw_response"])
+            parsed_response = analysis["parsed_response"]
             result_row = build_result_row(
                 generated_at=generated_at,
                 run_id=run_id,

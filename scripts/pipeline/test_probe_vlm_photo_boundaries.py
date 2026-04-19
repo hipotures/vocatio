@@ -840,6 +840,165 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             ["ML hints are unavailable for this window."],
         )
 
+    def test_build_manual_vlm_window_rows_centers_anchors_and_ignores_interior_rows(self):
+        joined_rows = [
+            {"relative_path": f"cam/{name}.jpg", "start_epoch_ms": str(index * 1000)}
+            for index, name in enumerate(("a", "b", "c", "d", "e", "f", "g", "h"), start=1)
+        ]
+        rows = probe.build_manual_vlm_window_rows(
+            joined_rows,
+            anchor_pair={
+                "left_row_index": 2,
+                "right_row_index": 5,
+            },
+            window_radius=3,
+        )
+        self.assertEqual(
+            [str(row["relative_path"]) for row in rows],
+            [
+                "cam/a.jpg",
+                "cam/b.jpg",
+                "cam/c.jpg",
+                "cam/f.jpg",
+                "cam/g.jpg",
+                "cam/h.jpg",
+            ],
+        )
+
+    def test_build_manual_vlm_window_rows_requires_context_on_both_sides(self):
+        joined_rows = [
+            {"relative_path": f"cam/{name}.jpg", "start_epoch_ms": str(index * 1000)}
+            for index, name in enumerate(("a", "b", "c", "d", "e", "f"), start=1)
+        ]
+        with self.assertRaisesRegex(ValueError, "manual VLM window requires"):
+            probe.build_manual_vlm_window_rows(
+                joined_rows,
+                anchor_pair={
+                    "left_row_index": 1,
+                    "right_row_index": 4,
+                },
+                window_radius=3,
+            )
+
+    def test_build_ml_hint_lines_for_window_rows_uses_anchor_centered_manual_rows(self):
+        window_rows = [
+            {
+                "photo_id": f"cam/{name}.jpg",
+                "relative_path": f"cam/{name}.jpg",
+                "start_epoch_ms": str(index * 1000),
+                "thumb_path": f"/tmp/{name}.jpg",
+            }
+            for index, name in enumerate(("a", "b", "c", "f", "g", "h"), start=1)
+        ]
+        captured: dict[str, object] = {}
+
+        def fake_predict(**kwargs):
+            captured["candidate_row"] = kwargs["candidate_row"]
+            return probe.MlHintPrediction(
+                boundary_prediction=True,
+                boundary_confidence=0.82,
+                left_segment_type_prediction="performance",
+                left_segment_type_confidence=0.74,
+                right_segment_type_prediction="ceremony",
+                right_segment_type_confidence=0.67,
+            )
+
+        with mock.patch.object(probe, "predict_ml_hint_for_candidate", side_effect=fake_predict):
+            lines = probe.build_ml_hint_lines_for_window_rows(
+                day_id="20260323",
+                window_rows=window_rows,
+                boundary_rows_by_pair={},
+                photo_pre_model_dir=None,
+                ml_hint_context=mock.Mock(window_radius=3),
+                runtime_window_radius=3,
+            )
+
+        candidate_row = captured["candidate_row"]
+        assert isinstance(candidate_row, dict)
+        self.assertEqual(candidate_row["center_left_photo_id"], "cam/c.jpg")
+        self.assertEqual(candidate_row["center_right_photo_id"], "cam/f.jpg")
+        self.assertEqual(
+            lines,
+            [
+                "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
+                "ML hint for the left side of the candidate gap: likely dance (confidence 0.74).",
+                "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.67).",
+            ],
+        )
+
+    def test_run_manual_vlm_anchor_analysis_uses_tmp_debug_dump_and_manual_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            joined_rows = []
+            for index, name in enumerate(("a", "b", "c", "d", "e", "f", "g", "h"), start=1):
+                image_path = Path(tmp) / f"{name}.jpg"
+                image_path.write_bytes(name.encode("utf-8"))
+                joined_rows.append(
+                    {
+                        "relative_path": f"cam/{name}.jpg",
+                        "filename": f"{name}.jpg",
+                        "image_path": str(image_path),
+                        "start_epoch_ms": str(index * 1000),
+                    }
+                )
+
+            captured_request: dict[str, object] = {}
+
+            def fake_run(request):
+                captured_request["request"] = request
+                return mock.Mock(
+                    text=(
+                        '{"boundary_after_frame":"frame_03","left_segment_type":"dance",'
+                        '"right_segment_type":"ceremony","frame_notes":{"frame_01":"a","frame_02":"b",'
+                        '"frame_03":"c","frame_04":"f","frame_05":"g","frame_06":"h"},'
+                        '"primary_evidence":["different performers"],"summary":"Boundary after left anchor."}'
+                    ),
+                    raw_response={"message": {"content": "ok"}},
+                )
+
+            with mock.patch.object(probe, "run_vlm_request", side_effect=fake_run), mock.patch.object(
+                probe, "build_provider_request_payload", return_value={"payload": "ok"}
+            ), mock.patch.object(probe, "dump_debug_artifacts") as dump_debug:
+                result = probe.run_manual_vlm_anchor_analysis(
+                    day_id="20260323",
+                    joined_rows=joined_rows,
+                    anchor_pair={
+                        "left_relative_path": "cam/c.jpg",
+                        "right_relative_path": "cam/f.jpg",
+                        "left_row_index": 2,
+                        "right_row_index": 5,
+                    },
+                    window_radius=3,
+                    boundary_rows_by_pair={},
+                    photo_pre_model_dir=None,
+                    ml_hint_context=None,
+                    provider="ollama",
+                    base_url="http://127.0.0.1:11434",
+                    model="qwen3.5:9b",
+                    timeout_seconds=300.0,
+                    keep_alive="15m",
+                    temperature=0.0,
+                    context_tokens=None,
+                    max_output_tokens=None,
+                    reasoning_level="inherit",
+                    extra_instructions="",
+                    response_schema_mode="on",
+                    json_validation_mode="strict",
+                )
+
+        request = captured_request["request"]
+        self.assertEqual(
+            [path.name for path in request.image_paths],
+            ["a.jpg", "b.jpg", "c.jpg", "f.jpg", "g.jpg", "h.jpg"],
+        )
+        self.assertEqual(
+            result["window_relative_paths"],
+            ["cam/a.jpg", "cam/b.jpg", "cam/c.jpg", "cam/f.jpg", "cam/g.jpg", "cam/h.jpg"],
+        )
+        self.assertEqual(result["parsed_response"]["decision"], "cut_after_3")
+        self.assertEqual(result["parsed_response"]["response_status"], "ok")
+        dump_debug.assert_called_once()
+        self.assertEqual(dump_debug.call_args.kwargs["debug_dir"], Path("/tmp"))
+
     def test_build_system_prompt_mentions_boundary_after_frame_in_schema_mode(self):
         self.assertIn("boundary_after_frame", probe.build_system_prompt("on"))
         self.assertIn("left_segment_type", probe.build_system_prompt("on"))
