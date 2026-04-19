@@ -49,15 +49,11 @@ def test_compute_review_cost_metrics_counts_split_runs_per_missed_boundary() -> 
 def _candidate_row(
     *,
     day_id: str,
-    segment_type: str | None = None,
     left_segment_type: str = "performance",
     right_segment_type: str = "ceremony",
     boundary: str,
     offset: int,
 ) -> dict[str, str]:
-    effective_right_segment_type = right_segment_type
-    if segment_type is not None:
-        effective_right_segment_type = segment_type
     row = {header: "" for header in CANDIDATE_ROW_HEADERS}
     row.update(
         {
@@ -74,8 +70,7 @@ def _candidate_row(
             "left_segment_id": f"{day_id}-seg-left",
             "right_segment_id": f"{day_id}-seg-right",
             "left_segment_type": left_segment_type,
-            "right_segment_type": effective_right_segment_type,
-            "segment_type": effective_right_segment_type,
+            "right_segment_type": right_segment_type,
             "boundary": boundary,
             "candidate_rule_name": "gap_threshold",
             "candidate_rule_version": "gap-v1",
@@ -167,8 +162,8 @@ def test_evaluate_rejects_model_window_radius_mismatch(tmp_path: Path) -> None:
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=1),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1", offset=2),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0", offset=1),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1", offset=2),
         ],
     )
     _write_split_manifest(
@@ -235,9 +230,9 @@ def test_evaluation_metrics_include_left_and_right_predictors(tmp_path: Path, mo
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=1),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1", offset=2),
-            _candidate_row(day_id="20250326", segment_type="warmup", boundary="0", offset=3),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0", offset=1),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1", offset=2),
+            _candidate_row(day_id="20250326", right_segment_type="warmup", boundary="0", offset=3),
         ],
     )
     _write_split_manifest(
@@ -408,9 +403,9 @@ def test_eval_cli_records_candidate_keyed_split_manifest_scope(tmp_path: Path, m
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
     candidate_rows = [
-        _candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=1),
-        _candidate_row(day_id="20250324", segment_type="ceremony", boundary="1", offset=2),
-        _candidate_row(day_id="20250325", segment_type="warmup", boundary="0", offset=3),
+        _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0", offset=1),
+        _candidate_row(day_id="20250324", right_segment_type="ceremony", boundary="1", offset=2),
+        _candidate_row(day_id="20250325", right_segment_type="warmup", boundary="0", offset=3),
     ]
     _write_candidate_csv(dataset_path, candidate_rows)
     _write_split_manifest(
@@ -469,7 +464,7 @@ def test_eval_cli_requires_model_artifacts(tmp_path: Path) -> None:
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     _write_candidate_csv(
         dataset_path,
-        [_candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=1)],
+        [_candidate_row(day_id="20250324", right_segment_type="performance", boundary="0", offset=1)],
     )
     model_dir = tmp_path / "models" / "run-001"
     model_dir.mkdir(parents=True)
@@ -494,7 +489,7 @@ def test_eval_cli_requires_split_manifest_when_missing_from_training_plan(tmp_pa
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     _write_candidate_csv(
         dataset_path,
-        [_candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=1)],
+        [_candidate_row(day_id="20250324", right_segment_type="performance", boundary="0", offset=1)],
     )
     model_dir = tmp_path / "models" / "run-001"
     _write_model_artifacts(model_dir, split_manifest_path=None)
@@ -543,9 +538,9 @@ def test_train_and_eval_cli_integration_writes_metrics(tmp_path: Path, monkeypat
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=1),
-            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1", offset=2),
-            _candidate_row(day_id="20250326", segment_type="warmup", boundary="0", offset=3),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0", offset=1),
+            _candidate_row(day_id="20250325", right_segment_type="ceremony", boundary="1", offset=2),
+            _candidate_row(day_id="20250326", right_segment_type="warmup", boundary="0", offset=3),
         ],
     )
     _write_split_manifest(
@@ -656,10 +651,10 @@ def test_eval_cli_computes_review_cost_per_day_id_sequence(tmp_path: Path, monke
     _write_candidate_csv(
         dataset_path,
         [
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=1),
-            _candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=2),
-            _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=3),
-            _candidate_row(day_id="20250325", segment_type="performance", boundary="0", offset=4),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0", offset=1),
+            _candidate_row(day_id="20250324", right_segment_type="performance", boundary="0", offset=2),
+            _candidate_row(day_id="20250325", right_segment_type="performance", boundary="0", offset=3),
+            _candidate_row(day_id="20250325", right_segment_type="performance", boundary="0", offset=4),
         ],
     )
     _write_split_manifest(
@@ -721,7 +716,7 @@ def test_eval_cli_rejects_existing_metrics_without_overwrite(tmp_path: Path, mon
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
     _write_candidate_csv(
         dataset_path,
-        [_candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=1)],
+        [_candidate_row(day_id="20250324", right_segment_type="performance", boundary="0", offset=1)],
     )
     _write_split_manifest(
         split_manifest_path,
@@ -780,7 +775,7 @@ def test_eval_cli_overwrite_replaces_existing_metrics(tmp_path: Path, monkeypatc
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
     _write_candidate_csv(
         dataset_path,
-        [_candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=1)],
+        [_candidate_row(day_id="20250324", right_segment_type="performance", boundary="0", offset=1)],
     )
     _write_split_manifest(
         split_manifest_path,
