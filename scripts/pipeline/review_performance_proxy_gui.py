@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -639,12 +640,7 @@ def resolve_manual_vlm_debug_dir(
     runtime_args: argparse.Namespace,
     run_id: str,
 ) -> Path:
-    configured_debug_dir = str(getattr(runtime_args, "dump_debug_dir", "") or "").strip()
-    if configured_debug_dir:
-        base_dir = probe_vlm_boundary.resolve_path(workspace_dir, configured_debug_dir)
-    else:
-        base_dir = workspace_dir / "_manual_vlm_analyze_debug"
-    return base_dir / run_id
+    return Path(tempfile.gettempdir())
 
 
 def build_manual_vlm_debug_file_paths(
@@ -1220,6 +1216,40 @@ def build_manual_vlm_debug_lines(debug_file_paths: Sequence[object]) -> List[str
     return lines
 
 
+def format_manual_vlm_reason_lines(reason: str, summary: str) -> List[str]:
+    normalized_reason = str(reason or "").strip()
+    if not normalized_reason:
+        return []
+    segments = [part.strip() for part in normalized_reason.split(" | ") if part.strip()]
+    if not segments:
+        return [f"Reasoning: {normalized_reason}"]
+    lines: List[str] = []
+    reasoning_lines: List[str] = []
+    for segment in segments:
+        if segment.startswith("Frame notes:"):
+            frame_notes = [value.strip() for value in segment.removeprefix("Frame notes:").split(";") if value.strip()]
+            if frame_notes:
+                lines.append("Frame notes:")
+                lines.extend([f"  {note}" for note in frame_notes])
+            continue
+        if segment.startswith("Primary evidence:"):
+            evidence_items = [value.strip() for value in segment.removeprefix("Primary evidence:").split(";") if value.strip()]
+            if evidence_items:
+                lines.append("Primary evidence:")
+                lines.extend([f"  {item}" for item in evidence_items])
+            continue
+        if segment.startswith("Summary:"):
+            nested_summary = segment.removeprefix("Summary:").strip()
+            if nested_summary and nested_summary != summary:
+                lines.append(f"Reasoning summary: {nested_summary}")
+            continue
+        reasoning_lines.append(segment)
+    if reasoning_lines:
+        lines.insert(0, "Reasoning:")
+        lines[1:1] = [f"  {value}" for value in reasoning_lines]
+    return lines
+
+
 def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
     lines = [
         f"Decision: {format_value(result.get('decision'))}",
@@ -1236,7 +1266,7 @@ def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
         lines.append(f"Summary: {summary}")
     reason = str(result.get("reason", "") or "").strip()
     if reason:
-        lines.append(f"Reason: {reason}")
+        lines.extend(format_manual_vlm_reason_lines(reason, summary))
     return join_info_section_lines(lines)
 
 

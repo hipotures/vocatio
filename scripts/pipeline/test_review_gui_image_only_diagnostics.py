@@ -465,6 +465,44 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("/tmp/manual-vlm/prompt.txt", result_section["body"])
         self.assertIn("/tmp/manual-vlm/response.json", result_section["body"])
 
+    def test_manual_vlm_debug_dir_always_uses_tmp_root(self):
+        runtime_args = argparse.Namespace(dump_debug_dir="/tmp/vlm-probe-debug")
+        debug_dir = review_gui.resolve_manual_vlm_debug_dir(
+            Path("/workspace"),
+            runtime_args,
+            "vlm-20260419221109",
+        )
+
+        self.assertEqual(debug_dir, Path(tempfile.gettempdir()))
+
+    def test_format_manual_vlm_analyze_result_text_splits_reason_into_blocks(self):
+        body = review_gui.format_manual_vlm_analyze_result_text(
+            {
+                "decision": "cut_after_3",
+                "left_segment_type": "dance",
+                "right_segment_type": "rehearsal",
+                "summary": "Boundary after frame_03 marks transition from standing performance pose to floor split rehearsal.",
+                "reason": (
+                    "Left segment type: dance | Right segment type: rehearsal | "
+                    "Frame notes: frame_01=Dancer standing.; frame_02=Dancer standing. | "
+                    "Primary evidence: Transition occurs between frame_03 and frame_04.; "
+                    "Floor split indicates rehearsal. | "
+                    "Summary: Boundary after frame_03 marks transition from standing performance pose to floor split rehearsal."
+                ),
+            }
+        )
+
+        self.assertIn("Decision: cut_after_3", body)
+        self.assertIn("Segments: dance -> rehearsal", body)
+        self.assertIn("Reasoning:", body)
+        self.assertIn("  Left segment type: dance", body)
+        self.assertIn("  Right segment type: rehearsal", body)
+        self.assertIn("Frame notes:", body)
+        self.assertIn("  frame_01=Dancer standing.", body)
+        self.assertIn("Primary evidence:", body)
+        self.assertIn("  Transition occurs between frame_03 and frame_04.", body)
+        self.assertNotIn("Reason: Left segment type: dance | Right segment type: rehearsal", body)
+
     def test_manual_ml_prediction_section_renders_left_right_and_boundary(self):
         state = review_gui.build_manual_ml_prediction_section(
             {
