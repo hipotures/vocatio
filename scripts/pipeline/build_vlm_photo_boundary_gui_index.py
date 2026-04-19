@@ -38,6 +38,12 @@ TYPE_CODE_BY_SEGMENT_TYPE = {
     "other": "O",
 }
 
+ML_HINT_CONTRACT_ERROR_PREFIXES = (
+    "feature_columns.json is inconsistent with training ",
+    "ml model window_radius mismatch: ",
+    "run row window_radius mismatch: ",
+)
+
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -252,7 +258,8 @@ def build_ml_hint_pairs_for_run(
                 progress.advance(task_id)
         return effective_ml_model_run_id, ml_hint_pairs, ""
     except Exception as error:
-        if "window_radius mismatch" in str(error):
+        error_text = str(error)
+        if error_text.startswith(ML_HINT_CONTRACT_ERROR_PREFIXES):
             raise
         return normalized_run_id, [], str(error)
 

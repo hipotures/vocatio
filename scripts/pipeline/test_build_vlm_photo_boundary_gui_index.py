@@ -171,6 +171,53 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                     ml_model_run_id="ml-run-001",
                 )
 
+    def test_build_ml_hint_pairs_for_run_propagates_artifact_contract_failures(self):
+        joined_rows = [
+            {
+                "relative_path": f"cam/{name}.hif",
+                "photo_id": f"cam/{name}.hif",
+                "start_epoch_ms": str(index * 1000),
+                "thumb_path": f"/tmp/{name}.jpg",
+            }
+            for index, name in enumerate(("a", "b", "c", "d"), start=1)
+        ]
+
+        with mock.patch.object(
+            builder.probe,
+            "resolve_ml_model_run",
+            return_value=("ml-run-001", Path("/tmp/model-run")),
+        ), mock.patch.object(
+            builder.probe,
+            "load_ml_hint_context",
+            side_effect=ValueError(
+                "feature_columns.json is inconsistent with training window_radius=2: "
+                "boundary_feature_columns pair columns mismatch"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "feature_columns.json is inconsistent with training window_radius=2",
+            ):
+                builder.build_ml_hint_pairs_for_run(
+                    day_dir=Path("/tmp/20260323"),
+                    workspace_dir=Path("/tmp/workspace"),
+                    run_metadata={"args": {"window_radius": 2}},
+                    run_rows=[
+                        {
+                            "relative_paths_json": json.dumps(
+                                [
+                                    "cam/a.hif",
+                                    "cam/b.hif",
+                                    "cam/c.hif",
+                                    "cam/d.hif",
+                                ]
+                            )
+                        }
+                    ],
+                    joined_rows=joined_rows,
+                    ml_model_run_id="ml-run-001",
+                )
+
     def test_build_ml_hint_pairs_for_run_accepts_valid_window_radius_one_windows(self):
         joined_rows = [
             {

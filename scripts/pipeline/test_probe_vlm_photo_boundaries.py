@@ -380,6 +380,44 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         ml_model_dir=model_dir,
                     )
 
+    def test_load_ml_hint_context_rejects_smaller_radius_feature_columns_for_larger_declared_radius(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp)
+            (model_dir / probe.TRAINING_METADATA_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "mode": "tabular_only",
+                        "window_radius": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (model_dir / probe.FEATURE_COLUMNS_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "image_feature_columns": [],
+                        "boundary_feature_columns": ["gap_12", "gap_23"],
+                        "segment_type_feature_columns": ["gap_12", "gap_23"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class FakePredictor:
+                @classmethod
+                def load(cls, _path):
+                    return cls()
+
+            with mock.patch.object(probe, "load_tabular_predictor_class", return_value=FakePredictor):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "feature_columns.json is inconsistent with training window_radius=2",
+                ):
+                    probe.load_ml_hint_context(
+                        ml_model_run_id="ml-run-001",
+                        ml_model_dir=model_dir,
+                    )
+
     def test_build_ml_hint_lines_renders_task_language(self):
         lines = probe.build_ml_hint_lines(
             probe.MlHintPrediction(
