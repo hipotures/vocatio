@@ -57,7 +57,12 @@ def heuristic_pair_join_columns_for_window_radius(
 
 
 THUMBNAIL_IMAGE_COLUMNS = thumbnail_image_columns_for_window_radius(DEFAULT_ML_WINDOW_RADIUS)
-REQUIRED_BASE_COLUMNS = ("day_id", "segment_type", "boundary")
+REQUIRED_BASE_COLUMNS = (
+    "day_id",
+    "left_segment_type",
+    "right_segment_type",
+    "boundary",
+)
 NON_MODEL_FEATURE_COLUMNS = frozenset(REQUIRED_BASE_COLUMNS + ("split_name", "window_radius"))
 SPLIT_MANIFEST_VALUE_COLUMNS = ("split_name",)
 ALLOWED_SPLIT_NAMES = ("train", "validation", "test")
@@ -104,7 +109,9 @@ class TrainingDataBundle:
     missing_heuristic_candidate_count: int
     shared_feature_columns: list[str]
     image_feature_columns: list[str]
-    segment_type: PredictorTrainingData
+    feature_columns_by_mode: dict[str, dict[str, list[str]]]
+    left_segment_type: PredictorTrainingData
+    right_segment_type: PredictorTrainingData
     boundary: PredictorTrainingData
 
 
@@ -257,7 +264,8 @@ def feature_columns_for_mode(
     predictor_feature_columns = shared_feature_columns + image_feature_columns
     return {
         "shared_feature_columns": shared_feature_columns,
-        "segment_type_feature_columns": list(predictor_feature_columns),
+        "left_segment_type_feature_columns": list(predictor_feature_columns),
+        "right_segment_type_feature_columns": list(predictor_feature_columns),
         "boundary_feature_columns": list(predictor_feature_columns),
         "image_feature_columns": image_feature_columns,
     }
@@ -342,7 +350,8 @@ def load_training_data_bundle(
         mode,
         window_radius=window_radius,
     )
-    segment_type_feature_columns = columns_by_mode["segment_type_feature_columns"]
+    left_segment_type_feature_columns = columns_by_mode["left_segment_type_feature_columns"]
+    right_segment_type_feature_columns = columns_by_mode["right_segment_type_feature_columns"]
     boundary_feature_columns = columns_by_mode["boundary_feature_columns"]
 
     return TrainingDataBundle(
@@ -363,12 +372,32 @@ def load_training_data_bundle(
         missing_heuristic_candidate_count=missing_heuristic_candidate_count,
         shared_feature_columns=columns_by_mode["shared_feature_columns"],
         image_feature_columns=columns_by_mode["image_feature_columns"],
-        segment_type=PredictorTrainingData(
-            label_column="segment_type",
-            feature_columns=segment_type_feature_columns,
-            train_data=train_rows.select(segment_type_feature_columns + ["segment_type"]),
-            validation_data=validation_rows.select(segment_type_feature_columns + ["segment_type"]),
-            test_data=test_rows.select(segment_type_feature_columns + ["segment_type"]),
+        feature_columns_by_mode={
+            mode: {
+                "left_segment_type_feature_columns": list(left_segment_type_feature_columns),
+                "right_segment_type_feature_columns": list(right_segment_type_feature_columns),
+                "boundary_feature_columns": list(boundary_feature_columns),
+                "shared_feature_columns": list(columns_by_mode["shared_feature_columns"]),
+                "image_feature_columns": list(columns_by_mode["image_feature_columns"]),
+            }
+        },
+        left_segment_type=PredictorTrainingData(
+            label_column="left_segment_type",
+            feature_columns=left_segment_type_feature_columns,
+            train_data=train_rows.select(left_segment_type_feature_columns + ["left_segment_type"]),
+            validation_data=validation_rows.select(
+                left_segment_type_feature_columns + ["left_segment_type"]
+            ),
+            test_data=test_rows.select(left_segment_type_feature_columns + ["left_segment_type"]),
+        ),
+        right_segment_type=PredictorTrainingData(
+            label_column="right_segment_type",
+            feature_columns=right_segment_type_feature_columns,
+            train_data=train_rows.select(right_segment_type_feature_columns + ["right_segment_type"]),
+            validation_data=validation_rows.select(
+                right_segment_type_feature_columns + ["right_segment_type"]
+            ),
+            test_data=test_rows.select(right_segment_type_feature_columns + ["right_segment_type"]),
         ),
         boundary=PredictorTrainingData(
             label_column="boundary",
@@ -531,9 +560,12 @@ def _join_split_manifest(
 
 def _normalize_labels(frame: TrainingTable, *, split_name: str) -> None:
     for row in frame.rows:
-        row["segment_type"] = str(row.get("segment_type", "")).strip()
-        if row["segment_type"] == "":
-            raise ValueError(f"{split_name} split segment_type label must not be blank")
+        row["left_segment_type"] = str(row.get("left_segment_type", "")).strip()
+        if row["left_segment_type"] == "":
+            raise ValueError(f"{split_name} split left_segment_type label must not be blank")
+        row["right_segment_type"] = str(row.get("right_segment_type", "")).strip()
+        if row["right_segment_type"] == "":
+            raise ValueError(f"{split_name} split right_segment_type label must not be blank")
         row["boundary"] = _normalize_boundary_value(row.get("boundary", ""))
 
 
@@ -624,7 +656,8 @@ def _derive_feature_view(
         derived_row: dict[str, object] = {column_name: derived_features[column_name] for column_name in derived_feature_columns}
         derived_row["day_id"] = row["day_id"]
         derived_row["window_radius"] = row["window_radius"]
-        derived_row["segment_type"] = row["segment_type"]
+        derived_row["left_segment_type"] = row["left_segment_type"]
+        derived_row["right_segment_type"] = row["right_segment_type"]
         derived_row["boundary"] = row["boundary"]
         derived_row["split_name"] = row["split_name"]
         window_radius = _extract_window_radius_from_candidate_rows([row], resource_name="candidate row")
@@ -636,7 +669,14 @@ def _derive_feature_view(
         TrainingTable(
             derived_rows,
             column_names=(
-                ["day_id", "window_radius", "segment_type", "boundary", "split_name"]
+                [
+                    "day_id",
+                    "window_radius",
+                    "left_segment_type",
+                    "right_segment_type",
+                    "boundary",
+                    "split_name",
+                ]
                 + derived_feature_columns
                 + [
                     column_name

@@ -183,7 +183,7 @@ def test_load_training_data_bundle_joins_split_manifest_and_selects_train_valida
     assert bundle.validation_rows["day_id"].tolist() == ["20250325"]
     assert bundle.test_rows["day_id"].tolist() == ["20250326"]
     assert bundle.split_counts_by_name == {"train": 1, "validation": 1, "test": 1}
-    assert bundle.segment_type.train_data["segment_type"].tolist() == ["performance"]
+    assert bundle.right_segment_type.train_data["right_segment_type"].tolist() == ["performance"]
     assert bundle.boundary.validation_data["boundary"].tolist() == [1]
     assert bundle.boundary.test_data["boundary"].tolist() == [0]
     assert bundle.image_feature_columns == [
@@ -198,6 +198,94 @@ def test_load_training_data_bundle_joins_split_manifest_and_selects_train_valida
     assert "frame_01_relpath" not in bundle.shared_feature_columns
     assert "frame_01_timestamp" not in bundle.shared_feature_columns
     assert "frame_01_preview_path" not in bundle.shared_feature_columns
+
+
+def test_load_training_data_bundle_exposes_left_right_and_boundary_predictors(
+    tmp_path: Path,
+) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    _write_candidate_csv(
+        dataset_path,
+        [
+            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+        ],
+    )
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"day_id": "20250324", "split_name": "train"},
+            {"day_id": "20250325", "split_name": "validation"},
+        ],
+    )
+
+    bundle = load_training_data_bundle(
+        dataset_path,
+        split_manifest_path=split_manifest_path,
+        mode="tabular_only",
+    )
+
+    assert bundle.left_segment_type.label_column == "left_segment_type"
+    assert bundle.right_segment_type.label_column == "right_segment_type"
+    assert bundle.boundary.label_column == "boundary"
+
+
+def test_feature_columns_manifest_uses_left_and_right_keys(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    _write_candidate_csv(
+        dataset_path,
+        [
+            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+        ],
+    )
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"day_id": "20250324", "split_name": "train"},
+            {"day_id": "20250325", "split_name": "validation"},
+        ],
+    )
+
+    bundle = load_training_data_bundle(
+        dataset_path,
+        split_manifest_path=split_manifest_path,
+        mode="tabular_only",
+    )
+
+    columns = bundle.feature_columns_by_mode["tabular_only"]
+    assert "left_segment_type_feature_columns" in columns
+    assert "right_segment_type_feature_columns" in columns
+    assert "segment_type_feature_columns" not in columns
+
+
+def test_predictor_feature_sets_match_for_left_and_right(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    _write_candidate_csv(
+        dataset_path,
+        [
+            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+        ],
+    )
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"day_id": "20250324", "split_name": "train"},
+            {"day_id": "20250325", "split_name": "validation"},
+        ],
+    )
+
+    bundle = load_training_data_bundle(
+        dataset_path,
+        split_manifest_path=split_manifest_path,
+        mode="tabular_only",
+    )
+
+    assert bundle.left_segment_type.feature_columns == bundle.right_segment_type.feature_columns
 
 
 def test_load_training_data_bundle_accepts_candidate_level_split_manifest(
@@ -241,9 +329,9 @@ def test_load_training_data_bundle_accepts_candidate_level_split_manifest(
         mode="tabular_only",
     )
 
-    assert bundle.train_rows["segment_type"].tolist() == ["performance"]
-    assert bundle.validation_rows["segment_type"].tolist() == ["ceremony"]
-    assert bundle.test_rows["segment_type"].tolist() == ["warmup"]
+    assert bundle.train_rows["right_segment_type"].tolist() == ["performance"]
+    assert bundle.validation_rows["right_segment_type"].tolist() == ["ceremony"]
+    assert bundle.test_rows["right_segment_type"].tolist() == ["warmup"]
     assert bundle.split_counts_by_name == {"train": 1, "validation": 1, "test": 1}
 
 
@@ -295,7 +383,10 @@ def test_load_training_data_bundle_requires_base_columns_for_tabular_mode(
         [{"day_id": "20250324", "split_name": "train"}],
     )
 
-    with pytest.raises(ValueError, match="missing required columns: boundary"):
+    with pytest.raises(
+        ValueError,
+        match="missing required columns: left_segment_type, right_segment_type, boundary, window_radius",
+    ):
         load_training_data_bundle(
             dataset_path,
             split_manifest_path=split_manifest_path,
@@ -420,11 +511,13 @@ def test_training_bundle_reads_window_radius_from_candidates(tmp_path: Path) -> 
 def test_load_training_data_bundle_rejects_missing_labels(tmp_path: Path) -> None:
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    missing_label_row = _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1")
+    missing_label_row["right_segment_type"] = ""
     _write_candidate_csv(
         dataset_path,
         [
             _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
-            _candidate_row(day_id="20250325", segment_type="", boundary="1"),
+            missing_label_row,
         ],
     )
     _write_split_manifest(
@@ -435,7 +528,7 @@ def test_load_training_data_bundle_rejects_missing_labels(tmp_path: Path) -> Non
         ],
     )
 
-    with pytest.raises(ValueError, match="segment_type label must not be blank"):
+    with pytest.raises(ValueError, match="right_segment_type label must not be blank"):
         load_training_data_bundle(
             dataset_path,
             split_manifest_path=split_manifest_path,
@@ -621,7 +714,7 @@ def test_load_training_data_bundle_joins_heuristic_boundary_scores_and_counts_mi
     assert "heuristic_dino_dist_12" in bundle.shared_feature_columns
     assert "heuristic_boundary_score_23" in bundle.shared_feature_columns
     assert "heuristic_boundary_label_34" in bundle.shared_feature_columns
-    assert "heuristic_dino_dist_12" in bundle.segment_type.feature_columns
+    assert "heuristic_dino_dist_12" in bundle.left_segment_type.feature_columns
     assert "heuristic_boundary_score_23" in bundle.boundary.feature_columns
     assert bundle.train_rows["heuristic_dino_dist_12"].tolist() == [0.101]
     assert bundle.train_rows["heuristic_boundary_score_23"].tolist() == [0.222]
