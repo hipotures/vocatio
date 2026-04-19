@@ -21,27 +21,43 @@ from rich.progress import (
 
 from build_ml_boundary_candidate_dataset import (
     ATTRITION_REPORT_KEYS,
-    CANDIDATE_ROW_HEADERS,
     DEFAULT_ATTRITION_FILENAME,
     DEFAULT_OUTPUT_FILENAME,
+    candidate_row_headers,
 )
 from lib.ml_boundary_dataset import canonical_candidate_id, normalize_timestamp
 from lib.ml_boundary_truth import VALID_SEGMENT_TYPES
+from lib.window_radius_contract import window_radius_to_window_size
 from lib.workspace_dir import resolve_workspace_dir
 
 
 console = Console(stderr=True)
 
-WINDOW_SIZE = 5
 DEFAULT_REPORT_FILENAME = "ml_boundary_validation_report.json"
 DEFAULT_CORPUS_CANDIDATES_FILENAME = "ml_boundary_candidates.corpus.csv"
-FRAME_TIMESTAMP_FIELDS = [f"frame_0{index}_timestamp" for index in range(1, 6)]
-FRAME_PHOTO_ID_FIELDS = [f"frame_0{index}_photo_id" for index in range(1, 6)]
-FRAME_RELPATH_FIELDS = [f"frame_0{index}_relpath" for index in range(1, 6)]
-FRAME_THUMB_FIELDS = [f"frame_0{index}_thumb_path" for index in range(1, 6)]
-FRAME_PREVIEW_FIELDS = [f"frame_0{index}_preview_path" for index in range(1, 6)]
 HELDOUT_SPLIT_NAMES = ("validation", "test")
 VALID_SPLIT_NAMES = {"train", "validation", "test"}
+LEGACY_EXTERNAL_COLUMNS = ("window_size", "overlap")
+STATIC_CANDIDATE_HEADERS = [
+    "candidate_id",
+    "day_id",
+    "window_radius",
+    "center_left_photo_id",
+    "center_right_photo_id",
+    "left_segment_id",
+    "right_segment_id",
+    "left_segment_type",
+    "right_segment_type",
+    "segment_type",
+    "boundary",
+    "candidate_rule_name",
+    "candidate_rule_version",
+    "candidate_rule_params_json",
+    "descriptor_schema_version",
+    "split_name",
+    "window_photo_ids",
+    "window_relative_paths",
+]
 
 
 def _progress() -> Progress:
@@ -69,6 +85,15 @@ def _read_csv_rows(path: Path, *, required_headers: Sequence[str]) -> list[dict[
         raise FileNotFoundError(f"CSV does not exist: {path}")
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
+        legacy_columns = [
+            field_name
+            for field_name in LEGACY_EXTERNAL_COLUMNS
+            if field_name in (reader.fieldnames or [])
+        ]
+        if legacy_columns:
+            raise ValueError(
+                f"{path.name} legacy columns are not allowed: {', '.join(legacy_columns)}"
+            )
         _require_fieldnames(path, reader.fieldnames or (), required_headers)
         return [dict(row) for row in reader]
 
@@ -116,6 +141,13 @@ def _parse_non_negative_int(value: object, *, field_name: str) -> int:
         raise ValueError(f"{field_name} must be a non-negative integer")
     if parsed < 0:
         raise ValueError(f"{field_name} must be a non-negative integer")
+    return parsed
+
+
+def _parse_positive_int(value: object, *, field_name: str) -> int:
+    parsed = _parse_non_negative_int(value, field_name=field_name)
+    if parsed < 1:
+        raise ValueError(f"{field_name} must be at least 1")
     return parsed
 
 
@@ -251,7 +283,12 @@ def validate_attrition_report(report: Mapping[str, object]) -> None:
 
 
 def validate_candidate_row(row: Mapping[str, object], *, row_number: int) -> None:
-    missing = [header for header in CANDIDATE_ROW_HEADERS if header not in row]
+    legacy_columns = [field_name for field_name in LEGACY_EXTERNAL_COLUMNS if field_name in row]
+    if legacy_columns:
+        raise ValueError(
+            f"row {row_number}: legacy columns are not allowed: {', '.join(legacy_columns)}"
+        )
+    missing = [header for header in STATIC_CANDIDATE_HEADERS if header not in row]
     if missing:
         raise ValueError(f"row {row_number}: missing required columns: {', '.join(missing)}")
 
@@ -267,7 +304,7 @@ def validate_candidate_row(row: Mapping[str, object], *, row_number: int) -> Non
         "candidate_rule_version",
         row_number=row_number,
     )
-    _parse_json_object(
+    candidate_rule_params = _parse_json_object(
         row.get("candidate_rule_params_json"),
         field_name="candidate_rule_params_json",
         row_number=row_number,
@@ -284,54 +321,87 @@ def validate_candidate_row(row: Mapping[str, object], *, row_number: int) -> Non
         row_number=row_number,
     )
 
-    window_size = _parse_non_negative_int(row["window_size"], field_name=f"row {row_number} window_size")
-    if window_size != WINDOW_SIZE:
-        raise ValueError(f"row {row_number}: window_size must equal {WINDOW_SIZE}")
+    window_radius = _parse_positive_int(
+        row.get("window_radius"),
+        field_name=f"row {row_number} window_radius",
+    )
+    window_size = window_radius_to_window_size(window_radius)
+    expected_headers = candidate_row_headers(window_radius=window_radius, include_thumbnail=True)
+    missing_dynamic_headers = [header for header in expected_headers if header not in row]
+    if missing_dynamic_headers:
+        raise ValueError(
+            f"row {row_number}: missing required columns: {', '.join(missing_dynamic_headers)}"
+        )
+    if candidate_rule_params.get("window_radius") != window_radius:
+        raise ValueError(
+            f"row {row_number}: candidate_rule_params_json window_radius must equal row window_radius"
+        )
+
+    frame_timestamp_fields = [
+        f"frame_{index:02d}_timestamp"
+        for index in range(1, window_size + 1)
+    ]
+    frame_photo_id_fields = [
+        f"frame_{index:02d}_photo_id"
+        for index in range(1, window_size + 1)
+    ]
+    frame_relpath_fields = [
+        f"frame_{index:02d}_relpath"
+        for index in range(1, window_size + 1)
+    ]
+    frame_thumb_fields = [
+        f"frame_{index:02d}_thumb_path"
+        for index in range(1, window_size + 1)
+    ]
+    frame_preview_fields = [
+        f"frame_{index:02d}_preview_path"
+        for index in range(1, window_size + 1)
+    ]
 
     frame_photo_ids = [
         _require_non_blank_text(row, field_name, row_number=row_number)
-        for field_name in FRAME_PHOTO_ID_FIELDS
+        for field_name in frame_photo_id_fields
     ]
     frame_relpaths = [
         _require_non_blank_text(row, field_name, row_number=row_number)
-        for field_name in FRAME_RELPATH_FIELDS
+        for field_name in frame_relpath_fields
     ]
-    for field_name in FRAME_THUMB_FIELDS + FRAME_PREVIEW_FIELDS:
+    for field_name in frame_thumb_fields + frame_preview_fields:
         _require_string_value(row, field_name, row_number=row_number)
 
     window_photo_ids = _parse_json_array_of_strings(
         row.get("window_photo_ids"),
         field_name="window_photo_ids",
         row_number=row_number,
-        expected_length=WINDOW_SIZE,
+        expected_length=window_size,
     )
     window_relative_paths = _parse_json_array_of_strings(
         row.get("window_relative_paths"),
         field_name="window_relative_paths",
         row_number=row_number,
-        expected_length=WINDOW_SIZE,
+        expected_length=window_size,
     )
     if window_photo_ids != frame_photo_ids:
         raise ValueError(
-            f"row {row_number}: window_photo_ids must match ordered frame_01..05_photo_id columns"
+            f"row {row_number}: window_photo_ids must match ordered frame photo_id columns"
         )
     if window_relative_paths != frame_relpaths:
         raise ValueError(
-            f"row {row_number}: window_relative_paths must match ordered frame_01..05_relpath columns"
+            f"row {row_number}: window_relative_paths must match ordered frame relpath columns"
         )
 
-    if center_left_photo_id != frame_photo_ids[2]:
+    if center_left_photo_id != frame_photo_ids[window_radius - 1]:
         raise ValueError(
-            f"row {row_number}: center_left_photo_id must equal frame_03_photo_id"
+            f"row {row_number}: center_left_photo_id must equal the left center frame photo_id"
         )
-    if center_right_photo_id != frame_photo_ids[3]:
+    if center_right_photo_id != frame_photo_ids[window_radius]:
         raise ValueError(
-            f"row {row_number}: center_right_photo_id must equal frame_04_photo_id"
+            f"row {row_number}: center_right_photo_id must equal the right center frame photo_id"
         )
 
     timestamps = [
         normalize_timestamp(_require_non_blank_text(row, field_name, row_number=row_number))
-        for field_name in FRAME_TIMESTAMP_FIELDS
+        for field_name in frame_timestamp_fields
     ]
     for index in range(1, len(timestamps)):
         if timestamps[index] < timestamps[index - 1]:
@@ -665,7 +735,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     try:
-        candidate_rows = _read_csv_rows(candidate_csv_path, required_headers=CANDIDATE_ROW_HEADERS)
+        candidate_rows = _read_csv_rows(candidate_csv_path, required_headers=STATIC_CANDIDATE_HEADERS)
         attrition_report = _read_json_object(attrition_json_path)
         validate_attrition_report(attrition_report)
         _validate_row_count_against_attrition(

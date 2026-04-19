@@ -8,7 +8,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
-from build_ml_boundary_candidate_dataset import CANDIDATE_ROW_HEADERS
+from build_ml_boundary_candidate_dataset import candidate_row_headers
 from lib.ml_boundary_dataset import canonical_candidate_id
 from validate_ml_boundary_dataset import (
     build_validation_report,
@@ -22,28 +22,36 @@ from validate_ml_boundary_dataset import (
 def _candidate_row(
     *,
     day_id: str = "20250325",
+    window_radius: int = 2,
     candidate_rule_version: str = "gap-v1",
     left_segment_id: str = "seg-a",
     right_segment_id: str = "seg-b",
     left_segment_type: str = "performance",
     right_segment_type: str = "ceremony",
-    frame_timestamps: tuple[str, str, str, str, str] = ("1.0", "2.0", "3.0", "25.0", "26.0"),
+    frame_timestamps: tuple[str, ...] = ("1.0", "2.0", "3.0", "25.0"),
 ) -> dict[str, str]:
-    row = {header: "" for header in CANDIDATE_ROW_HEADERS}
+    headers = candidate_row_headers(window_radius=window_radius, include_thumbnail=True)
+    row = {header: "" for header in headers}
+    frame_count = window_radius * 2
     frame_photo_ids = {
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
+        f"frame_{frame_index:02d}_photo_id": f"p{frame_index}"
+        for frame_index in range(1, frame_count + 1)
     }
+    frame_relpaths = {
+        f"frame_{frame_index:02d}_relpath": f"cam/p{frame_index}.jpg"
+        for frame_index in range(1, frame_count + 1)
+    }
+    window_photo_ids = [f"p{frame_index}" for frame_index in range(1, frame_count + 1)]
+    window_relative_paths = [f"cam/p{frame_index}.jpg" for frame_index in range(1, frame_count + 1)]
+    center_left_index = window_radius
+    center_right_index = window_radius + 1
     row.update(frame_photo_ids)
     row.update(
         {
             "day_id": day_id,
-            "window_size": "5",
-            "center_left_photo_id": "p3",
-            "center_right_photo_id": "p4",
+            "window_radius": str(window_radius),
+            "center_left_photo_id": f"p{center_left_index}",
+            "center_right_photo_id": f"p{center_right_index}",
             "left_segment_id": left_segment_id,
             "right_segment_id": right_segment_id,
             "left_segment_type": left_segment_type,
@@ -52,45 +60,34 @@ def _candidate_row(
             "boundary": "true" if left_segment_id != right_segment_id else "false",
             "candidate_rule_name": "gap_threshold",
             "candidate_rule_version": candidate_rule_version,
-            "candidate_rule_params_json": "{\"gap_threshold_seconds\":20.0}",
+            "candidate_rule_params_json": (
+                f'{{"gap_threshold_seconds":20.0,"window_radius":{window_radius}}}'
+            ),
             "descriptor_schema_version": "not_included_v1",
             "split_name": "",
-            "window_photo_ids": "[\"p1\",\"p2\",\"p3\",\"p4\",\"p5\"]",
-            "window_relative_paths": "[\"cam/p1.jpg\",\"cam/p2.jpg\",\"cam/p3.jpg\",\"cam/p4.jpg\",\"cam/p5.jpg\"]",
-            "frame_01_relpath": "cam/p1.jpg",
-            "frame_02_relpath": "cam/p2.jpg",
-            "frame_03_relpath": "cam/p3.jpg",
-            "frame_04_relpath": "cam/p4.jpg",
-            "frame_05_relpath": "cam/p5.jpg",
-            "frame_01_timestamp": frame_timestamps[0],
-            "frame_02_timestamp": frame_timestamps[1],
-            "frame_03_timestamp": frame_timestamps[2],
-            "frame_04_timestamp": frame_timestamps[3],
-            "frame_05_timestamp": frame_timestamps[4],
-            "frame_01_thumb_path": "thumb/p1.jpg",
-            "frame_02_thumb_path": "thumb/p2.jpg",
-            "frame_03_thumb_path": "thumb/p3.jpg",
-            "frame_04_thumb_path": "thumb/p4.jpg",
-            "frame_05_thumb_path": "thumb/p5.jpg",
-            "frame_01_preview_path": "preview/p1.jpg",
-            "frame_02_preview_path": "preview/p2.jpg",
-            "frame_03_preview_path": "preview/p3.jpg",
-            "frame_04_preview_path": "preview/p4.jpg",
-            "frame_05_preview_path": "preview/p5.jpg",
+            "window_photo_ids": json.dumps(window_photo_ids),
+            "window_relative_paths": json.dumps(window_relative_paths),
         }
     )
+    row.update(frame_relpaths)
+    for frame_index in range(1, frame_count + 1):
+        suffix = f"{frame_index:02d}"
+        row[f"frame_{suffix}_timestamp"] = frame_timestamps[frame_index - 1]
+        row[f"frame_{suffix}_thumb_path"] = f"thumb/p{frame_index}.jpg"
+        row[f"frame_{suffix}_preview_path"] = f"preview/p{frame_index}.jpg"
     row["candidate_id"] = canonical_candidate_id(
         day_id=day_id,
-        center_left_photo_id="p3",
-        center_right_photo_id="p4",
+        center_left_photo_id=f"p{center_left_index}",
+        center_right_photo_id=f"p{center_right_index}",
         candidate_rule_version=candidate_rule_version,
     )
     return row
 
 
 def _write_candidate_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    fieldnames = list(rows[0].keys()) if rows else candidate_row_headers(window_radius=2, include_thumbnail=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CANDIDATE_ROW_HEADERS)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -182,14 +179,31 @@ def test_validate_candidate_row_rejects_noncanonical_candidate_id() -> None:
 
 def test_validate_candidate_row_rejects_corrupted_window_arrays() -> None:
     row = _candidate_row()
-    row["window_photo_ids"] = "[\"p1\",\"p2\",\"p3\",\"p4\"]"
+    row["window_photo_ids"] = "[\"p1\",\"p2\",\"p3\"]"
 
     try:
         validate_candidate_row(row, row_number=2)
     except ValueError as exc:
-        assert "window_photo_ids must contain exactly 5 items" in str(exc)
+        assert "window_photo_ids must contain exactly 4 items" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_validate_candidate_row_accepts_dynamic_window_radius_schema() -> None:
+    row = _candidate_row(
+        window_radius=3,
+        frame_timestamps=("1.0", "2.0", "3.0", "25.0", "26.0", "27.0"),
+    )
+
+    validate_candidate_row(row, row_number=2)
+
+
+def test_validate_candidate_row_rejects_legacy_window_size_column() -> None:
+    row = _candidate_row()
+    row["window_size"] = "4"
+
+    with pytest.raises(ValueError, match="legacy columns are not allowed: window_size"):
+        validate_candidate_row(row, row_number=2)
 
 
 def test_validate_candidate_row_rejects_invalid_split_name() -> None:

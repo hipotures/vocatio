@@ -339,12 +339,18 @@ def _build_dataset_report(
     day_id: str,
     gap_threshold_seconds: float,
     candidate_rule_version: str,
+    window_radius: int,
+    candidate_rule_params_json: str,
+    descriptor_schema_version: str,
     attrition: Mapping[str, int],
 ) -> dict[str, object]:
     return {
         "day_id": day_id,
         "candidate_rule_name": DEFAULT_CANDIDATE_RULE_NAME,
         "candidate_rule_version": candidate_rule_version,
+        "candidate_rule_params_json": candidate_rule_params_json,
+        "descriptor_schema_version": descriptor_schema_version,
+        "window_radius": int(window_radius),
         "gap_threshold_seconds": float(gap_threshold_seconds),
         **{key: int(attrition[key]) for key in ATTRITION_REPORT_KEYS},
     }
@@ -539,6 +545,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             day_id=day_id,
             gap_threshold_seconds=args.gap_threshold_seconds,
             candidate_rule_version=args.candidate_rule_version,
+            window_radius=args.window_radius,
+            candidate_rule_params_json=_build_rule_params_json(
+                gap_threshold_seconds=args.gap_threshold_seconds,
+                window_radius=args.window_radius,
+            ),
+            descriptor_schema_version=DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1,
             attrition=attrition,
         )
         headers = candidate_row_headers(window_radius=args.window_radius, include_thumbnail=True)

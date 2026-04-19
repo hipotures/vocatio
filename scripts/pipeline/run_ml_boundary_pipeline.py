@@ -27,7 +27,7 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-from build_ml_boundary_candidate_dataset import CANDIDATE_ROW_HEADERS
+from build_ml_boundary_candidate_dataset import candidate_row_headers
 from lib.ml_boundary_metrics import predictor_metric_spec
 from lib.ml_boundary_truth import VALID_SEGMENT_TYPES
 from lib.pipeline_io import atomic_write_csv, atomic_write_json
@@ -41,6 +41,7 @@ CORPUS_CANDIDATES_FILENAME = "ml_boundary_candidates.corpus.csv"
 DAY_METADATA_FILENAME = "ml_boundary_day_metadata.csv"
 SPLIT_MANIFEST_FILENAME = "ml_boundary_splits.csv"
 CORPUS_ATTRITION_FILENAME = "ml_boundary_attrition.json"
+DATASET_REPORT_FILENAME = "ml_boundary_dataset_report.json"
 VALIDATION_REPORT_FILENAME = "ml_boundary_validation_report.json"
 PIPELINE_SUMMARY_FILENAME = "ml_boundary_pipeline_summary.json"
 EVALUATION_METRICS_FILENAME = "metrics.json"
@@ -53,6 +54,14 @@ DEFAULT_TEST_FRACTION = 0.15
 DEFAULT_SPLIT_SEED = 42
 SPLIT_NAMES = ("train", "validation", "test")
 HELDOUT_SPLIT_NAMES = ("validation", "test")
+LEGACY_EXTERNAL_COLUMNS = ("window_size", "overlap")
+DATASET_CONTRACT_KEYS = (
+    "candidate_rule_name",
+    "candidate_rule_version",
+    "candidate_rule_params_json",
+    "descriptor_schema_version",
+    "window_radius",
+)
 
 
 @dataclass(frozen=True)
@@ -184,7 +193,7 @@ def _existing_day_candidate_outputs(workspace_dir: Path) -> list[Path]:
         for path in (
             workspace_dir / "ml_boundary_candidates.csv",
             workspace_dir / "ml_boundary_attrition.json",
-            workspace_dir / "ml_boundary_dataset_report.json",
+            workspace_dir / DATASET_REPORT_FILENAME,
         )
         if path.exists()
     ]
@@ -327,22 +336,110 @@ def resolve_split_config(args: argparse.Namespace, day_dirs: Sequence[Path]) -> 
     )
 
 
-def _read_candidate_rows(path: Path) -> list[dict[str, str]]:
+def _parse_positive_int(value: object, *, field_name: str) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a positive integer") from exc
+    if parsed < 1:
+        raise ValueError(f"{field_name} must be a positive integer")
+    return parsed
+
+
+def _require_non_blank_string(value: object, *, field_name: str) -> str:
+    normalized = str(value or "").strip()
+    if normalized == "":
+        raise ValueError(f"{field_name} must not be blank")
+    return normalized
+
+
+def _load_dataset_report(path: Path) -> dict[str, object]:
+    payload = _load_json_object(path)
+    missing = [key for key in DATASET_CONTRACT_KEYS if key not in payload]
+    if missing:
+        raise ValueError(f"{path.name} missing required keys: {', '.join(missing)}")
+    payload["candidate_rule_name"] = _require_non_blank_string(
+        payload.get("candidate_rule_name"),
+        field_name=f"{path.name} candidate_rule_name",
+    )
+    payload["candidate_rule_version"] = _require_non_blank_string(
+        payload.get("candidate_rule_version"),
+        field_name=f"{path.name} candidate_rule_version",
+    )
+    payload["candidate_rule_params_json"] = _require_non_blank_string(
+        payload.get("candidate_rule_params_json"),
+        field_name=f"{path.name} candidate_rule_params_json",
+    )
+    payload["descriptor_schema_version"] = _require_non_blank_string(
+        payload.get("descriptor_schema_version"),
+        field_name=f"{path.name} descriptor_schema_version",
+    )
+    payload["window_radius"] = _parse_positive_int(
+        payload.get("window_radius"),
+        field_name=f"{path.name} window_radius",
+    )
+    return payload
+
+
+def _load_dataset_contract(day_workspaces: Sequence[Path]) -> dict[str, object]:
+    shared_contract: dict[str, object] | None = None
+    shared_path: Path | None = None
+    for workspace_dir in day_workspaces:
+        report_path = workspace_dir / DATASET_REPORT_FILENAME
+        report = _load_dataset_report(report_path)
+        contract = {key: report[key] for key in DATASET_CONTRACT_KEYS}
+        if shared_contract is None:
+            shared_contract = contract
+            shared_path = report_path
+            continue
+        mismatches = [
+            key
+            for key in DATASET_CONTRACT_KEYS
+            if contract[key] != shared_contract[key]
+        ]
+        if mismatches:
+            mismatch_details = ", ".join(
+                f"{key}={contract[key]!r} (expected {shared_contract[key]!r})"
+                for key in mismatches
+            )
+            raise ValueError(
+                "ML boundary dataset contract mismatch between "
+                f"{shared_path} and {report_path}: {mismatch_details}"
+            )
+    if shared_contract is None:
+        raise ValueError("No ML boundary dataset reports were found")
+    return shared_contract
+
+
+def _read_candidate_rows(path: Path, *, expected_headers: Sequence[str]) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
-        missing = [header for header in CANDIDATE_ROW_HEADERS if header not in (reader.fieldnames or [])]
+        legacy_columns = [
+            field_name
+            for field_name in LEGACY_EXTERNAL_COLUMNS
+            if field_name in (reader.fieldnames or [])
+        ]
+        if legacy_columns:
+            raise ValueError(
+                f"{path.name} legacy columns are not allowed: {', '.join(legacy_columns)}"
+            )
+        missing = [header for header in expected_headers if header not in (reader.fieldnames or [])]
         if missing:
             raise ValueError(f"{path.name} missing required columns: {', '.join(missing)}")
         rows = [dict(row) for row in reader]
     return rows
 
 
-def _merge_candidate_rows(candidate_csv_paths: Sequence[Path]) -> list[dict[str, str]]:
+def _merge_candidate_rows(
+    candidate_csv_paths: Sequence[Path],
+    *,
+    expected_headers: Sequence[str],
+) -> list[dict[str, str]]:
     merged_rows: list[dict[str, str]] = []
     with _progress() as progress:
         task_id = progress.add_task("Merge candidate rows".ljust(25), total=len(candidate_csv_paths))
         for path in candidate_csv_paths:
-            merged_rows.extend(_read_candidate_rows(path))
+            merged_rows.extend(_read_candidate_rows(path, expected_headers=expected_headers))
             progress.advance(task_id)
     if not merged_rows:
         raise ValueError(
@@ -1227,6 +1324,7 @@ def _write_pipeline_summary(
     day_metadata_path: Path,
     split_manifest_path: Path | None,
     validation_report_path: Path | None,
+    dataset_contract: dict[str, object],
     model_dir: Path | None,
     eval_dir: Path | None,
     evaluation_metrics: dict[str, object] | None,
@@ -1253,6 +1351,11 @@ def _write_pipeline_summary(
         "split_seed": split_config.seed,
         "mode": mode,
         "prepare_only": prepare_only,
+        "window_radius": int(dataset_contract["window_radius"]),
+        "candidate_rule_name": dataset_contract["candidate_rule_name"],
+        "candidate_rule_version": dataset_contract["candidate_rule_version"],
+        "candidate_rule_params_json": dataset_contract["candidate_rule_params_json"],
+        "descriptor_schema_version": dataset_contract["descriptor_schema_version"],
     }
     if split_manifest_path is not None:
         payload["split_manifest_csv"] = str(split_manifest_path)
@@ -1294,13 +1397,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     candidate_csv_paths = [workspace / "ml_boundary_candidates.csv" for workspace in day_workspaces]
     try:
-        merged_rows = _merge_candidate_rows(candidate_csv_paths)
+        dataset_contract = _load_dataset_contract(day_workspaces)
+        merged_headers = candidate_row_headers(
+            window_radius=int(dataset_contract["window_radius"]),
+            include_thumbnail=True,
+        )
+        merged_rows = _merge_candidate_rows(candidate_csv_paths, expected_headers=merged_headers)
         _validate_corpus_size(merged_rows)
-    except ValueError as error:
+    except (FileNotFoundError, ValueError) as error:
         console.print(f"[red]Error: {error}[/red]")
         return 1
     corpus_candidates_path = corpus_workspace / CORPUS_CANDIDATES_FILENAME
-    atomic_write_csv(corpus_candidates_path, CANDIDATE_ROW_HEADERS, merged_rows)
+    atomic_write_csv(corpus_candidates_path, merged_headers, merged_rows)
     console.print(f"Wrote merged candidate dataset: {corpus_candidates_path}")
 
     day_metadata_rows = _build_day_metadata_rows(merged_rows)
@@ -1373,6 +1481,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         day_metadata_path=day_metadata_path,
         split_manifest_path=split_manifest_path,
         validation_report_path=corpus_workspace / VALIDATION_REPORT_FILENAME,
+        dataset_contract=dataset_contract,
         model_dir=model_dir,
         eval_dir=eval_dir,
         evaluation_metrics=evaluation_metrics,

@@ -9,7 +9,7 @@ from rich.console import Console
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
-from build_ml_boundary_candidate_dataset import CANDIDATE_ROW_HEADERS
+from build_ml_boundary_candidate_dataset import candidate_row_headers
 from lib.ml_boundary_dataset import canonical_candidate_id
 from lib.workspace_dir import resolve_workspace_dir
 from run_ml_boundary_pipeline import (
@@ -24,20 +24,29 @@ from run_ml_boundary_pipeline import (
 )
 
 
-def _candidate_row(*, day_id: str, segment_type: str, boundary: str, offset: int) -> dict[str, str]:
-    row = {header: "" for header in CANDIDATE_ROW_HEADERS}
+def _candidate_row(
+    *,
+    day_id: str,
+    segment_type: str,
+    boundary: str,
+    offset: int,
+    window_radius: int = 2,
+) -> dict[str, str]:
+    headers = candidate_row_headers(window_radius=window_radius, include_thumbnail=True)
+    row = {header: "" for header in headers}
+    frame_count = window_radius * 2
     row.update(
         {
             "candidate_id": canonical_candidate_id(
                 day_id=day_id,
-                center_left_photo_id=f"{day_id}-p3-{offset}",
-                center_right_photo_id=f"{day_id}-p4-{offset}",
+                center_left_photo_id=f"{day_id}-p{window_radius}-{offset}",
+                center_right_photo_id=f"{day_id}-p{window_radius + 1}-{offset}",
                 candidate_rule_version="gap-v1",
             ),
             "day_id": day_id,
-            "window_size": "5",
-            "center_left_photo_id": f"{day_id}-p3-{offset}",
-            "center_right_photo_id": f"{day_id}-p4-{offset}",
+            "window_radius": str(window_radius),
+            "center_left_photo_id": f"{day_id}-p{window_radius}-{offset}",
+            "center_right_photo_id": f"{day_id}-p{window_radius + 1}-{offset}",
             "left_segment_id": f"{day_id}-seg-left",
             "right_segment_id": f"{day_id}-seg-right",
             "left_segment_type": "performance",
@@ -46,14 +55,23 @@ def _candidate_row(*, day_id: str, segment_type: str, boundary: str, offset: int
             "boundary": boundary,
             "candidate_rule_name": "gap_threshold",
             "candidate_rule_version": "gap-v1",
-            "candidate_rule_params_json": "{\"gap_threshold_seconds\":20.0}",
+            "candidate_rule_params_json": (
+                f'{{"gap_threshold_seconds":20.0,"window_radius":{window_radius}}}'
+            ),
             "descriptor_schema_version": "not_included_v1",
             "split_name": "",
-            "window_photo_ids": "[\"p1\",\"p2\",\"p3\",\"p4\",\"p5\"]",
-            "window_relative_paths": "[\"cam/p1.jpg\",\"cam/p2.jpg\",\"cam/p3.jpg\",\"cam/p4.jpg\",\"cam/p5.jpg\"]",
+            "window_photo_ids": json.dumps(
+                [f"{day_id}-p{frame_index}-{offset}" for frame_index in range(1, frame_count + 1)]
+            ),
+            "window_relative_paths": json.dumps(
+                [
+                    f"cam/{day_id}-p{frame_index}-{offset}.jpg"
+                    for frame_index in range(1, frame_count + 1)
+                ]
+            ),
         }
     )
-    for frame_index in range(1, 6):
+    for frame_index in range(1, frame_count + 1):
         suffix = f"{frame_index:02d}"
         row[f"frame_{suffix}_photo_id"] = f"{day_id}-p{frame_index}-{offset}"
         row[f"frame_{suffix}_relpath"] = f"cam/{day_id}-p{frame_index}-{offset}.jpg"
@@ -65,8 +83,9 @@ def _candidate_row(*, day_id: str, segment_type: str, boundary: str, offset: int
 
 def _write_candidate_csv(path: Path, rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(rows[0].keys()) if rows else candidate_row_headers(window_radius=2, include_thumbnail=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CANDIDATE_ROW_HEADERS)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -80,6 +99,7 @@ def _write_day_candidate_artifacts(
     true_boundary_after: int | None = None,
 ) -> None:
     _write_candidate_csv(workspace_dir / "ml_boundary_candidates.csv", rows)
+    window_radius = int(rows[0]["window_radius"]) if rows else 2
     retained_count = len(rows)
     if generated_count is None:
         generated_count = retained_count
@@ -90,6 +110,28 @@ def _write_day_candidate_artifacts(
     (workspace_dir / "ml_boundary_attrition.json").write_text(
         json.dumps(
             {
+                "candidate_count_generated": generated_count,
+                "candidate_count_excluded_missing_window": 0,
+                "candidate_count_excluded_missing_artifacts": generated_count - retained_count,
+                "candidate_count_retained": retained_count,
+                "true_boundary_coverage_before_exclusions": true_boundary_before,
+                "true_boundary_coverage_after_exclusions": true_boundary_after,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (workspace_dir / "ml_boundary_dataset_report.json").write_text(
+        json.dumps(
+            {
+                "day_id": workspace_dir.name[:8],
+                "candidate_rule_name": "gap_threshold",
+                "candidate_rule_version": "gap-v1",
+                "candidate_rule_params_json": (
+                    f'{{"gap_threshold_seconds":20.0,"window_radius":{window_radius}}}'
+                ),
+                "descriptor_schema_version": "not_included_v1",
+                "window_radius": window_radius,
+                "gap_threshold_seconds": 20.0,
                 "candidate_count_generated": generated_count,
                 "candidate_count_excluded_missing_window": 0,
                 "candidate_count_excluded_missing_artifacts": generated_count - retained_count,
@@ -511,6 +553,58 @@ def test_main_prepare_only_skips_train_and_eval(tmp_path: Path, monkeypatch) -> 
         (corpus_workspace / "ml_boundary_pipeline_summary.json").read_text(encoding="utf-8")
     )
     assert summary_payload["prepare_only"] is True
+
+
+def test_main_prepare_only_preserves_dynamic_window_radius_headers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    day_dir = tmp_path / "20250324"
+    workspace_dir = tmp_path / "20250324DWC"
+    day_dir.mkdir(parents=True)
+    workspace_dir.mkdir(parents=True)
+    (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            rows = [
+                _candidate_row(
+                    day_id=day_dir.name,
+                    segment_type="performance",
+                    boundary="0",
+                    offset=1,
+                    window_radius=3,
+                ),
+                _candidate_row(
+                    day_id=day_dir.name,
+                    segment_type="ceremony",
+                    boundary="1",
+                    offset=2,
+                    window_radius=3,
+                ),
+                _candidate_row(
+                    day_id=day_dir.name,
+                    segment_type="warmup",
+                    boundary="0",
+                    offset=3,
+                    window_radius=3,
+                ),
+            ]
+            _write_day_candidate_artifacts(workspace_dir, rows)
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+
+    exit_code = main([str(day_dir), "--prepare-only", "--split-strategy", "global_random"])
+
+    assert exit_code == 0
+    corpus_workspace = workspace_dir / "ml_boundary_corpus"
+    with (corpus_workspace / CORPUS_CANDIDATES_FILENAME).open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        assert "frame_06_photo_id" in (reader.fieldnames or [])
+        merged_rows = list(reader)
+
+    assert merged_rows[0]["window_radius"] == "3"
+    assert merged_rows[0]["frame_06_photo_id"].startswith(f"{day_dir.name}-p6-")
 
 
 def test_render_eval_metrics_summary_labels_training_corpus_heuristics_when_available() -> None:

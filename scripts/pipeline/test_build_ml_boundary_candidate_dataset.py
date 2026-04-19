@@ -11,6 +11,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
 from build_ml_boundary_candidate_dataset import (
     DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1,
+    _build_dataset_report,
     _serialize_candidate_row,
     CANDIDATE_ROW_HEADERS,
     build_candidate_rows,
@@ -288,6 +289,29 @@ def test_build_candidate_rows_include_window_radius_in_rule_params_and_candidate
         "{\"gap_threshold_seconds\":10.0,\"window_radius\":3}"
     )
     assert radius_two_rows[0]["candidate_id"] != radius_three_rows[0]["candidate_id"]
+
+
+def test_build_dataset_report_records_radius_and_schema_metadata() -> None:
+    report = _build_dataset_report(
+        day_id="20250325",
+        gap_threshold_seconds=20.0,
+        candidate_rule_version="gap-v1",
+        window_radius=3,
+        candidate_rule_params_json='{"gap_threshold_seconds":20.0,"window_radius":3}',
+        descriptor_schema_version=DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1,
+        attrition={
+            "candidate_count_generated": 4,
+            "candidate_count_excluded_missing_window": 1,
+            "candidate_count_excluded_missing_artifacts": 1,
+            "candidate_count_retained": 2,
+            "true_boundary_coverage_before_exclusions": 2,
+            "true_boundary_coverage_after_exclusions": 1,
+        },
+    )
+
+    assert report["window_radius"] == 3
+    assert report["candidate_rule_params_json"] == '{"gap_threshold_seconds":20.0,"window_radius":3}'
+    assert report["descriptor_schema_version"] == DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1
 
 
 def test_serialize_candidate_row_requires_window_radius() -> None:

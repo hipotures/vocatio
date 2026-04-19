@@ -59,7 +59,7 @@ def default_boundary_threshold_policy() -> dict[str, float | str]:
     return {"policy": "fixed", "threshold": 0.5}
 
 
-def image_feature_columns_for_mode(mode: str, *, window_radius: int = 2) -> list[str]:
+def image_feature_columns_for_mode(mode: str, *, window_radius: int) -> list[str]:
     return training_image_feature_columns_for_mode(mode, window_radius=window_radius)
 
 

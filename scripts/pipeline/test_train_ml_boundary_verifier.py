@@ -4,6 +4,7 @@ import sys
 from io import StringIO
 from pathlib import Path
 
+import pytest
 from rich.console import Console
 
 
@@ -71,7 +72,7 @@ def _candidate_row(
             "boundary": boundary,
             "candidate_rule_name": "gap_threshold",
             "candidate_rule_version": "gap-v1",
-            "candidate_rule_params_json": "{\"gap_threshold_seconds\":20.0}",
+            "candidate_rule_params_json": "{\"gap_threshold_seconds\":20.0,\"window_radius\":2}",
             "descriptor_schema_version": "not_included_v1",
             "split_name": "",
             "window_photo_ids": "[\"p1\",\"p2\",\"p3\",\"p4\"]",
@@ -203,7 +204,7 @@ def test_default_boundary_threshold_policy_is_fixed_half() -> None:
 
 
 def test_image_feature_columns_for_thumbnail_mode_preserve_order() -> None:
-    assert image_feature_columns_for_mode("tabular_plus_thumbnail") == [
+    assert image_feature_columns_for_mode("tabular_plus_thumbnail", window_radius=2) == [
         "frame_01_thumb_path",
         "frame_02_thumb_path",
         "frame_03_thumb_path",
@@ -212,7 +213,12 @@ def test_image_feature_columns_for_thumbnail_mode_preserve_order() -> None:
 
 
 def test_image_feature_columns_for_tabular_mode_is_empty() -> None:
-    assert image_feature_columns_for_mode("tabular_only") == []
+    assert image_feature_columns_for_mode("tabular_only", window_radius=2) == []
+
+
+def test_image_feature_columns_for_mode_requires_explicit_window_radius() -> None:
+    with pytest.raises(TypeError):
+        image_feature_columns_for_mode("tabular_plus_thumbnail")
 
 
 def test_build_training_plan_rejects_unknown_mode() -> None:
@@ -263,6 +269,24 @@ def test_validate_dataset_contract_rejects_parquet_in_training_path(tmp_path: Pa
         assert "Parquet dataset schema inspection is not supported" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_validate_dataset_contract_rejects_legacy_window_size_column(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    dataset_path.write_text(
+        "candidate_id,day_id,window_radius,window_size,segment_type,boundary,"
+        "frame_01_timestamp,frame_02_timestamp,frame_03_timestamp,frame_04_timestamp,"
+        "frame_01_photo_id,frame_02_photo_id,frame_03_photo_id,frame_04_photo_id,"
+        "frame_01_relpath,frame_02_relpath,frame_03_relpath,frame_04_relpath,"
+        "frame_01_thumb_path,frame_02_thumb_path,frame_03_thumb_path,frame_04_thumb_path\n"
+        "abc,20250325,2,4,performance,0,1,2,3,4,p1,p2,p3,p4,"
+        "cam/p1.jpg,cam/p2.jpg,cam/p3.jpg,cam/p4.jpg,"
+        "thumb/p1.jpg,thumb/p2.jpg,thumb/p3.jpg,thumb/p4.jpg\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="legacy columns are not allowed: window_size"):
+        validate_dataset_contract(dataset_path, "tabular_plus_thumbnail")
 
 
 def test_validate_dataset_contract_requires_thumbnail_columns_for_thumbnail_mode(

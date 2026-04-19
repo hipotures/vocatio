@@ -15,6 +15,7 @@ from lib.window_radius_contract import window_radius_to_window_size
 
 TRAIN_MODES = ("tabular_only", "tabular_plus_thumbnail")
 DEFAULT_ML_WINDOW_RADIUS = 2
+LEGACY_EXTERNAL_COLUMNS = ("window_size", "overlap")
 
 
 def frame_numbers_for_window_radius(window_radius: int) -> list[int]:
@@ -158,7 +159,7 @@ def validate_dataset_path(dataset_path: Path) -> None:
         )
 
 
-def image_feature_columns_for_mode(mode: str, *, window_radius: int = DEFAULT_ML_WINDOW_RADIUS) -> list[str]:
+def image_feature_columns_for_mode(mode: str, *, window_radius: int) -> list[str]:
     validate_mode(mode)
     if mode != "tabular_plus_thumbnail":
         return []
@@ -378,6 +379,11 @@ def _require_columns(
     required_columns: list[str] | tuple[str, ...],
     resource_name: str,
 ) -> None:
+    legacy_columns = [column for column in LEGACY_EXTERNAL_COLUMNS if column in columns]
+    if legacy_columns:
+        raise ValueError(
+            f"{resource_name} legacy columns are not allowed: {', '.join(legacy_columns)}"
+        )
     missing = [column for column in required_columns if column not in columns]
     if missing:
         raise ValueError(f"{resource_name} missing required columns: {', '.join(missing)}")
