@@ -1984,13 +1984,10 @@ def probe_vlm_photo_boundaries(
         image_variant=image_variant,
     )
     boundary_rows_by_pair = read_boundary_scores_by_pair(workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME)
-    try:
-        ml_hint_context = load_ml_hint_context(
-            ml_model_run_id=ml_model_run_id,
-            ml_model_dir=ml_model_dir,
-        )
-    except Exception:
-        ml_hint_context = None
+    ml_hint_context = load_ml_hint_context(
+        ml_model_run_id=ml_model_run_id,
+        ml_model_dir=ml_model_dir,
+    )
     all_candidates = build_candidate_windows(
         joined_rows,
         window_radius=window_radius,

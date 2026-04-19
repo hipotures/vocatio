@@ -1603,6 +1603,80 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(row_count, 0)
             run_vlm_mock.assert_not_called()
 
+    def test_probe_vlm_photo_boundaries_fails_fast_when_ml_hint_context_load_fails(self):
+        args_payload = {
+            "embedded_manifest_csv": "/tmp/photo_embedded_manifest.csv",
+            "photo_manifest_csv": "/tmp/media_manifest.csv",
+            "image_variant": "thumb",
+            "window_radius": 2,
+            "boundary_gap_seconds": 10,
+            "max_batches": 100,
+            "model": "qwen3.5:9b",
+            "ollama_base_url": "http://127.0.0.1:11434",
+            "ollama_num_ctx": 16384,
+            "ollama_num_predict": None,
+            "ollama_keep_alive": "15m",
+            "timeout_seconds": 300.0,
+            "temperature": 0.0,
+            "ollama_think": "false",
+            "extra_instructions": "",
+            "extra_instructions_file": None,
+            "effective_extra_instructions": "",
+        }
+
+        with mock.patch.object(
+            probe,
+            "read_joined_rows",
+            return_value=[
+                {"start_epoch_ms": "1000"},
+                {"start_epoch_ms": "2000"},
+                {"start_epoch_ms": "3000"},
+                {"start_epoch_ms": "4000"},
+            ],
+        ), mock.patch.object(
+            probe,
+            "read_boundary_scores_by_pair",
+            return_value={},
+        ), mock.patch.object(
+            probe,
+            "load_ml_hint_context",
+            side_effect=ValueError("ml hint context load failed: missing training window_radius"),
+        ), mock.patch.object(
+            probe,
+            "build_candidate_windows",
+            side_effect=AssertionError("runtime should fail before building candidates"),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "ml hint context load failed: missing training window_radius",
+            ):
+                probe.probe_vlm_photo_boundaries(
+                    day_id="20260323",
+                    workspace_dir=Path("/tmp/workspace"),
+                    embedded_manifest_csv=Path("/tmp/photo_embedded_manifest.csv"),
+                    photo_manifest_csv=Path("/tmp/media_manifest.csv"),
+                    output_csv=Path("/tmp/vlm_boundary_results.csv"),
+                    provider="ollama",
+                    image_variant="thumb",
+                    window_radius=2,
+                    boundary_gap_seconds=10,
+                    max_batches=100,
+                    model="qwen3.5:9b",
+                    ollama_base_url="http://127.0.0.1:11434",
+                    ollama_num_ctx=16384,
+                    ollama_num_predict=None,
+                    ollama_keep_alive="15m",
+                    timeout_seconds=300.0,
+                    temperature=0.0,
+                    ollama_think="false",
+                    extra_instructions="",
+                    dump_debug_dir=None,
+                    ml_model_run_id="ml-run-001",
+                    ml_model_dir=Path("/tmp/model-run"),
+                    args_payload=args_payload,
+                    new_run=True,
+                )
+
     def test_probe_vlm_photo_boundaries_appends_each_batch_immediately(self):
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"
