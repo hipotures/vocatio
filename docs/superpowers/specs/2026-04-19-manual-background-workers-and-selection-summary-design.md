@@ -149,6 +149,7 @@ Rules:
 - do not compare the finishing result against the current selection before applying it
 - the latest completed run for a section simply replaces the previous runtime result for that section
 - this applies even if the current selection is now a different pair or is no longer exactly two photos
+- if a job finishes after the selection stops qualifying for the manual sections, the finished result must remain visible in the info panel instead of being silently hidden
 
 This is intentionally permissive. The user explicitly prefers to keep the finished result rather than have the GUI silently throw it away.
 
@@ -270,7 +271,9 @@ Tests must prove:
 - both manual sections enter `running` without blocking the rest of the GUI update path
 - both manual sections use background workers instead of direct synchronous compute from the click handler
 - starting either action disables both manual action buttons
+- the idle button labels remain `Run` and `Analyze`
 - only the active action shows the spinner while running
+- the active button keeps the same short base label while the spinner is shown
 - success updates section state back on the GUI thread
 - failure updates section state back on the GUI thread
 - ML and VLM cannot both be in `running` state at the same time
