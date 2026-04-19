@@ -26,7 +26,11 @@ from rich.progress import (
 from lib.image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1
 from lib.ml_boundary_dataset import normalize_timestamp
 from lib.ml_boundary_features import build_candidate_feature_row
-from lib.ml_boundary_training_data import HEURISTIC_VALUE_COLUMNS, heuristic_pair_join_columns_for_window_radius
+from lib.ml_boundary_training_data import (
+    HEURISTIC_VALUE_COLUMNS,
+    heuristic_pair_join_columns_for_window_radius,
+    image_feature_columns_for_mode as training_image_feature_columns_for_mode,
+)
 from lib.media_manifest import read_media_manifest, select_photo_rows
 from lib.pipeline_io import atomic_write_json
 from lib.photo_pre_model_annotations import (
@@ -78,6 +82,10 @@ ML_SEGMENT_TYPE_TO_PROMPT_LABEL = {
     "ceremony": "ceremony",
     "warmup": "rehearsal",
 }
+PAIR_FEATURE_COLUMN_RE = re.compile(
+    r"^(?:gap|heuristic_(?:dino_dist|boundary_score|distance_zscore|smoothed_distance_zscore|time_gap_boost|boundary_label))_(\d+)$"
+)
+THUMBNAIL_FEATURE_COLUMN_RE = re.compile(r"^frame_(\d{2})_thumb_path$")
 GUI_TYPE_CODE_BY_SEGMENT_TYPE = {
     "performance": "P",
     "ceremony": "C",
@@ -195,6 +203,60 @@ class MlHintPrediction(NamedTuple):
     boundary_positive_probability: float
     segment_type_prediction: str
     segment_type_confidence: float
+
+
+def _validate_ml_hint_feature_columns_contract(
+    *,
+    mode: str,
+    window_radius: int,
+    image_feature_columns: Sequence[str],
+    boundary_feature_columns: Sequence[str],
+    segment_type_feature_columns: Sequence[str],
+) -> None:
+    expected_pair_names = {
+        f"{left}{right}"
+        for left, right in zip(
+            range(1, window_radius_to_window_size(window_radius)),
+            range(2, window_radius_to_window_size(window_radius) + 1),
+            strict=True,
+        )
+    }
+    expected_image_feature_columns = training_image_feature_columns_for_mode(
+        mode,
+        window_radius=window_radius,
+    )
+    if list(image_feature_columns) != expected_image_feature_columns:
+        raise ValueError(
+            "feature_columns.json is inconsistent with training "
+            f"window_radius={window_radius}: image_feature_columns mismatch"
+        )
+
+    def validate_predictor_columns(predictor_name: str, columns: Sequence[str]) -> None:
+        predictor_image_columns = [
+            str(column_name)
+            for column_name in columns
+            if THUMBNAIL_FEATURE_COLUMN_RE.match(str(column_name))
+        ]
+        if predictor_image_columns != expected_image_feature_columns:
+            raise ValueError(
+                "feature_columns.json is inconsistent with training "
+                f"window_radius={window_radius}: {predictor_name} image columns mismatch"
+            )
+        invalid_pair_columns = [
+            str(column_name)
+            for column_name in columns
+            if (match := PAIR_FEATURE_COLUMN_RE.match(str(column_name)))
+            and match.group(1) not in expected_pair_names
+        ]
+        if invalid_pair_columns:
+            raise ValueError(
+                "feature_columns.json is inconsistent with training "
+                f"window_radius={window_radius}: {predictor_name} pair columns mismatch: "
+                + ", ".join(invalid_pair_columns)
+            )
+
+    validate_predictor_columns("boundary_feature_columns", boundary_feature_columns)
+    validate_predictor_columns("segment_type_feature_columns", segment_type_feature_columns)
 
 SYSTEM_PROMPT = (
     "You analyze consecutive stage performance photos. "
@@ -773,8 +835,16 @@ def load_ml_hint_context(
     window_radius = int(training_metadata["window_radius"])
     if window_radius < 1:
         raise ValueError("window_radius must be at least 1")
+    image_feature_columns = [str(value) for value in feature_columns_payload.get("image_feature_columns", [])]
     boundary_feature_columns = [str(value) for value in feature_columns_payload.get("boundary_feature_columns", [])]
     segment_type_feature_columns = [str(value) for value in feature_columns_payload.get("segment_type_feature_columns", [])]
+    _validate_ml_hint_feature_columns_contract(
+        mode=mode,
+        window_radius=window_radius,
+        image_feature_columns=image_feature_columns,
+        boundary_feature_columns=boundary_feature_columns,
+        segment_type_feature_columns=segment_type_feature_columns,
+    )
     descriptor_field_registry = _build_descriptor_field_registry_from_feature_columns(
         sorted(set(boundary_feature_columns + segment_type_feature_columns))
     )

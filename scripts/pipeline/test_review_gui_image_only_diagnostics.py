@@ -418,32 +418,71 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Right-side segment: ceremony (0.00)", result_text)
         self.assertIn("Gap seconds: 0.0", result_text)
 
-    def test_resolve_manual_prediction_window_config_prefers_window_radius_only(self):
+    def test_resolve_manual_prediction_window_config_uses_saved_index_radius(self):
         resolved = review_gui.resolve_manual_prediction_window_config(
             {
-                "VLM_WINDOW_RADIUS": "4",
-                "VLM_WINDOW_SIZE": "7",
-                "VLM_OVERLAP": "3",
+                "vlm_window_radius": 4,
             }
         )
         self.assertEqual(resolved, {"window_radius": 4})
 
-    def test_resolve_manual_prediction_window_config_falls_back_to_probe_defaults(self):
-        resolved = review_gui.resolve_manual_prediction_window_config({})
-        self.assertEqual(
-            resolved,
-            {
-                "window_radius": review_gui.probe_vlm_boundary.DEFAULT_WINDOW_RADIUS,
-            },
-        )
+    def test_resolve_manual_prediction_window_config_rejects_missing_saved_index_radius(self):
+        with self.assertRaisesRegex(ValueError, "review index window_radius is unavailable"):
+            review_gui.resolve_manual_prediction_window_config({})
 
-    def test_resolve_manual_prediction_window_config_rejects_non_positive_window_radius(self):
+    def test_resolve_manual_prediction_window_config_rejects_non_positive_saved_index_radius(self):
         with self.assertRaisesRegex(argparse.ArgumentTypeError, "must be a positive integer"):
             review_gui.resolve_manual_prediction_window_config(
                 {
-                    "VLM_WINDOW_RADIUS": "0",
+                    "vlm_window_radius": "0",
                 }
             )
+
+    def test_resolve_manual_prediction_state_uses_saved_index_radius_not_vocatio_drift(self):
+        selected_photos = [
+            {
+                "filename": "left.jpg",
+                "relative_path": "cam/left.jpg",
+                "source_path": "/src/left.jpg",
+                "adjusted_start_local": "2026-03-23T10:00:00",
+            },
+            {
+                "filename": "right.jpg",
+                "relative_path": "cam/right.jpg",
+                "source_path": "/src/right.jpg",
+                "adjusted_start_local": "2026-03-23T10:00:05",
+            },
+        ]
+        joined_rows = [
+            {"relative_path": "cam/pre.jpg", "start_epoch_ms": "1000"},
+            {"relative_path": "cam/left.jpg", "start_epoch_ms": "2000"},
+            {"relative_path": "cam/right.jpg", "start_epoch_ms": "7000"},
+            {"relative_path": "cam/post.jpg", "start_epoch_ms": "8000"},
+        ]
+
+        with unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_vocatio_config",
+            return_value={"VLM_WINDOW_RADIUS": "4"},
+        ), unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_joined_rows",
+            return_value=joined_rows,
+        ):
+            state = review_gui.resolve_manual_prediction_state(
+                day_dir=Path("/tmp/20260323"),
+                workspace_dir=Path("/tmp/workspace"),
+                payload={
+                    "day": "20260323",
+                    "vlm_window_radius": 2,
+                },
+                selected_photos=selected_photos,
+            )
+
+        self.assertEqual(state["status"], "idle")
+        self.assertEqual(state["window_config"], {"window_radius": 2})
+        self.assertEqual(state["anchor_pair"]["left_relative_path"], "cam/left.jpg")
+        self.assertEqual(state["anchor_pair"]["right_relative_path"], "cam/right.jpg")
 
     def test_resolve_manual_prediction_anchor_pair_sorts_like_gui_and_ignores_interior_rows(self):
         selected_photos = [
@@ -969,6 +1008,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "day": "20260323",
             "ml_model_run_id": "ml-run-001",
             "photo_pre_model_dir": "photo-pre",
+            "vlm_window_radius": 2,
         }
         window.index_path = Path("/tmp/performance_proxy_index.json")
         window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
@@ -1009,10 +1049,6 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         ]
 
         with unittest.mock.patch.object(
-            review_gui,
-            "load_manual_prediction_vocatio_config",
-            return_value={"VLM_WINDOW_RADIUS": "2"},
-        ), unittest.mock.patch.object(
             review_gui,
             "load_manual_prediction_joined_rows",
             return_value=full_joined_rows,
@@ -1080,6 +1116,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.payload = {
             "day": "20260323",
             "ml_model_run_id": "ml-run-001",
+            "vlm_window_radius": 2,
         }
         window.index_path = Path("/tmp/performance_proxy_index.json")
         window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
@@ -1140,6 +1177,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.payload = {
             "day": "20260323",
             "ml_model_run_id": "ml-run-001",
+            "vlm_window_radius": 2,
         }
         window.index_path = Path("/tmp/performance_proxy_index.json")
         window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
@@ -1167,10 +1205,6 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.refresh_current_info_dock = Mock()
 
         with unittest.mock.patch.object(
-            review_gui,
-            "load_manual_prediction_vocatio_config",
-            return_value={},
-        ), unittest.mock.patch.object(
             review_gui,
             "load_manual_prediction_joined_rows",
             return_value=[
@@ -1261,6 +1295,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     "day": "20260323",
                     "ml_model_run_id": "ml-run-001",
                     "photo_pre_model_dir": "photo-pre",
+                    "vlm_window_radius": 2,
                 },
                 joined_rows=joined_rows,
                 anchor_pair={

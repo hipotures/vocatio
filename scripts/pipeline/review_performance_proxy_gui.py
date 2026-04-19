@@ -253,11 +253,11 @@ def resolve_selected_photo_context(selected_photos: Sequence[Mapping[str, Any]])
     return "", ""
 
 
-def resolve_manual_prediction_window_config(vocatio_config: Mapping[str, str]) -> Dict[str, int]:
-    window_radius = probe_vlm_boundary.DEFAULT_WINDOW_RADIUS
-    configured_window_radius = str(vocatio_config.get("VLM_WINDOW_RADIUS", "") or "").strip()
-    if configured_window_radius:
-        window_radius = probe_vlm_boundary.positive_window_radius_arg(configured_window_radius)
+def resolve_manual_prediction_window_config(payload: Mapping[str, Any]) -> Dict[str, int]:
+    configured_window_radius = str(payload.get("vlm_window_radius", "") or "").strip()
+    if not configured_window_radius:
+        raise ValueError("review index window_radius is unavailable")
+    window_radius = probe_vlm_boundary.positive_window_radius_arg(configured_window_radius)
     return {
         "window_radius": window_radius,
     }
@@ -371,9 +371,7 @@ def resolve_manual_prediction_state(
         "selected_photo_keys": manual_prediction_selected_photo_keys(selected_photos),
     }
     try:
-        next_state["window_config"] = resolve_manual_prediction_window_config(
-            load_manual_prediction_vocatio_config(day_dir)
-        )
+        next_state["window_config"] = resolve_manual_prediction_window_config(payload)
         next_state["anchor_pair"] = resolve_manual_prediction_anchor_pair(
             selected_photos,
             load_manual_prediction_joined_rows(workspace_dir, payload),

@@ -377,7 +377,7 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                     json.dumps(
                         {
                             "run_id": run_id,
-                            "args": {"image_variant": "thumb"},
+                            "args": {"image_variant": "thumb", "window_radius": 2},
                             "embedded_manifest_csv": str(embedded_manifest_csv),
                             "photo_manifest_csv": str(photo_manifest_csv),
                             "output_csv": str(output_csv),
@@ -388,12 +388,13 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
             payload, run_row_count = builder.build_gui_index_for_run(
                 day_dir=day_dir,
                 workspace_dir=workspace_dir,
-                run_metadata={"run_id": "vlm-20260414053012", "args": {"image_variant": "thumb"}, "embedded_manifest_csv": str(embedded_manifest_csv), "photo_manifest_csv": str(photo_manifest_csv), "output_csv": str(output_csv)},
+                run_metadata={"run_id": "vlm-20260414053012", "args": {"image_variant": "thumb", "window_radius": 2}, "embedded_manifest_csv": str(embedded_manifest_csv), "photo_manifest_csv": str(photo_manifest_csv), "output_csv": str(output_csv)},
                 output_csv=output_csv,
             )
             self.assertEqual(run_row_count, 1)
             self.assertEqual(payload["performance_count"], 2)
             self.assertEqual(payload["ml_model_run_id"], "")
+            self.assertEqual(payload["vlm_window_radius"], 2)
             self.assertEqual([photo["relative_path"] for photo in payload["performances"][0]["photos"]], ["cam/a.hif", "cam/b.hif"])
             self.assertEqual([photo["relative_path"] for photo in payload["performances"][1]["photos"]], ["cam/c.hif", "cam/d.hif"])
             self.assertEqual(payload["performances"][0]["photos"][0]["proxy_path"], "embedded_jpg/preview/cam/a.jpg")
@@ -577,7 +578,7 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                 writer.writerow(row)
             run_metadata = {
                 "run_id": "vlm-20260414053012",
-                "args": {"image_variant": "thumb"},
+                "args": {"image_variant": "thumb", "window_radius": 2},
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),
                 "output_csv": str(output_csv),
@@ -691,7 +692,7 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                 workspace_dir=workspace_dir,
                 run_metadata={
                     "run_id": "vlm-20260415192254",
-                    "args": {"image_variant": "thumb"},
+                    "args": {"image_variant": "thumb", "window_radius": 1},
                     "embedded_manifest_csv": str(embedded_manifest_csv),
                     "photo_manifest_csv": str(photo_manifest_csv),
                     "output_csv": str(output_csv),
