@@ -28,10 +28,14 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
+from build_ml_boundary_candidate_dataset import (
+    DEFAULT_WINDOW_RADIUS as DEFAULT_DATASET_WINDOW_RADIUS,
+)
 from build_ml_boundary_candidate_dataset import candidate_row_headers
 from lib.ml_boundary_metrics import predictor_metric_spec
 from lib.ml_boundary_truth import VALID_SEGMENT_TYPES
 from lib.pipeline_io import atomic_write_csv, atomic_write_json
+from lib.window_radius_contract import positive_window_radius_arg
 from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
 
 
@@ -215,6 +219,7 @@ def _resolve_days(day_values: Sequence[str]) -> list[Path]:
 
 def _prepare_single_day(day_dir: Path, *, restart: bool) -> Path:
     workspace_dir = resolve_workspace_dir(day_dir, None)
+    day_window_radius = _resolve_day_window_radius(day_dir)
     export_command = [
         sys.executable,
         _script_ref("export_ml_boundary_reviewed_truth.py"),
@@ -234,6 +239,8 @@ def _prepare_single_day(day_dir: Path, *, restart: bool) -> Path:
         sys.executable,
         _script_ref("build_ml_boundary_candidate_dataset.py"),
         str(day_dir),
+        "--window-radius",
+        str(day_window_radius),
     ]
     if restart:
         build_command.append("--overwrite")
@@ -249,6 +256,14 @@ def _prepare_single_day(day_dir: Path, *, restart: bool) -> Path:
     _run_command(validate_command)
 
     return workspace_dir
+
+
+def _resolve_day_window_radius(day_dir: Path) -> int:
+    config = load_vocatio_config(day_dir)
+    configured_value = str(config.get("VLM_WINDOW_RADIUS", "") or "").strip()
+    if configured_value == "":
+        return DEFAULT_DATASET_WINDOW_RADIUS
+    return positive_window_radius_arg(configured_value)
 
 
 def _resolve_optional_float(

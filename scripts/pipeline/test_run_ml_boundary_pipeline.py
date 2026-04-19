@@ -566,32 +566,38 @@ def test_main_prepare_only_preserves_dynamic_window_radius_headers(
     workspace_dir = tmp_path / "20250324DWC"
     day_dir.mkdir(parents=True)
     workspace_dir.mkdir(parents=True)
-    (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+    (day_dir / ".vocatio").write_text(
+        f"WORKSPACE_DIR={workspace_dir}\nVLM_WINDOW_RADIUS=3\n",
+        encoding="utf-8",
+    )
+    recorded_commands: list[list[str]] = []
 
     def _fake_run_command(command):
         command_values = [str(value) for value in command]
+        recorded_commands.append(command_values)
         if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            window_radius = int(command_values[command_values.index("--window-radius") + 1])
             rows = [
                 _candidate_row(
                     day_id=day_dir.name,
                     segment_type="performance",
                     boundary="0",
                     offset=1,
-                    window_radius=3,
+                    window_radius=window_radius,
                 ),
                 _candidate_row(
                     day_id=day_dir.name,
                     segment_type="ceremony",
                     boundary="1",
                     offset=2,
-                    window_radius=3,
+                    window_radius=window_radius,
                 ),
                 _candidate_row(
                     day_id=day_dir.name,
                     segment_type="warmup",
                     boundary="0",
                     offset=3,
-                    window_radius=3,
+                    window_radius=window_radius,
                 ),
             ]
             _write_day_candidate_artifacts(workspace_dir, rows)
@@ -609,6 +615,12 @@ def test_main_prepare_only_preserves_dynamic_window_radius_headers(
 
     assert merged_rows[0]["window_radius"] == "3"
     assert merged_rows[0]["frame_06_photo_id"].startswith(f"{day_dir.name}-p6-")
+    build_commands = [
+        command for command in recorded_commands if "build_ml_boundary_candidate_dataset.py" in command[1]
+    ]
+    assert build_commands
+    assert "--window-radius" in build_commands[0]
+    assert build_commands[0][build_commands[0].index("--window-radius") + 1] == "3"
 
 
 def test_main_rejects_extra_frame_columns_for_declared_radius(
