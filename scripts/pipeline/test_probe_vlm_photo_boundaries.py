@@ -29,7 +29,7 @@ probe = load_module("probe_vlm_photo_boundaries_test", "scripts/pipeline/probe_v
 
 
 class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
-    def test_parse_args_accepts_overlap_and_temperature(self):
+    def test_parse_args_accepts_window_radius_and_temperature(self):
         args = probe.parse_args(
             [
                 "/tmp/day",
@@ -37,10 +37,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "vlm-20260414053012",
                 "--image-variant",
                 "thumb",
-                "--window-size",
-                "10",
-                "--overlap",
-                "2",
+                "--window-radius",
+                "4",
                 "--boundary-gap-seconds",
                 "12",
                 "--temperature",
@@ -59,8 +57,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         )
         self.assertEqual(args.run_id, "vlm-20260414053012")
         self.assertEqual(args.image_variant, "thumb")
-        self.assertEqual(args.window_size, 10)
-        self.assertEqual(args.overlap, 2)
+        self.assertEqual(args.window_radius, 4)
         self.assertEqual(args.boundary_gap_seconds, 12)
         self.assertEqual(args.temperature, 0.25)
         self.assertEqual(args.response_schema_mode, "on")
@@ -73,6 +70,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
 
     def test_parse_args_defaults_boundary_gap_seconds_to_10(self):
         args = probe.parse_args(["/tmp/day"])
+        self.assertEqual(args.window_radius, probe.DEFAULT_WINDOW_RADIUS)
         self.assertEqual(args.boundary_gap_seconds, 10)
         self.assertEqual(args.json_validation_mode, "strict")
         self.assertEqual(args.photo_manifest_csv, "media_manifest.csv")
@@ -101,8 +99,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "VLM_PHOTO_MANIFEST_CSV=media_manifest.csv",
                         "VLM_EMBEDDED_MANIFEST_CSV=photo_embedded_manifest.csv",
                         "VLM_IMAGE_VARIANT=thumb",
-                        "VLM_WINDOW_SIZE=7",
-                        "VLM_OVERLAP=3",
+                        "VLM_WINDOW_RADIUS=4",
                         "VLM_BOUNDARY_GAP_SECONDS=20",
                         "VLM_MAX_BATCHES=0",
                         "VLM_CONTEXT_TOKENS=8192",
@@ -128,8 +125,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(args.photo_manifest_csv, "media_manifest.csv")
             self.assertEqual(args.embedded_manifest_csv, "photo_embedded_manifest.csv")
             self.assertEqual(args.image_variant, "thumb")
-            self.assertEqual(args.window_size, 7)
-            self.assertEqual(args.overlap, 3)
+            self.assertEqual(args.window_radius, 4)
             self.assertEqual(args.boundary_gap_seconds, 20)
             self.assertEqual(args.max_batches, 0)
             self.assertEqual(args.ollama_num_ctx, 8192)
@@ -143,6 +139,42 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(args.photo_pre_model_dir, "custom_pre_model")
             self.assertEqual(args.ml_model_run_id, "day-20260323-best")
             self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
+
+    def test_apply_vocatio_defaults_ignores_legacy_window_size_and_overlap_env(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            day_dir = Path(tmp_dir) / "20260323"
+            day_dir.mkdir(parents=True)
+            (day_dir / ".vocatio").write_text(
+                "\n".join(
+                    [
+                        "VLM_WINDOW_SIZE=7",
+                        "VLM_OVERLAP=3",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = probe.parse_args([str(day_dir)])
+            args = probe.apply_vocatio_defaults(args, day_dir)
+            self.assertEqual(args.window_radius, probe.DEFAULT_WINDOW_RADIUS)
+
+    def test_window_radius_contract_derives_even_window_size_and_centered_bounds(self):
+        contract = load_module(
+            "window_radius_contract_test",
+            "scripts/pipeline/lib/window_radius_contract.py",
+        )
+        self.assertEqual(contract.window_radius_to_window_size(5), 10)
+        self.assertEqual(
+            contract.build_centered_window_bounds(total_rows=8, cut_index=3, window_radius=2),
+            (2, 6),
+        )
+        self.assertEqual(
+            contract.build_centered_window_bounds(total_rows=8, cut_index=0, window_radius=2),
+            (0, 4),
+        )
+        self.assertEqual(
+            contract.build_centered_window_bounds(total_rows=8, cut_index=6, window_radius=2),
+            (4, 8),
+        )
 
     def test_build_response_schema_uses_boundary_after_frame_and_dynamic_notes(self):
         schema = probe.build_response_schema(window_size=3)
@@ -174,13 +206,13 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             ],
         )
 
-    def test_build_window_start_indexes_uses_overlap_and_aligned_tail(self):
-        self.assertEqual(probe.build_window_start_indexes(total_rows=26, window_size=10, overlap=2), [0, 8, 16])
-        self.assertEqual(probe.build_window_start_indexes(total_rows=53, window_size=10, overlap=2), [0, 8, 16, 24, 32, 40, 43])
+    def test_build_window_start_indexes_uses_window_radius_and_aligned_tail(self):
+        self.assertEqual(probe.build_window_start_indexes(total_rows=26, window_radius=5), [0, 5, 10, 15, 16])
+        self.assertEqual(probe.build_window_start_indexes(total_rows=53, window_radius=5), [0, 5, 10, 15, 20, 25, 30, 35, 40, 43])
 
-    def test_build_window_start_indexes_rejects_overlap_equal_to_window_size(self):
+    def test_build_window_start_indexes_rejects_radius_that_exceeds_available_rows(self):
         with self.assertRaises(ValueError):
-            probe.build_window_start_indexes(total_rows=20, window_size=10, overlap=10)
+            probe.build_window_start_indexes(total_rows=5, window_radius=3)
 
     def test_build_candidate_window_start_indexes_returns_only_large_time_gaps(self):
         rows = [
@@ -196,8 +228,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(
             probe.build_candidate_window_start_indexes(
                 rows,
-                window_size=5,
-                overlap=2,
+                window_radius=2,
                 boundary_gap_seconds=10,
             ),
             [2],
@@ -214,8 +245,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(
             probe.build_candidate_window_start_indexes(
                 rows,
-                window_size=5,
-                overlap=2,
+                window_radius=2,
                 boundary_gap_seconds=10,
             ),
             [],
@@ -235,8 +265,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(
             probe.build_candidate_windows(
                 rows,
-                window_size=5,
-                overlap=2,
+                window_radius=2,
                 boundary_gap_seconds=10,
             ),
             [{"start_index": 2, "cut_index": 3, "time_gap_seconds": 17}],
@@ -804,8 +833,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             {
                 "embedded_manifest_csv": "/tmp/a.csv",
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "max_batches": 100,
                 "model": "qwen3.5:9b",
                 "ollama_base_url": "http://127.0.0.1:11434",
@@ -826,8 +854,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "ollama_num_ctx": 16384,
                 "image_variant": "thumb",
                 "embedded_manifest_csv": "/tmp/a.csv",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "max_batches": 100,
                 "model": "qwen3.5:9b",
                 "ollama_base_url": "http://127.0.0.1:11434",
@@ -855,8 +882,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 output_csv=workspace_dir / "vlm_boundary_results.csv",
                 args_payload={
                     "image_variant": "preview",
-                    "window_size": 5,
-                    "overlap": 2,
+                    "window_radius": 2,
                     "max_batches": 100,
                     "model": "qwen3.5:9b",
                     "response_schema_mode": "on",
@@ -871,7 +897,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertTrue(metadata_path.exists())
             stored = json.loads(metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(stored["user_prompt_template"], "user-template")
-            self.assertEqual(stored["args"]["window_size"], 5)
+            self.assertEqual(stored["args"]["window_radius"], 2)
             self.assertEqual(stored["args"]["response_schema_mode"], "on")
             self.assertEqual(stored["response_schema"], {"type": "object"})
 
@@ -987,7 +1013,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             runs_dir.mkdir(parents=True)
             output_csv = workspace_dir / "vlm_boundary_results.csv"
             (runs_dir / "vlm-20260414053113.json").write_text(
-                json.dumps({"run_id": "vlm-20260414053113", "config_hash": "oldhash", "args": {"window_size": 5}}),
+                json.dumps({"run_id": "vlm-20260414053113", "config_hash": "oldhash", "args": {"window_radius": 2}}),
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "Run configuration mismatch"):
@@ -1009,8 +1035,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "embedded_manifest_csv": "/tmp/a.csv",
                 "photo_manifest_csv": "/tmp/b.csv",
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "model": "qwen3.5:9b",
                 "ollama_base_url": "http://127.0.0.1:11434",
                 "ollama_num_ctx": 16384,
@@ -1137,7 +1162,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
                 writer.writeheader()
-                for index, name in enumerate(("a", "b", "c", "d", "e")):
+                epoch_values = (0, 1000, 2000, 3000, 20000)
+                for index, (name, epoch_ms) in enumerate(zip(("a", "b", "c", "d", "e"), epoch_values)):
                     writer.writerow(
                         {
                             "day": day_dir.name,
@@ -1157,7 +1183,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                             "capture_subsec": "000",
                             "photo_order_index": str(index),
                             "start_local": f"2026-03-23T10:00:0{index}",
-                            "start_epoch_ms": str(index * 1000),
+                            "start_epoch_ms": str(epoch_ms),
                             "timestamp_source": "test",
                             "metadata_status": "ok",
                         }
@@ -1167,9 +1193,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
-                "boundary_gap_seconds": 0,
+                "window_radius": 2,
+                "boundary_gap_seconds": 10,
                 "max_batches": 100,
                 "model": "qwen3.5:9b",
                 "ollama_base_url": "http://127.0.0.1:11434",
@@ -1209,9 +1234,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     output_csv=output_csv,
                     provider="ollama",
                     image_variant="thumb",
-                    window_size=5,
-                    overlap=2,
-                    boundary_gap_seconds=0,
+                    window_radius=2,
+                    boundary_gap_seconds=10,
                     max_batches=100,
                     model="qwen3.5:9b",
                     ollama_base_url="http://127.0.0.1:11434",
@@ -1287,8 +1311,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "boundary_gap_seconds": 0,
                 "max_batches": 2,
                 "model": "qwen3.5:9b",
@@ -1316,7 +1339,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     model="qwen3.5:9b",
                     text=(
                         '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                        '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                        '"frame_03":"same dancer","frame_04":"same dancer"},'
                         '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
                     ),
                     json_payload=None,
@@ -1326,7 +1349,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "message": {
                             "content": (
                                 '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                                '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                                '"frame_03":"same dancer","frame_04":"same dancer"},'
                                 '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
                             )
                         }
@@ -1344,8 +1367,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     output_csv=output_csv,
                     provider="ollama",
                     image_variant="thumb",
-                    window_size=5,
-                    overlap=2,
+                    window_radius=2,
                     boundary_gap_seconds=0,
                     max_batches=2,
                     model="qwen3.5:9b",
@@ -1423,8 +1445,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "boundary_gap_seconds": 0,
                 "max_batches": 0,
                 "model": "qwen3.5:9b",
@@ -1447,7 +1468,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     model="qwen3.5:9b",
                     text=(
                         '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                        '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                        '"frame_03":"same dancer","frame_04":"same dancer"},'
                         '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
                     ),
                     json_payload=None,
@@ -1457,7 +1478,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "message": {
                             "content": (
                                 '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                                '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                                '"frame_03":"same dancer","frame_04":"same dancer"},'
                                 '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
                             )
                         }
@@ -1472,8 +1493,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     output_csv=output_csv,
                     provider="ollama",
                     image_variant="thumb",
-                    window_size=5,
-                    overlap=2,
+                    window_radius=2,
                     boundary_gap_seconds=0,
                     max_batches=0,
                     model="qwen3.5:9b",
@@ -1489,8 +1509,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     args_payload=args_payload,
                     new_run=True,
                 )
-            self.assertEqual(row_count, 7)
-            self.assertEqual(len(probe.read_result_rows(output_csv)), 7)
+            self.assertEqual(row_count, 8)
+            self.assertEqual(len(probe.read_result_rows(output_csv)), 8)
 
     def test_probe_vlm_photo_boundaries_only_evaluates_candidate_gaps(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1552,8 +1572,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "boundary_gap_seconds": 10,
                 "max_batches": 10,
                 "model": "qwen3.5:9b",
@@ -1578,7 +1597,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     model="qwen3.5:9b",
                     text=(
                         '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                        '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                        '"frame_03":"same dancer","frame_04":"same dancer"},'
                         '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
                     ),
                     json_payload=None,
@@ -1588,7 +1607,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "message": {
                             "content": (
                                 '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                                '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                                '"frame_03":"same dancer","frame_04":"same dancer"},'
                                 '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
                             )
                         }
@@ -1603,8 +1622,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     output_csv=output_csv,
                     provider="ollama",
                     image_variant="thumb",
-                    window_size=5,
-                    overlap=2,
+                    window_radius=2,
                     boundary_gap_seconds=10,
                     max_batches=10,
                     model="qwen3.5:9b",
@@ -1625,7 +1643,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             rows = probe.read_result_rows(output_csv)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["start_row"], "3")
-            self.assertEqual(rows[0]["end_row"], "7")
+            self.assertEqual(rows[0]["end_row"], "6")
 
     def test_probe_vlm_photo_boundaries_runs_provider_neutral_transport_request(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1687,8 +1705,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "photo_manifest_csv": str(photo_manifest_csv),
                 "provider": "vllm",
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "boundary_gap_seconds": 10,
                 "max_batches": 1,
                 "model": "Qwen/Qwen2.5-VL-7B-Instruct",
@@ -1708,10 +1725,10 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 provider="vllm",
                 model="Qwen/Qwen2.5-VL-7B-Instruct",
                 text=(
-                    '{"boundary_after_frame":"frame_04","left_segment_type":"dance","right_segment_type":"ceremony",'
+                    '{"boundary_after_frame":"frame_03","left_segment_type":"dance","right_segment_type":"ceremony",'
                     '"frame_notes":{"frame_01":"same dancer","frame_02":"same dancer","frame_03":"same dancer",'
-                    '"frame_04":"same dancer","frame_05":"host on stage"},'
-                    '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 4."}'
+                    '"frame_04":"host on stage"},'
+                    '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 3."}'
                 ),
                 json_payload=None,
                 finish_reason="stop",
@@ -1721,10 +1738,10 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         {
                             "message": {
                                 "content": (
-                                    '{"boundary_after_frame":"frame_04","left_segment_type":"dance","right_segment_type":"ceremony",'
+                                    '{"boundary_after_frame":"frame_03","left_segment_type":"dance","right_segment_type":"ceremony",'
                                     '"frame_notes":{"frame_01":"same dancer","frame_02":"same dancer","frame_03":"same dancer",'
-                                    '"frame_04":"same dancer","frame_05":"host on stage"},'
-                                    '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 4."}'
+                                    '"frame_04":"host on stage"},'
+                                    '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 3."}'
                                 )
                             },
                             "finish_reason": "stop",
@@ -1751,8 +1768,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     output_csv=output_csv,
                     provider="vllm",
                     image_variant="thumb",
-                    window_size=5,
-                    overlap=2,
+                    window_radius=2,
                     boundary_gap_seconds=10,
                     max_batches=1,
                     model="Qwen/Qwen2.5-VL-7B-Instruct",
@@ -1785,7 +1801,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     "type": "json_schema",
                     "json_schema": {
                         "name": "photo_boundary_probe",
-                        "schema": probe.build_response_schema(window_size=5),
+                        "schema": probe.build_response_schema(window_size=4),
                     },
                 },
             )
@@ -1794,7 +1810,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertNotIn("Optional pre-model per-image annotations", request.messages[1]["content"])
             rows = probe.read_result_rows(output_csv)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["decision"], "cut_after_4")
+            self.assertEqual(rows[0]["decision"], "cut_after_3")
 
     def test_dump_debug_artifacts_writes_prompt_request_and_response(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -34,6 +34,13 @@ from lib.photo_pre_model_annotations import (
     load_photo_pre_model_annotations_by_relative_path,
 )
 from lib.vlm_transport import VlmRequest, build_provider_request_payload, get_vlm_capabilities, run_vlm_request
+from lib.window_radius_contract import (
+    DEFAULT_WINDOW_RADIUS,
+    build_centered_window_bounds,
+    build_window_start_indexes,
+    positive_window_radius_arg,
+    window_radius_to_window_size,
+)
 from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
 from train_ml_boundary_verifier import (
     BOUNDARY_MODEL_DIRNAME,
@@ -52,8 +59,6 @@ PHOTO_BOUNDARY_SCORES_FILENAME = "photo_boundary_scores.csv"
 DEFAULT_OUTPUT_FILENAME = "vlm_boundary_results.csv"
 RUN_METADATA_DIRNAME = "vlm_runs"
 DEFAULT_IMAGE_VARIANT = "preview"
-DEFAULT_WINDOW_SIZE = 10
-DEFAULT_OVERLAP = 2
 DEFAULT_BOUNDARY_GAP_SECONDS = 10
 DEFAULT_MAX_BATCHES = 10
 DEFAULT_MODEL_NAME = "qwen3.5:9b"
@@ -128,8 +133,7 @@ RESUME_CONFIG_KEYS = (
     "photo_manifest_csv",
     "provider",
     "image_variant",
-    "window_size",
-    "overlap",
+    "window_radius",
     "boundary_gap_seconds",
     "model",
     "ollama_base_url",
@@ -248,16 +252,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help=f"Embedded image variant to send to the VLM. Default: {DEFAULT_IMAGE_VARIANT}",
     )
     parser.add_argument(
-        "--window-size",
-        type=positive_int_arg,
-        default=DEFAULT_WINDOW_SIZE,
-        help=f"Number of consecutive images per VLM batch. Default: {DEFAULT_WINDOW_SIZE}",
-    )
-    parser.add_argument(
-        "--overlap",
-        type=non_negative_int_arg,
-        default=DEFAULT_OVERLAP,
-        help=f"Number of images shared between adjacent windows. Default: {DEFAULT_OVERLAP}",
+        "--window-radius",
+        type=positive_window_radius_arg,
+        default=DEFAULT_WINDOW_RADIUS,
+        help=(
+            "Number of photos to include on each side of the main candidate cut. "
+            f"Internal window size is 2 * radius. Default: {DEFAULT_WINDOW_RADIUS}"
+        ),
     )
     parser.add_argument(
         "--boundary-gap-seconds",
@@ -465,8 +466,7 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
     apply_string("embedded_manifest_csv", PHOTO_EMBEDDED_MANIFEST_FILENAME, "VLM_EMBEDDED_MANIFEST_CSV")
     apply_string("photo_manifest_csv", PHOTO_MANIFEST_FILENAME, "VLM_PHOTO_MANIFEST_CSV")
     apply_string("image_variant", DEFAULT_IMAGE_VARIANT, "VLM_IMAGE_VARIANT")
-    apply_int("window_size", DEFAULT_WINDOW_SIZE, "VLM_WINDOW_SIZE", positive_int_arg)
-    apply_int("overlap", DEFAULT_OVERLAP, "VLM_OVERLAP", non_negative_int_arg)
+    apply_int("window_radius", DEFAULT_WINDOW_RADIUS, "VLM_WINDOW_RADIUS", positive_window_radius_arg)
     apply_int(
         "boundary_gap_seconds",
         DEFAULT_BOUNDARY_GAP_SECONDS,
@@ -543,32 +543,15 @@ def read_joined_rows(
         raise ValueError(f"{embedded_manifest_csv.name} contains no rows")
     return joined_rows
 
-
-def build_window_start_indexes(total_rows: int, window_size: int, overlap: int) -> List[int]:
-    if total_rows < window_size:
-        raise ValueError(f"Need at least {window_size} rows, got {total_rows}")
-    if overlap >= window_size:
-        raise ValueError("overlap must be smaller than window_size")
-    stride = window_size - overlap
-    starts = list(range(0, total_rows - window_size + 1, stride))
-    final_start = total_rows - window_size
-    if not starts or starts[-1] != final_start:
-        starts.append(final_start)
-    return starts
-
-
 def build_candidate_windows(
     rows: Sequence[Mapping[str, str]],
-    window_size: int,
-    overlap: int,
+    window_radius: int,
     boundary_gap_seconds: int,
 ) -> List[Dict[str, int]]:
+    window_size = window_radius_to_window_size(window_radius)
     total_rows = len(rows)
     if total_rows < window_size:
         raise ValueError(f"Need at least {window_size} rows, got {total_rows}")
-    if overlap >= window_size:
-        raise ValueError("overlap must be smaller than window_size")
-    final_start = total_rows - window_size
     candidates_by_start: Dict[int, Dict[str, int]] = {}
     for cut_index in range(total_rows - 1):
         left_epoch_ms = int(str(rows[cut_index]["start_epoch_ms"]))
@@ -576,11 +559,7 @@ def build_candidate_windows(
         time_gap_seconds = rounded_seconds(right_epoch_ms - left_epoch_ms)
         if time_gap_seconds <= boundary_gap_seconds:
             continue
-        start_index = cut_index - overlap + 1
-        if start_index < 0:
-            start_index = 0
-        if start_index > final_start:
-            start_index = final_start
+        start_index, _ = build_centered_window_bounds(total_rows, cut_index, window_radius)
         existing = candidates_by_start.get(start_index)
         candidate = {
             "start_index": start_index,
@@ -594,16 +573,14 @@ def build_candidate_windows(
 
 def build_candidate_window_start_indexes(
     rows: Sequence[Mapping[str, str]],
-    window_size: int,
-    overlap: int,
+    window_radius: int,
     boundary_gap_seconds: int,
 ) -> List[int]:
     return [
         int(candidate["start_index"])
         for candidate in build_candidate_windows(
             rows,
-            window_size=window_size,
-            overlap=overlap,
+            window_radius=window_radius,
             boundary_gap_seconds=boundary_gap_seconds,
         )
     ]
@@ -1898,8 +1875,7 @@ def probe_vlm_photo_boundaries(
     output_csv: Path,
     provider: str,
     image_variant: str,
-    window_size: int,
-    overlap: int,
+    window_radius: int,
     boundary_gap_seconds: int,
     max_batches: int,
     model: str,
@@ -1919,6 +1895,7 @@ def probe_vlm_photo_boundaries(
     args_payload: Mapping[str, Any],
     new_run: bool,
 ) -> int:
+    window_size = window_radius_to_window_size(window_radius)
     config_hash = build_config_hash(args_payload)
     joined_rows = read_joined_rows(
         workspace_dir=workspace_dir,
@@ -1936,8 +1913,7 @@ def probe_vlm_photo_boundaries(
         ml_hint_context = None
     all_candidates = build_candidate_windows(
         joined_rows,
-        window_size=window_size,
-        overlap=overlap,
+        window_radius=window_radius,
         boundary_gap_seconds=boundary_gap_seconds,
     )
     run_state = resolve_run_state(
@@ -2095,7 +2071,7 @@ def probe_vlm_photo_boundaries(
                 end_row=end_index,
                 rows=window_rows,
                 window_size=window_size,
-                overlap=overlap,
+                overlap=window_radius,
                 raw_response=raw_response,
                 parsed_response=parsed_response,
                 model=model,
@@ -2154,8 +2130,7 @@ def main() -> int:
         "photo_manifest_csv": str(photo_manifest_csv),
         "output_csv": str(output_csv),
         "image_variant": args.image_variant,
-        "window_size": args.window_size,
-        "overlap": args.overlap,
+        "window_radius": args.window_radius,
         "boundary_gap_seconds": args.boundary_gap_seconds,
         "max_batches": args.max_batches,
         "model": args.model,
@@ -2185,8 +2160,7 @@ def main() -> int:
         output_csv=output_csv,
         provider=args.provider,
         image_variant=args.image_variant,
-        window_size=args.window_size,
-        overlap=args.overlap,
+        window_radius=args.window_radius,
         boundary_gap_seconds=args.boundary_gap_seconds,
         max_batches=args.max_batches,
         model=args.model,
