@@ -415,6 +415,54 @@ def _load_dataset_contract(day_workspaces: Sequence[Path]) -> dict[str, object]:
     return shared_contract
 
 
+def _extract_dataset_contract_from_candidate_rows(
+    candidate_rows: Sequence[dict[str, str]],
+) -> dict[str, object]:
+    if not candidate_rows:
+        raise ValueError("merged candidate rows must contain at least one row")
+
+    contract: dict[str, object] = {}
+    for key in DATASET_CONTRACT_KEYS:
+        values = {str(row.get(key, "")).strip() for row in candidate_rows}
+        if "" in values:
+            raise ValueError(f"merged candidate rows must not contain blank {key} values")
+        if len(values) != 1:
+            raise ValueError(
+                f"merged candidate rows must contain exactly one {key}, got {sorted(values)}"
+            )
+        value = next(iter(values))
+        if key == "window_radius":
+            contract[key] = _parse_positive_int(
+                value,
+                field_name="merged candidate rows window_radius",
+            )
+        else:
+            contract[key] = value
+    return contract
+
+
+def _validate_dataset_contract_against_candidate_rows(
+    report_contract: dict[str, object],
+    candidate_rows: Sequence[dict[str, str]],
+) -> dict[str, object]:
+    row_contract = _extract_dataset_contract_from_candidate_rows(candidate_rows)
+    mismatches = [
+        key
+        for key in DATASET_CONTRACT_KEYS
+        if row_contract[key] != report_contract[key]
+    ]
+    if mismatches:
+        mismatch_details = ", ".join(
+            f"{key}={report_contract[key]!r} (expected {row_contract[key]!r})"
+            for key in mismatches
+        )
+        raise ValueError(
+            "ML boundary dataset contract mismatch between reports and candidate rows: "
+            f"{mismatch_details}"
+        )
+    return row_contract
+
+
 def _unexpected_schema_columns(
     columns: Sequence[str],
     *,
@@ -1428,6 +1476,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             include_thumbnail=True,
         )
         merged_rows = _merge_candidate_rows(candidate_csv_paths, expected_headers=merged_headers)
+        dataset_contract = _validate_dataset_contract_against_candidate_rows(
+            dataset_contract,
+            merged_rows,
+        )
         _validate_corpus_size(merged_rows)
     except (FileNotFoundError, ValueError) as error:
         console.print(f"[red]Error: {error}[/red]")

@@ -506,6 +506,7 @@ def build_candidate_rows(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    candidate_rule_name = DEFAULT_CANDIDATE_RULE_NAME
     day_dir = Path(args.day_dir).expanduser().resolve()
     workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
     manifest_path = _resolve_workspace_path(workspace_dir, args.manifest_csv, "media_manifest.csv")
@@ -558,6 +559,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             day_id=day_id,
             candidate_rule_version=args.candidate_rule_version,
             window_radius=args.window_radius,
+            candidate_rule_name=candidate_rule_name,
         )
         progress.advance(build_task)
 
@@ -567,7 +569,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             day_id=day_id,
             candidate_rule_name=_resolve_candidate_rule_name(
                 candidate_rows,
-                default_candidate_rule_name=DEFAULT_CANDIDATE_RULE_NAME,
+                default_candidate_rule_name=candidate_rule_name,
             ),
             gap_threshold_seconds=args.gap_threshold_seconds,
             candidate_rule_version=args.candidate_rule_version,

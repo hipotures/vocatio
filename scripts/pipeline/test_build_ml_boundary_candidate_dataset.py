@@ -602,10 +602,10 @@ def test_main_report_preserves_non_default_candidate_rule_name(
     original_build_candidate_rows = build_candidate_rows
 
     def _build_candidate_rows_with_custom_rule(*args, **kwargs):
+        kwargs["candidate_rule_name"] = "scene_cut"
         return original_build_candidate_rows(
             *args,
             **kwargs,
-            candidate_rule_name="scene_cut",
         )
 
     monkeypatch.setattr(
@@ -684,6 +684,72 @@ def test_main_report_preserves_non_default_candidate_rule_name(
         assert exit_code == 0
         report_payload = json.loads(report_json.read_text(encoding="utf-8"))
         assert report_payload["candidate_rule_name"] == "scene_cut"
+
+
+def test_main_report_preserves_non_default_candidate_rule_name_when_zero_rows_retained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "build_ml_boundary_candidate_dataset.DEFAULT_CANDIDATE_RULE_NAME",
+        "scene_cut",
+    )
+
+    with TemporaryDirectory() as tmp:
+        day_dir = Path(tmp) / "20250325"
+        workspace_dir = day_dir / "_workspace"
+        day_dir.mkdir()
+        workspace_dir.mkdir()
+
+        manifest_path = workspace_dir / "media_manifest.csv"
+        truth_path = workspace_dir / "ml_boundary_reviewed_truth.csv"
+        report_json = workspace_dir / "ml_boundary_dataset_report.json"
+
+        manifest_rows = [
+            _build_manifest_photo_row(
+                day="20250325",
+                photo_id="p1",
+                relative_path="p-a7r5/p1.jpg",
+                photo_order_index=0,
+                start_epoch_ms=0,
+            ),
+            _build_manifest_photo_row(
+                day="20250325",
+                photo_id="p2",
+                relative_path="p-a7r5/p2.jpg",
+                photo_order_index=1,
+                start_epoch_ms=1_000,
+            ),
+            _build_manifest_photo_row(
+                day="20250325",
+                photo_id="p3",
+                relative_path="p-a7r5/p3.jpg",
+                photo_order_index=2,
+                start_epoch_ms=30_000,
+            ),
+        ]
+        truth_rows = [
+            {"photo_id": "p1", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p2", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p3", "segment_id": "s2", "segment_type": "ceremony"},
+        ]
+
+        _write_media_manifest(manifest_path, manifest_rows)
+        _write_truth_csv(truth_path, truth_rows)
+
+        exit_code = main(
+            [
+                str(day_dir),
+                "--workspace-dir",
+                str(workspace_dir),
+                "--gap-threshold-seconds",
+                "10.0",
+            ]
+        )
+
+        assert exit_code == 0
+        report_payload = json.loads(report_json.read_text(encoding="utf-8"))
+        assert report_payload["candidate_rule_name"] == "scene_cut"
+        assert report_payload["candidate_count_retained"] == 0
 
 
 def test_main_uses_workspace_dir_from_vocatio_defaults() -> None:

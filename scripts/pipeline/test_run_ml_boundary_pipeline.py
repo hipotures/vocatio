@@ -643,6 +643,45 @@ def test_main_rejects_extra_frame_columns_for_declared_radius(
     assert "frame_05_photo_id" in output
 
 
+def test_main_rejects_stale_dataset_report_metadata_against_candidate_rows(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    day_dir = tmp_path / "20250324"
+    workspace_dir = tmp_path / "20250324DWC"
+    day_dir.mkdir(parents=True)
+    workspace_dir.mkdir(parents=True)
+    (day_dir / ".vocatio").write_text(f"WORKSPACE_DIR={workspace_dir}\n", encoding="utf-8")
+
+    def _fake_run_command(command):
+        command_values = [str(value) for value in command]
+        if "build_ml_boundary_candidate_dataset.py" in command_values[1]:
+            rows = [
+                _candidate_row(day_id=day_dir.name, segment_type="performance", boundary="0", offset=1),
+                _candidate_row(day_id=day_dir.name, segment_type="ceremony", boundary="1", offset=2),
+                _candidate_row(day_id=day_dir.name, segment_type="warmup", boundary="0", offset=3),
+            ]
+            for row in rows:
+                row["candidate_rule_name"] = "scene_cut"
+                row["descriptor_schema_version"] = "descriptor_v2"
+            _write_day_candidate_artifacts(workspace_dir, rows)
+            report_path = workspace_dir / "ml_boundary_dataset_report.json"
+            report_payload = json.loads(report_path.read_text(encoding="utf-8"))
+            report_payload["candidate_rule_name"] = "gap_threshold"
+            report_payload["descriptor_schema_version"] = "not_included_v1"
+            report_path.write_text(json.dumps(report_payload), encoding="utf-8")
+
+    monkeypatch.setattr("run_ml_boundary_pipeline._run_command", _fake_run_command)
+
+    exit_code = main([str(day_dir), "--prepare-only", "--split-strategy", "global_random"])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "dataset contract mismatch between reports and candidate rows" in output
+    assert "candidate_rule_name='gap_threshold' (expected 'scene_cut')" in output
+    assert "descriptor_schema_version='not_included_v1' (expected 'descriptor_v2')" in output
+    assert not (workspace_dir / "ml_boundary_corpus" / "ml_boundary_pipeline_summary.json").exists()
+
+
 def test_render_eval_metrics_summary_labels_training_corpus_heuristics_when_available() -> None:
     rendered = _render_eval_metrics_summary(
         {
