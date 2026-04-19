@@ -1375,6 +1375,16 @@ def render_final_summary(
     console.print(_render_eval_metrics_summary(evaluation_metrics, training_metadata))
 
 
+def _summary_public_evaluation_metrics(evaluation_metrics: dict[str, object]) -> dict[str, object]:
+    normalized_metrics = dict(evaluation_metrics)
+    for legacy_key in [key for key in normalized_metrics if key.startswith("segment_type_")]:
+        right_key = f"right_segment_type_{legacy_key.removeprefix('segment_type_')}"
+        if right_key not in normalized_metrics:
+            normalized_metrics[right_key] = normalized_metrics[legacy_key]
+        del normalized_metrics[legacy_key]
+    return normalized_metrics
+
+
 def _run_training_and_evaluation(
     *,
     corpus_candidates_path: Path,
@@ -1488,7 +1498,7 @@ def _write_pipeline_summary(
     if eval_dir is not None:
         payload["eval_dir"] = str(eval_dir)
     if evaluation_metrics is not None:
-        payload["evaluation_metrics"] = evaluation_metrics
+        payload["evaluation_metrics"] = _summary_public_evaluation_metrics(evaluation_metrics)
     if training_metadata is not None:
         payload["training_metadata"] = training_metadata
         payload["training_preset"] = training_metadata.get("training_preset")

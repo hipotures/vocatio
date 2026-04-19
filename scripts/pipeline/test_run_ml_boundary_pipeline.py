@@ -261,6 +261,15 @@ def _run_pipeline_and_read_summary(tmp_path: Path, monkeypatch) -> dict[str, obj
                             "performance": {"ceremony": 0, "performance": 6, "warmup": 0},
                             "warmup": {"ceremony": 0, "performance": 1, "warmup": 1},
                         },
+                        "segment_type_macro_f1": 0.11,
+                        "segment_type_accuracy": 0.22,
+                        "segment_type_correct_count": 1,
+                        "segment_type_incorrect_count": 16,
+                        "segment_type_confusion_matrix": {
+                            "ceremony": {"ceremony": 0, "performance": 0, "warmup": 0},
+                            "performance": {"ceremony": 0, "performance": 1, "warmup": 0},
+                            "warmup": {"ceremony": 0, "performance": 0, "warmup": 0},
+                        },
                         "boundary_f1": 0.85,
                         "boundary_correct_count": 15,
                         "boundary_incorrect_count": 2,
@@ -292,6 +301,11 @@ def test_pipeline_summary_uses_left_and_right_metric_keys(tmp_path: Path, monkey
     assert "left_segment_type_macro_f1" in metrics
     assert "right_segment_type_macro_f1" in metrics
     assert "segment_type_macro_f1" not in metrics
+    assert "segment_type_accuracy" not in metrics
+    assert "segment_type_confusion_matrix" not in metrics
+    assert not any(key.startswith("segment_type_") for key in metrics)
+    assert metrics["right_segment_type_macro_f1"] == 0.72
+    assert metrics["right_segment_type_accuracy"] == 0.8
 
 
 def test_console_summary_renders_all_three_predictors(capsys) -> None:
@@ -316,6 +330,15 @@ def test_console_summary_renders_all_three_predictors(capsys) -> None:
                 "performance": {"ceremony": 0, "performance": 6, "warmup": 0},
                 "warmup": {"ceremony": 0, "performance": 1, "warmup": 1},
             },
+            "segment_type_macro_f1": 0.11,
+            "segment_type_accuracy": 0.22,
+            "segment_type_correct_count": 1,
+            "segment_type_incorrect_count": 16,
+            "segment_type_confusion_matrix": {
+                "ceremony": {"ceremony": 0, "performance": 0, "warmup": 0},
+                "performance": {"ceremony": 0, "performance": 1, "warmup": 0},
+                "warmup": {"ceremony": 0, "performance": 0, "warmup": 0},
+            },
             "boundary_f1": 0.85,
             "boundary_correct_count": 15,
             "boundary_incorrect_count": 2,
@@ -337,6 +360,9 @@ def test_console_summary_renders_all_three_predictors(capsys) -> None:
     assert "Left segment type" in text
     assert "Right segment type" in text
     assert "Boundary" in text
+    assert "Right segment type: macro_f1=0.7200" in text
+    assert "Segment type:" not in text
+    assert "Segment Type Confusion Matrix" not in text
 
 
 def test_render_eval_metrics_summary_uses_human_readable_precision() -> None:
