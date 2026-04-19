@@ -27,7 +27,7 @@ from build_ml_boundary_candidate_dataset import (
     candidate_row_headers,
 )
 from lib.ml_boundary_dataset import canonical_candidate_id, normalize_timestamp
-from lib.ml_boundary_truth import VALID_SEGMENT_TYPES
+from lib.ml_boundary_truth import VALID_SEGMENT_TYPES, load_truth_row
 from lib.window_radius_contract import window_radius_to_window_size
 from lib.workspace_dir import resolve_workspace_dir
 
@@ -39,6 +39,9 @@ DEFAULT_CORPUS_CANDIDATES_FILENAME = "ml_boundary_candidates.corpus.csv"
 HELDOUT_SPLIT_NAMES = ("validation", "test")
 VALID_SPLIT_NAMES = {"train", "validation", "test"}
 LEGACY_EXTERNAL_COLUMNS = ("window_size", "overlap")
+LEGACY_CANDIDATE_COLUMNS = ("segment_type",)
+OPTIONAL_CANDIDATE_COLUMNS = ("is_hard_negative",)
+SEGMENT_TYPE_COLUMNS = ("left_segment_type", "right_segment_type")
 STATIC_CANDIDATE_HEADERS = [
     "candidate_id",
     "day_id",
@@ -66,6 +69,14 @@ FRAME_SCHEMA_COLUMN_KINDS = frozenset(
 )
 
 
+def _expected_candidate_headers(*, window_radius: int) -> list[str]:
+    return [
+        header
+        for header in candidate_row_headers(window_radius=window_radius, include_thumbnail=True)
+        if header not in LEGACY_CANDIDATE_COLUMNS
+    ]
+
+
 def _progress() -> Progress:
     return Progress(
         SpinnerColumn(),
@@ -90,12 +101,14 @@ def _unexpected_schema_columns(
     columns: Sequence[str],
     *,
     expected_headers: Sequence[str],
+    optional_headers: Sequence[str] = (),
 ) -> list[str]:
     expected = set(expected_headers)
+    optional = set(optional_headers)
     return sorted(
         column
         for column in set(columns)
-        if column not in expected and FRAME_SCHEMA_COLUMN_RE.match(column)
+        if column not in expected and column not in optional
     )
 
 
@@ -123,10 +136,7 @@ def _expected_headers_for_header_only_csv(fieldnames: Sequence[str]) -> Sequence
     )
     if even_frame_count <= 0:
         return tuple(STATIC_CANDIDATE_HEADERS)
-    return candidate_row_headers(
-        window_radius=even_frame_count // 2,
-        include_thumbnail=True,
-    )
+    return _expected_candidate_headers(window_radius=even_frame_count // 2)
 
 
 def _read_csv_rows(path: Path, *, required_headers: Sequence[str]) -> list[dict[str, str]]:
@@ -136,7 +146,7 @@ def _read_csv_rows(path: Path, *, required_headers: Sequence[str]) -> list[dict[
         reader = csv.DictReader(handle)
         legacy_columns = [
             field_name
-            for field_name in LEGACY_EXTERNAL_COLUMNS
+            for field_name in (*LEGACY_EXTERNAL_COLUMNS, *LEGACY_CANDIDATE_COLUMNS)
             if field_name in (reader.fieldnames or [])
         ]
         if legacy_columns:
@@ -159,6 +169,7 @@ def _read_csv_rows(path: Path, *, required_headers: Sequence[str]) -> list[dict[
                     unexpected_columns = _unexpected_schema_columns(
                         reader.fieldnames or (),
                         expected_headers=expected_dynamic_headers,
+                        optional_headers=OPTIONAL_CANDIDATE_COLUMNS,
                     )
                     if unexpected_columns:
                         raise ValueError(
@@ -171,13 +182,11 @@ def _read_csv_rows(path: Path, *, required_headers: Sequence[str]) -> list[dict[
                 window_radius_text,
                 field_name=f"{path.name} window_radius",
             )
-            expected_dynamic_headers = candidate_row_headers(
-                window_radius=window_radius,
-                include_thumbnail=True,
-            )
+            expected_dynamic_headers = _expected_candidate_headers(window_radius=window_radius)
             unexpected_columns = _unexpected_schema_columns(
                 reader.fieldnames or (),
                 expected_headers=expected_dynamic_headers,
+                optional_headers=OPTIONAL_CANDIDATE_COLUMNS,
             )
             if unexpected_columns:
                 raise ValueError(
@@ -371,7 +380,11 @@ def validate_attrition_report(report: Mapping[str, object]) -> None:
 
 
 def validate_candidate_row(row: Mapping[str, object], *, row_number: int) -> None:
-    legacy_columns = [field_name for field_name in LEGACY_EXTERNAL_COLUMNS if field_name in row]
+    legacy_columns = [
+        field_name
+        for field_name in (*LEGACY_EXTERNAL_COLUMNS, *LEGACY_CANDIDATE_COLUMNS)
+        if field_name in row
+    ]
     if legacy_columns:
         raise ValueError(
             f"row {row_number}: legacy columns are not allowed: {', '.join(legacy_columns)}"
@@ -414,7 +427,7 @@ def validate_candidate_row(row: Mapping[str, object], *, row_number: int) -> Non
         field_name=f"row {row_number} window_radius",
     )
     window_size = window_radius_to_window_size(window_radius)
-    expected_headers = candidate_row_headers(window_radius=window_radius, include_thumbnail=True)
+    expected_headers = _expected_candidate_headers(window_radius=window_radius)
     missing_dynamic_headers = [header for header in expected_headers if header not in row]
     if missing_dynamic_headers:
         raise ValueError(
@@ -423,6 +436,7 @@ def validate_candidate_row(row: Mapping[str, object], *, row_number: int) -> Non
     unexpected_columns = _unexpected_schema_columns(
         row.keys(),
         expected_headers=expected_headers,
+        optional_headers=OPTIONAL_CANDIDATE_COLUMNS,
     )
     if unexpected_columns:
         raise ValueError(
@@ -522,22 +536,21 @@ def validate_candidate_row(row: Mapping[str, object], *, row_number: int) -> Non
             f"row {row_number}: split_name must be one of train, validation, test when present"
         )
 
-    left_segment_type = _require_non_blank_text(row, "left_segment_type", row_number=row_number)
-    right_segment_type = _require_non_blank_text(row, "right_segment_type", row_number=row_number)
-    if left_segment_type not in VALID_SEGMENT_TYPES:
-        raise ValueError(
-            f"row {row_number}: left_segment_type must be one of {', '.join(sorted(VALID_SEGMENT_TYPES))}"
+    try:
+        truth_row = load_truth_row(
+            {
+                "left_segment_type": row.get("left_segment_type"),
+                "right_segment_type": row.get("right_segment_type"),
+                "boundary": row.get("boundary"),
+            }
         )
-    if right_segment_type not in VALID_SEGMENT_TYPES:
-        raise ValueError(
-            f"row {row_number}: right_segment_type must be one of {', '.join(sorted(VALID_SEGMENT_TYPES))}"
-        )
+    except ValueError as exc:
+        raise ValueError(f"row {row_number}: {exc}") from exc
 
     left_segment_id = _require_non_blank_text(row, "left_segment_id", row_number=row_number)
     right_segment_id = _require_non_blank_text(row, "right_segment_id", row_number=row_number)
-    boundary = _parse_bool(row["boundary"], field_name=f"row {row_number} boundary")
     expected_boundary = left_segment_id != right_segment_id
-    if boundary != expected_boundary:
+    if truth_row.boundary != expected_boundary:
         raise ValueError(
             f"row {row_number}: boundary must match left/right segment-id equality"
         )
@@ -610,23 +623,30 @@ def validate_split_manifest(
             + ", ".join(sorted(VALID_SEGMENT_TYPES))
         )
 
-    classes_by_split: dict[str, set[str]] = {}
+    classes_by_split: dict[str, dict[str, set[str]]] = {}
     for row_index, row in enumerate(candidate_rows, start=1):
         manifest_id = _require_non_blank_text(row, manifest_key, row_number=row_index)
         split_name = manifest_by_id[manifest_id]
-        right_segment_type = _require_non_blank_text(
-            row,
-            "right_segment_type",
-            row_number=row_index,
+        split_classes = classes_by_split.setdefault(
+            split_name,
+            {column_name: set() for column_name in SEGMENT_TYPE_COLUMNS},
         )
-        classes_by_split.setdefault(split_name, set()).add(right_segment_type)
+        for column_name in SEGMENT_TYPE_COLUMNS:
+            segment_type = _require_non_blank_text(row, column_name, row_number=row_index)
+            split_classes[column_name].add(segment_type)
 
     for split_name in HELDOUT_SPLIT_NAMES:
-        missing = sorted(set(required_classes) - classes_by_split.get(split_name, set()))
-        if missing:
-            raise ValueError(
-                f"split {split_name} is missing required classes: {', '.join(missing)}"
-            )
+        split_classes = classes_by_split.get(
+            split_name,
+            {column_name: set() for column_name in SEGMENT_TYPE_COLUMNS},
+        )
+        for column_name in SEGMENT_TYPE_COLUMNS:
+            missing = sorted(set(required_classes) - split_classes[column_name])
+            if missing:
+                raise ValueError(
+                    f"split {split_name} is missing required {column_name} classes: "
+                    f"{', '.join(missing)}"
+                )
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -783,14 +803,21 @@ def build_validation_report(
     candidate_rows: Sequence[Mapping[str, object]],
     attrition_report: Mapping[str, object],
 ) -> dict[str, object]:
-    class_balance: dict[str, int] = {}
+    left_class_balance: dict[str, int] = {}
+    right_class_balance: dict[str, int] = {}
     for row_index, row in enumerate(candidate_rows, start=2):
+        left_segment_type = _require_non_blank_text(
+            row,
+            "left_segment_type",
+            row_number=row_index,
+        )
         right_segment_type = _require_non_blank_text(
             row,
             "right_segment_type",
             row_number=row_index,
         )
-        class_balance[right_segment_type] = class_balance.get(right_segment_type, 0) + 1
+        left_class_balance[left_segment_type] = left_class_balance.get(left_segment_type, 0) + 1
+        right_class_balance[right_segment_type] = right_class_balance.get(right_segment_type, 0) + 1
 
     hard_negative_field_available = all("is_hard_negative" in row for row in candidate_rows)
     if hard_negative_field_available:
@@ -814,7 +841,8 @@ def build_validation_report(
 
     return {
         "candidate_row_count": len(candidate_rows),
-        "class_balance_by_segment_type": class_balance,
+        "class_balance_by_left_segment_type": left_class_balance,
+        "class_balance_by_right_segment_type": right_class_balance,
         "attrition_exclusion_counts": {
             "candidate_count_excluded_missing_window": _parse_non_negative_int(
                 attrition_report["candidate_count_excluded_missing_window"],

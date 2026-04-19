@@ -36,6 +36,7 @@ def _candidate_row(
 ) -> dict[str, str]:
     headers = candidate_row_headers(window_radius=window_radius, include_thumbnail=True)
     row = {header: "" for header in headers}
+    row.pop("segment_type", None)
     frame_count = window_radius * 2
     frame_photo_ids = {
         f"frame_{frame_index:02d}_photo_id": f"p{frame_index}"
@@ -60,7 +61,6 @@ def _candidate_row(
             "right_segment_id": right_segment_id,
             "left_segment_type": left_segment_type,
             "right_segment_type": right_segment_type,
-            "segment_type": right_segment_type,
             "boundary": "true" if left_segment_id != right_segment_id else "false",
             "candidate_rule_name": "gap_threshold",
             "candidate_rule_version": candidate_rule_version,
@@ -92,7 +92,11 @@ def _candidate_row(
 
 
 def _write_candidate_csv(path: Path, rows: list[dict[str, str]]) -> None:
-    fieldnames = list(rows[0].keys()) if rows else candidate_row_headers(window_radius=2, include_thumbnail=True)
+    fieldnames = list(rows[0].keys()) if rows else [
+        header
+        for header in candidate_row_headers(window_radius=2, include_thumbnail=True)
+        if header != "segment_type"
+    ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -160,7 +164,7 @@ def test_validate_candidate_row_accepts_valid_row() -> None:
     validate_candidate_row(_candidate_row(), row_number=2)
 
 
-def test_validator_accepts_distinct_left_and_right_segment_types() -> None:
+def test_validator_accepts_distinct_left_and_right_segment_types_without_legacy_segment_type() -> None:
     row = _candidate_row(left_segment_type="performance", right_segment_type="ceremony")
     validate_candidate_row(row, row_number=2)
 
@@ -169,7 +173,7 @@ def test_validate_candidate_row_rejects_blank_left_segment_type() -> None:
     row = _candidate_row()
     row["left_segment_type"] = ""
 
-    with pytest.raises(ValueError, match="left_segment_type must not be blank"):
+    with pytest.raises(ValueError, match="left_segment_type is required and must not be blank"):
         validate_candidate_row(row, row_number=2)
 
 
@@ -211,7 +215,9 @@ def test_validate_candidate_row_accepts_freshly_generated_candidate_row() -> Non
         candidate_rule_version="gap-v1",
     )
 
-    validate_candidate_row(_serialize_candidate_row(rows[0]), row_number=2)
+    serialized_row = _serialize_candidate_row(rows[0])
+    serialized_row.pop("segment_type", None)
+    validate_candidate_row(serialized_row, row_number=2)
 
 
 def test_validate_candidate_row_rejects_boundary_segment_mismatch() -> None:
@@ -264,6 +270,14 @@ def test_validate_candidate_row_rejects_legacy_window_size_column() -> None:
     row["window_size"] = "4"
 
     with pytest.raises(ValueError, match="legacy columns are not allowed: window_size"):
+        validate_candidate_row(row, row_number=2)
+
+
+def test_validate_candidate_row_rejects_legacy_segment_type_column() -> None:
+    row = _candidate_row()
+    row["segment_type"] = row["right_segment_type"]
+
+    with pytest.raises(ValueError, match="legacy columns are not allowed: segment_type"):
         validate_candidate_row(row, row_number=2)
 
 
@@ -345,7 +359,7 @@ def test_validate_split_manifest_requires_heldout_classes_when_requested() -> No
             required_classes=["performance", "ceremony"],
         )
     except ValueError as exc:
-        assert "split validation is missing required classes" in str(exc)
+        assert "split validation is missing required left_segment_type classes: ceremony" in str(exc)
     else:
         raise AssertionError("expected ValueError")
 
@@ -429,7 +443,55 @@ def test_validate_split_manifest_requires_heldout_classes_for_candidate_level_as
         {"candidate_id": candidate_rows[2]["candidate_id"], "split_name": "test"},
     ]
 
-    with pytest.raises(ValueError, match="split validation is missing required classes: ceremony"):
+    with pytest.raises(
+        ValueError,
+        match="split validation is missing required left_segment_type classes: ceremony",
+    ):
+        validate_split_manifest(
+            split_rows,
+            candidate_rows,
+            required_classes=["performance", "ceremony"],
+        )
+
+
+def test_validate_split_manifest_checks_left_segment_type_classes_for_heldout_splits() -> None:
+    candidate_rows = [
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v1",
+            left_segment_type="performance",
+            right_segment_type="performance",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v2",
+            left_segment_type="performance",
+            right_segment_type="ceremony",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v3",
+            left_segment_type="performance",
+            right_segment_type="performance",
+        ),
+        _candidate_row(
+            day_id="20250325",
+            candidate_rule_version="gap-v4",
+            left_segment_type="performance",
+            right_segment_type="ceremony",
+        ),
+    ]
+    split_rows = [
+        {"candidate_id": candidate_rows[0]["candidate_id"], "split_name": "validation"},
+        {"candidate_id": candidate_rows[1]["candidate_id"], "split_name": "validation"},
+        {"candidate_id": candidate_rows[2]["candidate_id"], "split_name": "test"},
+        {"candidate_id": candidate_rows[3]["candidate_id"], "split_name": "test"},
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match="split validation is missing required left_segment_type classes: ceremony",
+    ):
         validate_split_manifest(
             split_rows,
             candidate_rows,
@@ -451,7 +513,12 @@ def test_validate_split_manifest_rejects_invalid_split_name() -> None:
 
 def test_build_validation_report_marks_hard_negative_coverage_unavailable_when_missing() -> None:
     report = build_validation_report(
-        candidate_rows=[_candidate_row(right_segment_type="performance")],
+        candidate_rows=[
+            _candidate_row(
+                left_segment_type="warmup",
+                right_segment_type="performance",
+            )
+        ],
         attrition_report={
             "candidate_count_generated": 1,
             "candidate_count_excluded_missing_window": 0,
@@ -463,7 +530,9 @@ def test_build_validation_report_marks_hard_negative_coverage_unavailable_when_m
     )
 
     assert report["candidate_row_count"] == 1
-    assert report["class_balance_by_segment_type"] == {"performance": 1}
+    assert report["class_balance_by_left_segment_type"] == {"warmup": 1}
+    assert report["class_balance_by_right_segment_type"] == {"performance": 1}
+    assert "class_balance_by_segment_type" not in report
     assert report["attrition_exclusion_counts"] == {
         "candidate_count_excluded_missing_window": 0,
         "candidate_count_excluded_missing_artifacts": 0,
@@ -593,7 +662,12 @@ def test_cli_main_validates_candidate_csv_attrition_and_split_manifest(tmp_path:
     assert result == 0
     payload = json.loads(report_json.read_text(encoding="utf-8"))
     assert payload["candidate_row_count"] == 9
-    assert payload["class_balance_by_segment_type"] == {
+    assert payload["class_balance_by_left_segment_type"] == {
+        "ceremony": 3,
+        "performance": 3,
+        "warmup": 3,
+    }
+    assert payload["class_balance_by_right_segment_type"] == {
         "ceremony": 3,
         "performance": 3,
         "warmup": 3,
@@ -764,7 +838,8 @@ def test_cli_main_resolves_day_workspace_defaults_from_vocatio(tmp_path: Path) -
     assert report_json.is_file()
     payload = json.loads(report_json.read_text(encoding="utf-8"))
     assert payload["candidate_row_count"] == 1
-    assert payload["class_balance_by_segment_type"] == {"ceremony": 1}
+    assert payload["class_balance_by_left_segment_type"] == {"performance": 1}
+    assert payload["class_balance_by_right_segment_type"] == {"ceremony": 1}
     assert payload["attrition_exclusion_counts"] == {
         "candidate_count_excluded_missing_window": 0,
         "candidate_count_excluded_missing_artifacts": 0,
@@ -826,7 +901,11 @@ def test_cli_main_rejects_header_only_candidate_csv_with_extra_frame_columns(
 ) -> None:
     candidate_csv = tmp_path / "ml_boundary_candidates.csv"
     attrition_json = tmp_path / "ml_boundary_attrition.json"
-    headers = candidate_row_headers(window_radius=2, include_thumbnail=True) + [
+    headers = [
+        header
+        for header in candidate_row_headers(window_radius=2, include_thumbnail=True)
+        if header != "segment_type"
+    ] + [
         "frame_05_photo_id",
         "frame_05_relpath",
         "frame_05_timestamp",
@@ -856,3 +935,34 @@ def test_cli_main_rejects_header_only_candidate_csv_with_extra_frame_columns(
     captured = capsys.readouterr()
     assert "unexpected columns are not allowed" in captured.err
     assert "frame_05_photo_id" in captured.err
+
+
+def test_cli_main_rejects_candidate_csv_with_legacy_segment_type_column(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate_csv = tmp_path / "ml_boundary_candidates.csv"
+    attrition_json = tmp_path / "ml_boundary_attrition.json"
+    row = _candidate_row()
+    row["segment_type"] = row["right_segment_type"]
+    _write_candidate_csv(candidate_csv, [row])
+    attrition_json.write_text(
+        json.dumps(
+            {
+                "candidate_count_generated": 1,
+                "candidate_count_excluded_missing_window": 0,
+                "candidate_count_excluded_missing_artifacts": 0,
+                "candidate_count_retained": 1,
+                "true_boundary_coverage_before_exclusions": 1,
+                "true_boundary_coverage_after_exclusions": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = main([str(candidate_csv), "--attrition-json", str(attrition_json)])
+
+    assert result == 1
+    captured = capsys.readouterr()
+    assert "legacy columns are not allowed: segment_type" in captured.err
+    assert "segment_type" in captured.err
