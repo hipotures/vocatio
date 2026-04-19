@@ -1283,75 +1283,25 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(candidate_row["frame_03_thumb_path"], "/tmp/left.jpg")
         self.assertEqual(candidate_row["frame_05_thumb_path"], "/tmp/post1.jpg")
 
-    def test_load_ml_hint_diagnostics_uses_image_paths_for_precomputed_thumbnail_columns(self):
-        joined_rows = [
-            {"relative_path": "cam/left.jpg", "start_epoch_ms": "3000", "image_path": "/tmp/left.jpg"},
-            {"relative_path": "cam/right.jpg", "start_epoch_ms": "4000", "image_path": "/tmp/right.jpg"},
-        ]
-        candidate_rows = [
-            {"relative_path": "cam/pre1.jpg", "start_epoch_ms": "1000", "image_path": "/tmp/pre1.jpg"},
-            {"relative_path": "cam/pre2.jpg", "start_epoch_ms": "2000", "image_path": "/tmp/pre2.jpg"},
-            {"relative_path": "cam/left.jpg", "start_epoch_ms": "3000", "image_path": "/tmp/left.jpg"},
-            {"relative_path": "cam/right.jpg", "start_epoch_ms": "4000", "image_path": "/tmp/right.jpg"},
-            {"relative_path": "cam/post1.jpg", "start_epoch_ms": "5000", "image_path": "/tmp/post1.jpg"},
-        ]
-        captured_candidate_rows: list[dict[str, object]] = []
-
-        def capture_prediction(**kwargs):
-            candidate_row = dict(kwargs["candidate_row"])
-            captured_candidate_rows.append(candidate_row)
-            return review_gui.probe_vlm_boundary.MlHintPrediction(
-                boundary_prediction=True,
-                boundary_confidence=0.84,
-                boundary_positive_probability=0.84,
-                segment_type_prediction="ceremony",
-                segment_type_confidence=0.71,
-            )
-
+    def test_load_ml_hint_diagnostics_does_not_recompute_when_index_has_no_precomputed_pairs(self):
         with unittest.mock.patch.object(
             review_gui.probe_vlm_boundary,
             "resolve_ml_model_run",
-            return_value=("ml-run-001", Path("/tmp/model-run")),
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "load_ml_hint_context",
-            return_value=Mock(mode="tabular_plus_thumbnail"),
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "resolve_path",
-            side_effect=lambda workspace_dir, value: Path(workspace_dir) / value,
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "read_joined_rows",
-            return_value=joined_rows,
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "read_boundary_scores_by_pair",
-            return_value={},
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "_build_ml_candidate_window_rows",
-            return_value=candidate_rows,
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "predict_ml_hint_for_candidate",
-            side_effect=capture_prediction,
+            side_effect=AssertionError("GUI should not recompute ML hints on startup"),
         ):
             diagnostics = review_gui.load_ml_hint_diagnostics(
                 Path("/tmp/workspace"),
                 {
                     "day": "20260323",
                     "ml_model_run_id": "ml-run-001",
-                    "photo_pre_model_dir": "photo-pre",
+                    "ml_hints_error": "ML candidate rows must contain exactly 5 frames",
                 },
             )
 
-        self.assertTrue(diagnostics["available"])
-        self.assertEqual(len(captured_candidate_rows), 1)
-        candidate_row = captured_candidate_rows[0]
-        self.assertEqual(candidate_row["frame_01_thumb_path"], "/tmp/pre1.jpg")
-        self.assertEqual(candidate_row["frame_03_thumb_path"], "/tmp/left.jpg")
-        self.assertEqual(candidate_row["frame_05_thumb_path"], "/tmp/post1.jpg")
+        self.assertFalse(diagnostics["available"])
+        self.assertEqual(diagnostics["ml_model_run_id"], "ml-run-001")
+        self.assertEqual(diagnostics["ml_hint_by_pair"], {})
+        self.assertEqual(diagnostics["error"], "ML candidate rows must contain exactly 5 frames")
 
     def test_toggle_no_photos_confirmed_current_set_rerenders_current_info_dock(self):
         display_set = {
