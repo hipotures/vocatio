@@ -29,7 +29,7 @@ probe = load_module("probe_vlm_photo_boundaries_test", "scripts/pipeline/probe_v
 
 
 class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
-    def test_parse_args_accepts_overlap_and_temperature(self):
+    def test_parse_args_accepts_window_radius_and_temperature(self):
         args = probe.parse_args(
             [
                 "/tmp/day",
@@ -37,10 +37,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "vlm-20260414053012",
                 "--image-variant",
                 "thumb",
-                "--window-size",
-                "10",
-                "--overlap",
-                "2",
+                "--window-radius",
+                "4",
                 "--boundary-gap-seconds",
                 "12",
                 "--temperature",
@@ -49,6 +47,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "on",
                 "--json-validation-mode",
                 "relaxed",
+                "--ml-model-run-id",
+                "day-20260323-best",
                 "--ollama-think",
                 "false",
                 "--dump-debug-dir",
@@ -57,12 +57,12 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         )
         self.assertEqual(args.run_id, "vlm-20260414053012")
         self.assertEqual(args.image_variant, "thumb")
-        self.assertEqual(args.window_size, 10)
-        self.assertEqual(args.overlap, 2)
+        self.assertEqual(args.window_radius, 4)
         self.assertEqual(args.boundary_gap_seconds, 12)
         self.assertEqual(args.temperature, 0.25)
         self.assertEqual(args.response_schema_mode, "on")
         self.assertEqual(args.json_validation_mode, "relaxed")
+        self.assertEqual(args.ml_model_run_id, "day-20260323-best")
         self.assertEqual(args.ollama_think, "false")
         self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
         self.assertFalse(hasattr(args, "write_gui_index"))
@@ -70,9 +70,11 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
 
     def test_parse_args_defaults_boundary_gap_seconds_to_10(self):
         args = probe.parse_args(["/tmp/day"])
+        self.assertEqual(args.window_radius, probe.DEFAULT_WINDOW_RADIUS)
         self.assertEqual(args.boundary_gap_seconds, 10)
         self.assertEqual(args.json_validation_mode, "strict")
         self.assertEqual(args.photo_manifest_csv, "media_manifest.csv")
+        self.assertEqual(args.ml_model_run_id, "")
 
     def test_parse_args_accepts_provider_other_than_ollama(self):
         args = probe.parse_args(["/tmp/day", "--provider", "vllm"])
@@ -97,8 +99,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "VLM_PHOTO_MANIFEST_CSV=media_manifest.csv",
                         "VLM_EMBEDDED_MANIFEST_CSV=photo_embedded_manifest.csv",
                         "VLM_IMAGE_VARIANT=thumb",
-                        "VLM_WINDOW_SIZE=7",
-                        "VLM_OVERLAP=3",
+                        "VLM_WINDOW_RADIUS=4",
                         "VLM_BOUNDARY_GAP_SECONDS=20",
                         "VLM_MAX_BATCHES=0",
                         "VLM_CONTEXT_TOKENS=8192",
@@ -110,6 +111,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "VLM_RESPONSE_SCHEMA_MODE=on",
                         "VLM_JSON_VALIDATION_MODE=relaxed",
                         "VLM_PHOTO_PRE_MODEL_DIR=custom_pre_model",
+                        "VLM_ML_MODEL_RUN_ID=day-20260323-best",
                         "VLM_DUMP_DEBUG_DIR=/tmp/vlm-debug",
                     ]
                 ),
@@ -123,8 +125,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(args.photo_manifest_csv, "media_manifest.csv")
             self.assertEqual(args.embedded_manifest_csv, "photo_embedded_manifest.csv")
             self.assertEqual(args.image_variant, "thumb")
-            self.assertEqual(args.window_size, 7)
-            self.assertEqual(args.overlap, 3)
+            self.assertEqual(args.window_radius, 4)
             self.assertEqual(args.boundary_gap_seconds, 20)
             self.assertEqual(args.max_batches, 0)
             self.assertEqual(args.ollama_num_ctx, 8192)
@@ -136,7 +137,44 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(args.response_schema_mode, "on")
             self.assertEqual(args.json_validation_mode, "relaxed")
             self.assertEqual(args.photo_pre_model_dir, "custom_pre_model")
+            self.assertEqual(args.ml_model_run_id, "day-20260323-best")
             self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
+
+    def test_apply_vocatio_defaults_ignores_legacy_window_size_and_overlap_env(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            day_dir = Path(tmp_dir) / "20260323"
+            day_dir.mkdir(parents=True)
+            (day_dir / ".vocatio").write_text(
+                "\n".join(
+                    [
+                        "VLM_WINDOW_SIZE=7",
+                        "VLM_OVERLAP=3",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = probe.parse_args([str(day_dir)])
+            args = probe.apply_vocatio_defaults(args, day_dir)
+            self.assertEqual(args.window_radius, probe.DEFAULT_WINDOW_RADIUS)
+
+    def test_window_radius_contract_derives_even_window_size_and_centered_bounds(self):
+        contract = load_module(
+            "window_radius_contract_test",
+            "scripts/pipeline/lib/window_radius_contract.py",
+        )
+        self.assertEqual(contract.window_radius_to_window_size(5), 10)
+        self.assertEqual(
+            contract.build_centered_window_bounds(total_rows=8, cut_index=3, window_radius=2),
+            (2, 6),
+        )
+        self.assertEqual(
+            contract.build_centered_window_bounds(total_rows=8, cut_index=0, window_radius=2),
+            (0, 4),
+        )
+        self.assertEqual(
+            contract.build_centered_window_bounds(total_rows=8, cut_index=6, window_radius=2),
+            (4, 8),
+        )
 
     def test_build_response_schema_uses_boundary_after_frame_and_dynamic_notes(self):
         schema = probe.build_response_schema(window_size=3)
@@ -168,13 +206,13 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             ],
         )
 
-    def test_build_window_start_indexes_uses_overlap_and_aligned_tail(self):
-        self.assertEqual(probe.build_window_start_indexes(total_rows=26, window_size=10, overlap=2), [0, 8, 16])
-        self.assertEqual(probe.build_window_start_indexes(total_rows=53, window_size=10, overlap=2), [0, 8, 16, 24, 32, 40, 43])
+    def test_build_window_start_indexes_uses_window_radius_and_aligned_tail(self):
+        self.assertEqual(probe.build_window_start_indexes(total_rows=26, window_radius=5), [0, 5, 10, 15, 16])
+        self.assertEqual(probe.build_window_start_indexes(total_rows=53, window_radius=5), [0, 5, 10, 15, 20, 25, 30, 35, 40, 43])
 
-    def test_build_window_start_indexes_rejects_overlap_equal_to_window_size(self):
+    def test_build_window_start_indexes_rejects_radius_that_exceeds_available_rows(self):
         with self.assertRaises(ValueError):
-            probe.build_window_start_indexes(total_rows=20, window_size=10, overlap=10)
+            probe.build_window_start_indexes(total_rows=5, window_radius=3)
 
     def test_build_candidate_window_start_indexes_returns_only_large_time_gaps(self):
         rows = [
@@ -190,8 +228,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(
             probe.build_candidate_window_start_indexes(
                 rows,
-                window_size=5,
-                overlap=2,
+                window_radius=2,
                 boundary_gap_seconds=10,
             ),
             [2],
@@ -208,8 +245,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(
             probe.build_candidate_window_start_indexes(
                 rows,
-                window_size=5,
-                overlap=2,
+                window_radius=2,
                 boundary_gap_seconds=10,
             ),
             [],
@@ -229,8 +265,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(
             probe.build_candidate_windows(
                 rows,
-                window_size=5,
-                overlap=2,
+                window_radius=2,
                 boundary_gap_seconds=10,
             ),
             [{"start_index": 2, "cut_index": 3, "time_gap_seconds": 17}],
@@ -251,47 +286,239 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             ],
         )
 
-    def test_build_gap_hint_lines_uses_boundary_scores_when_available(self):
-        rows = [
-            {"relative_path": "cam/a.hif", "start_epoch_ms": "1000"},
-            {"relative_path": "cam/b.hif", "start_epoch_ms": "45000"},
-            {"relative_path": "cam/c.hif", "start_epoch_ms": "46000"},
-        ]
-        boundary_rows_by_pair = {
-            ("cam/a.hif", "cam/b.hif"): {
-                "dino_cosine_distance": "0.709211",
-                "boundary_score": "0.501221",
-            },
-            ("cam/b.hif", "cam/c.hif"): {
-                "dino_cosine_distance": "0.040000",
-                "boundary_score": "0.020000",
-            },
-        }
+    def test_resolve_ml_model_run_selects_latest_non_hidden_directory(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace_dir = Path(tmp_dir)
+            model_root = workspace_dir / "ml_boundary_corpus" / "ml_boundary_models"
+            model_root.mkdir(parents=True)
+            hidden_dir = model_root / ".ignore-me"
+            hidden_dir.mkdir()
+            older_dir = model_root / "run-001"
+            older_dir.mkdir()
+            newer_dir = model_root / "run-002"
+            newer_dir.mkdir()
+            self.assertEqual(
+                probe.resolve_ml_model_run(workspace_dir, ""),
+                ("run-002", newer_dir.resolve()),
+            )
+            self.assertEqual(
+                probe.resolve_ml_model_run(workspace_dir, "run-001"),
+                ("run-001", older_dir.resolve()),
+            )
+            self.assertEqual(
+                probe.resolve_ml_model_run(workspace_dir, "missing-run"),
+                ("missing-run", None),
+            )
+
+    def test_build_default_output_filename_uses_ml_run_suffix(self):
         self.assertEqual(
-            probe.build_gap_hint_lines(rows, boundary_rows_by_pair),
+            probe.build_default_output_filename("day-20260323-best-10m"),
+            "vlm_boundary_results.ml-day-20260323-best-10m.csv",
+        )
+        self.assertEqual(
+            probe.build_default_output_filename(""),
+            "vlm_boundary_results.ml-hints.csv",
+        )
+        self.assertEqual(
+            probe.build_default_output_filename("day/20260323 best"),
+            "vlm_boundary_results.ml-day-20260323-best.csv",
+        )
+
+    def test_build_descriptor_field_registry_from_feature_columns_uses_model_contract(self):
+        self.assertEqual(
+            probe._build_descriptor_field_registry_from_feature_columns(
+                [
+                    "gap_12",
+                    "left_headwear_person_1",
+                    "right_headwear_person_1",
+                    "left_dominant_colors_01",
+                    "right_dominant_colors_02",
+                    "left_internal_gap_mean",
+                ]
+            ),
+            {
+                "headwear_person_1": "scalar",
+                "dominant_colors": "multivalue",
+            },
+        )
+
+    def test_load_ml_hint_context_rejects_inconsistent_feature_columns_for_window_radius(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp)
+            (model_dir / probe.TRAINING_METADATA_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "mode": "tabular_only",
+                        "window_radius": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (model_dir / probe.FEATURE_COLUMNS_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "image_feature_columns": [],
+                        "boundary_feature_columns": ["gap_12", "gap_23"],
+                        "left_segment_type_feature_columns": ["gap_12", "gap_23"],
+                        "right_segment_type_feature_columns": ["gap_12", "gap_23"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class FakePredictor:
+                @classmethod
+                def load(cls, _path):
+                    return cls()
+
+            with mock.patch.object(probe, "load_tabular_predictor_class", return_value=FakePredictor):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "feature_columns.json is inconsistent with training window_radius=1",
+                ):
+                    probe.load_ml_hint_context(
+                        ml_model_run_id="ml-run-001",
+                        ml_model_dir=model_dir,
+                    )
+
+    def test_load_ml_hint_context_rejects_smaller_radius_feature_columns_for_larger_declared_radius(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp)
+            (model_dir / probe.TRAINING_METADATA_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "mode": "tabular_only",
+                        "window_radius": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (model_dir / probe.FEATURE_COLUMNS_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "image_feature_columns": [],
+                        "boundary_feature_columns": ["gap_12", "gap_23"],
+                        "left_segment_type_feature_columns": ["gap_12", "gap_23"],
+                        "right_segment_type_feature_columns": ["gap_12", "gap_23"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class FakePredictor:
+                @classmethod
+                def load(cls, _path):
+                    return cls()
+
+            with mock.patch.object(probe, "load_tabular_predictor_class", return_value=FakePredictor):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "feature_columns.json is inconsistent with training window_radius=2",
+                ):
+                    probe.load_ml_hint_context(
+                        ml_model_run_id="ml-run-001",
+                        ml_model_dir=model_dir,
+                    )
+
+    def test_load_ml_hint_context_loads_left_right_and_boundary_predictors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp)
+            (model_dir / probe.TRAINING_METADATA_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "mode": "tabular_only",
+                        "window_radius": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (model_dir / probe.FEATURE_COLUMNS_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "image_feature_columns": [],
+                        "boundary_feature_columns": ["gap_12"],
+                        "left_segment_type_feature_columns": ["gap_12"],
+                        "right_segment_type_feature_columns": ["gap_12"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            loaded_paths: list[str] = []
+
+            class FakePredictor:
+                @classmethod
+                def load(cls, path):
+                    loaded_paths.append(str(path))
+                    return f"predictor::{path}"
+
+            with mock.patch.object(probe, "_validate_ml_hint_feature_columns_contract"), mock.patch.object(
+                probe, "load_tabular_predictor_class", return_value=FakePredictor
+            ):
+                context = probe.load_ml_hint_context(
+                    ml_model_run_id="ml-run-001",
+                    ml_model_dir=model_dir,
+                )
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertEqual(
+                context.left_segment_type_predictor,
+                f"predictor::{model_dir / probe.LEFT_SEGMENT_TYPE_MODEL_DIRNAME}",
+            )
+            self.assertEqual(
+                context.right_segment_type_predictor,
+                f"predictor::{model_dir / probe.RIGHT_SEGMENT_TYPE_MODEL_DIRNAME}",
+            )
+            self.assertEqual(
+                context.boundary_predictor,
+                f"predictor::{model_dir / probe.BOUNDARY_MODEL_DIRNAME}",
+            )
+            self.assertEqual(
+                loaded_paths,
+                [
+                    str(model_dir / probe.LEFT_SEGMENT_TYPE_MODEL_DIRNAME),
+                    str(model_dir / probe.RIGHT_SEGMENT_TYPE_MODEL_DIRNAME),
+                    str(model_dir / probe.BOUNDARY_MODEL_DIRNAME),
+                ],
+            )
+            self.assertEqual(context.boundary_feature_columns, ["gap_12"])
+            self.assertEqual(context.left_segment_type_feature_columns, ["gap_12"])
+            self.assertEqual(context.right_segment_type_feature_columns, ["gap_12"])
+
+    def test_build_ml_hint_lines_renders_task_language(self):
+        lines = probe.build_ml_hint_lines(
+            probe.MlHintPrediction(
+                boundary_prediction=True,
+                boundary_confidence=0.82,
+                left_segment_type_prediction="performance",
+                left_segment_type_confidence=0.74,
+                right_segment_type_prediction="ceremony",
+                right_segment_type_confidence=0.67,
+            )
+        )
+        self.assertEqual(
+            lines,
             [
-                "gap_01_02: visual_distance=0.709 (high), heuristic_boundary_score=0.501 (medium)",
-                "gap_02_03: visual_distance=0.040 (low), heuristic_boundary_score=0.020 (low)",
+                "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
+                "ML hint for the left side of the candidate gap: likely dance (confidence 0.74).",
+                "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.67).",
             ],
         )
 
-    def test_build_gap_hint_lines_marks_missing_visual_hints_as_unknown(self):
-        rows = [
-            {"relative_path": "cam/a.hif", "start_epoch_ms": "1000"},
-            {"relative_path": "cam/b.hif", "start_epoch_ms": "2000"},
-        ]
+    def test_build_ml_hint_lines_reports_unavailable_when_prediction_missing(self):
         self.assertEqual(
-            probe.build_gap_hint_lines(rows, {}),
-            [
-                "gap_01_02: visual_distance=unknown (unknown), heuristic_boundary_score=unknown (unknown)",
-            ],
+            probe.build_ml_hint_lines(None),
+            ["ML hints are unavailable for this window."],
         )
 
-    def test_build_user_prompt_mentions_single_cut_decisions_and_heuristic_hints(self):
+    def test_build_user_prompt_mentions_ml_hints_and_not_raw_heuristics(self):
         prompt = probe.build_user_prompt(
             window_size=2,
-            gap_hint_lines=[
-                "gap_01_02: visual_distance=0.150 (medium), heuristic_boundary_score=0.200 (low)",
+            ml_hint_lines=[
+                "ML hint for the main candidate gap in this window: likely no cut (confidence 0.88).",
+                "ML hint for the left side of the candidate gap: likely dance (confidence 0.73).",
+                "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.74).",
             ],
         )
         self.assertIn('"no_cut"', prompt)
@@ -303,9 +530,13 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIn("Reason about continuity from left to right", prompt)
         self.assertIn("Decision priority", prompt)
         self.assertIn("images", prompt)
-        self.assertIn("heuristic hints", prompt)
-        self.assertIn("Heuristic hints for consecutive gaps", prompt)
-        self.assertIn("gap_01_02: visual_distance=0.150 (medium)", prompt)
+        self.assertIn("ML hints", prompt)
+        self.assertIn("ML hint for the main candidate gap in this window", prompt)
+        self.assertIn("likely no cut", prompt)
+        self.assertIn("left side of the candidate gap: likely dance", prompt)
+        self.assertIn("right side of the candidate gap: likely ceremony", prompt)
+        self.assertNotIn("Heuristic hints for consecutive gaps", prompt)
+        self.assertNotIn("visual_distance=", prompt)
         self.assertIn("audience or backstage insert", prompt)
         self.assertIn("floor rehearsal / floor test / stage test", prompt)
         self.assertIn("ceremony / award / host / result reading", prompt)
@@ -319,19 +550,18 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertIn("group shot followed by a solo shot of one dancer from the same group", prompt)
         self.assertIn("do not create a boundary only because fewer or more dancers are visible", prompt)
         self.assertIn("you must return null", prompt)
-        self.assertNotIn("time_gap_seconds", prompt)
         self.assertIn("If more than one real boundary appears", prompt)
         self.assertIn('If there is no clear evidence for a boundary, choose "no_cut"', prompt)
         self.assertIn("Keep frame notes short and concrete", prompt)
         self.assertIn('"frame_notes"', prompt)
         self.assertIn('"primary_evidence"', prompt)
         self.assertIn('"summary"', prompt)
-        self.assertNotIn("confidence", prompt.lower())
+        self.assertIn("confidence", prompt.lower())
 
     def test_build_user_prompt_appends_extra_instructions(self):
         prompt = probe.build_user_prompt(
             window_size=1,
-            gap_hint_lines=[],
+            ml_hint_lines=[],
             extra_instructions="Prefer strong performer identity changes over lighting changes.",
         )
         self.assertIn("Additional instructions", prompt)
@@ -340,7 +570,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
     def test_build_user_prompt_schema_mode_mentions_boundary_after_frame(self):
         prompt = probe.build_user_prompt(
             window_size=3,
-            gap_hint_lines=["gap_01_02: visual_distance=0.100 (medium), heuristic_boundary_score=0.200 (low)"],
+            ml_hint_lines=["ML hint for the main candidate gap in this window: likely cut (confidence 0.82)."],
             extra_instructions="",
             response_schema_mode="on",
         )
@@ -351,59 +581,264 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertNotIn('"decision"', prompt)
         self.assertIn("<one of: null, frame_01, frame_02>", prompt)
 
-    def test_build_user_prompt_includes_pre_model_lines_when_available(self):
-        prompt = probe.build_user_prompt(
-            window_size=2,
-            gap_hint_lines=["gap_01_02: visual_distance=0.100 (medium), heuristic_boundary_score=0.200 (low)"],
-            extra_instructions="",
-            pre_model_lines=[
-                "frame_01: people_count=1, performer_view=solo",
-                "frame_02: people_count=2, performer_view=duo",
+    def test_build_ml_hint_lines_for_candidate_uses_model_predictions_for_arbitrary_window_radius(self):
+        class FakeBoundaryPredictor:
+            def predict(self, _frame):
+                return [1]
+
+            def predict_proba(self, _frame):
+                return [{"0": 0.18, "1": 0.82}]
+
+        class FakeLeftSegmentPredictor:
+            def predict(self, _frame):
+                return ["performance"]
+
+            def predict_proba(self, _frame):
+                return [{"performance": 0.74, "ceremony": 0.14, "warmup": 0.12}]
+
+        class FakeRightSegmentPredictor:
+            def predict(self, _frame):
+                return ["ceremony"]
+
+            def predict_proba(self, _frame):
+                return [{"performance": 0.12, "ceremony": 0.67, "warmup": 0.21}]
+
+        ml_hint_context = probe.MlHintContext(
+            run_id="day-20260323",
+            mode="tabular_only",
+            model_dir=Path("/tmp/fake-model"),
+            window_radius=3,
+            boundary_predictor=FakeBoundaryPredictor(),
+            left_segment_type_predictor=FakeLeftSegmentPredictor(),
+            right_segment_type_predictor=FakeRightSegmentPredictor(),
+            boundary_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
+            left_segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
+            right_segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
+            descriptor_field_registry={},
+        )
+        joined_rows = []
+        for index, name in enumerate(("a", "b", "c", "d", "e", "f"), start=1):
+            joined_rows.append(
+                {
+                    "day": "20260323",
+                    "photo_id": f"cam/{name}.hif",
+                    "relative_path": f"cam/{name}.hif",
+                    "start_epoch_ms": str(index * 1000),
+                    "thumb_path": f"/tmp/{name}.jpg",
+                }
+            )
+        lines = probe.build_ml_hint_lines_for_candidate(
+            day_id="20260323",
+            joined_rows=joined_rows,
+            cut_index=2,
+            boundary_rows_by_pair={},
+            photo_pre_model_dir=None,
+            ml_hint_context=ml_hint_context,
+            runtime_window_radius=3,
+        )
+        self.assertEqual(
+            lines,
+            [
+                "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
+                "ML hint for the left side of the candidate gap: likely dance (confidence 0.74).",
+                "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.67).",
             ],
         )
-        self.assertIn("Optional pre-model per-image annotations", prompt)
-        self.assertIn("frame_01: people_count=1, performer_view=solo", prompt)
-        self.assertIn("frame_02: people_count=2, performer_view=duo", prompt)
 
-    def test_build_photo_pre_model_lines_reads_existing_annotation_files(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            output_dir = Path(tmp_dir)
-            annotation_path = output_dir / "cam" / "a.hif.json"
-            annotation_path.parent.mkdir(parents=True, exist_ok=True)
-            annotation_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": "photo_pre_model_v1",
-                        "relative_path": "cam/a.hif",
-                        "generated_at": "2026-04-15T12:00:00+02:00",
-                        "model": "test-model",
-                        "data": {
-                            "people_count": "1",
-                            "performer_view": "solo",
-                            "upper_garment": "leotard",
-                            "lower_garment": "tutu",
-                            "sleeves": "long",
-                            "leg_coverage": "long",
-                            "dominant_colors": ["blue", "white"],
-                            "headwear": "none",
-                            "footwear": "ballet_shoes",
-                            "props": ["none"],
-                            "dance_style_hint": "ballet",
-                        },
-                    }
-                ),
-                encoding="utf-8",
+    def test_build_ml_hint_lines_for_candidate_renders_three_independent_lines(self):
+        class FakeBoundaryPredictor:
+            def predict(self, _frame):
+                return [1]
+
+            def predict_proba(self, _frame):
+                return [{"0": 0.10, "1": 0.90}]
+
+        class FakeLeftSegmentPredictor:
+            def predict(self, _frame):
+                return ["performance"]
+
+            def predict_proba(self, _frame):
+                return [{"performance": 0.73, "ceremony": 0.14, "warmup": 0.13}]
+
+        class FakeRightSegmentPredictor:
+            def predict(self, _frame):
+                return ["ceremony"]
+
+            def predict_proba(self, _frame):
+                return [{"performance": 0.15, "ceremony": 0.71, "warmup": 0.14}]
+
+        ml_hint_context = probe.MlHintContext(
+            run_id="day-20260323",
+            mode="tabular_only",
+            model_dir=Path("/tmp/fake-model"),
+            window_radius=2,
+            boundary_predictor=FakeBoundaryPredictor(),
+            left_segment_type_predictor=FakeLeftSegmentPredictor(),
+            right_segment_type_predictor=FakeRightSegmentPredictor(),
+            boundary_feature_columns=["gap_12", "gap_23", "gap_34"],
+            left_segment_type_feature_columns=["gap_12", "gap_23", "gap_34"],
+            right_segment_type_feature_columns=["gap_12", "gap_23", "gap_34"],
+            descriptor_field_registry={},
+        )
+        joined_rows = [
+            {
+                "day": "20260323",
+                "photo_id": f"cam/{name}.hif",
+                "relative_path": f"cam/{name}.hif",
+                "start_epoch_ms": str(index * 1000),
+                "thumb_path": f"/tmp/{name}.jpg",
+            }
+            for index, name in enumerate(("a", "b", "c", "d", "e"), start=1)
+        ]
+        lines = probe.build_ml_hint_lines_for_candidate(
+            day_id="20260323",
+            joined_rows=joined_rows,
+            cut_index=2,
+            boundary_rows_by_pair={},
+            photo_pre_model_dir=None,
+            ml_hint_context=ml_hint_context,
+            runtime_window_radius=2,
+        )
+        self.assertTrue(any("main candidate gap" in line for line in lines))
+        self.assertTrue(any("left side of the candidate gap" in line for line in lines))
+        self.assertTrue(any("right side of the candidate gap" in line for line in lines))
+
+    def test_predict_ml_hint_for_candidate_returns_left_right_and_boundary(self):
+        class FakeBoundaryPredictor:
+            def predict(self, _frame):
+                return [1]
+
+            def predict_proba(self, _frame):
+                return [{"0": 0.12, "1": 0.88}]
+
+        class FakeLeftSegmentPredictor:
+            def predict(self, _frame):
+                return ["performance"]
+
+            def predict_proba(self, _frame):
+                return [{"performance": 0.77, "ceremony": 0.13, "warmup": 0.10}]
+
+        class FakeRightSegmentPredictor:
+            def predict(self, _frame):
+                return ["ceremony"]
+
+            def predict_proba(self, _frame):
+                return [{"performance": 0.10, "ceremony": 0.79, "warmup": 0.11}]
+
+        ml_hint_context = probe.MlHintContext(
+            run_id="day-20260323",
+            mode="tabular_only",
+            model_dir=Path("/tmp/fake-model"),
+            window_radius=2,
+            boundary_predictor=FakeBoundaryPredictor(),
+            left_segment_type_predictor=FakeLeftSegmentPredictor(),
+            right_segment_type_predictor=FakeRightSegmentPredictor(),
+            boundary_feature_columns=["gap_12", "gap_23", "gap_34"],
+            left_segment_type_feature_columns=["gap_12", "gap_23", "gap_34"],
+            right_segment_type_feature_columns=["gap_12", "gap_23", "gap_34"],
+            descriptor_field_registry={},
+        )
+        candidate_row = probe._build_ml_candidate_row(
+            [
+                {
+                    "day": "20260323",
+                    "photo_id": f"cam/{name}.hif",
+                    "relative_path": f"cam/{name}.hif",
+                    "start_epoch_ms": str(index * 1000),
+                    "thumb_path": f"/tmp/{name}.jpg",
+                }
+                for index, name in enumerate(("a", "b", "c", "d"), start=1)
+            ],
+            day_id="20260323",
+            window_radius=2,
+        )
+        prediction = probe.predict_ml_hint_for_candidate(
+            ml_hint_context=ml_hint_context,
+            candidate_row=candidate_row,
+            boundary_rows_by_pair={},
+            photo_pre_model_dir=None,
+        )
+        self.assertEqual(prediction.left_segment_type_prediction, "performance")
+        self.assertEqual(prediction.right_segment_type_prediction, "ceremony")
+        self.assertTrue(prediction.boundary_prediction)
+
+    def test_build_ml_candidate_row_omits_legacy_segment_type_key(self):
+        candidate_row = probe._build_ml_candidate_row(
+            [
+                {
+                    "day": "20260323",
+                    "photo_id": f"cam/{name}.hif",
+                    "relative_path": f"cam/{name}.hif",
+                    "start_epoch_ms": str(index * 1000),
+                    "thumb_path": f"/tmp/{name}.jpg",
+                }
+                for index, name in enumerate(("a", "b", "c", "d"), start=1)
+            ],
+            day_id="20260323",
+            window_radius=2,
+        )
+        self.assertNotIn("segment_type", candidate_row)
+
+    def test_build_ml_hint_lines_for_candidate_rejects_runtime_radius_mismatch(self):
+        ml_hint_context = probe.MlHintContext(
+            run_id="day-20260323",
+            mode="tabular_only",
+            model_dir=Path("/tmp/fake-model"),
+            window_radius=3,
+            boundary_predictor=mock.Mock(),
+            left_segment_type_predictor=mock.Mock(),
+            right_segment_type_predictor=mock.Mock(),
+            boundary_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
+            left_segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
+            right_segment_type_feature_columns=["gap_12", "gap_23", "gap_34", "gap_45", "gap_56"],
+            descriptor_field_registry={},
+        )
+        joined_rows = [
+            {
+                "day": "20260323",
+                "photo_id": f"cam/{name}.hif",
+                "relative_path": f"cam/{name}.hif",
+                "start_epoch_ms": str(index * 1000),
+                "thumb_path": f"/tmp/{name}.jpg",
+            }
+            for index, name in enumerate(("a", "b", "c", "d", "e", "f"), start=1)
+        ]
+
+        with self.assertRaisesRegex(ValueError, "ml model window_radius mismatch: runtime=2, artifact=3"):
+            probe.build_ml_hint_lines_for_candidate(
+                day_id="20260323",
+                joined_rows=joined_rows,
+                cut_index=2,
+                boundary_rows_by_pair={},
+                photo_pre_model_dir=None,
+                ml_hint_context=ml_hint_context,
+                runtime_window_radius=2,
             )
-            lines = probe.build_photo_pre_model_lines(
-                [{"relative_path": "cam/a.hif"}, {"relative_path": "cam/missing.hif"}],
-                output_dir,
+
+    def test_build_ml_hint_lines_for_candidate_falls_back_when_model_context_missing(self):
+        joined_rows = []
+        for index, name in enumerate(("a", "b", "c", "d", "e"), start=1):
+            joined_rows.append(
+                {
+                    "day": "20260323",
+                    "photo_id": f"cam/{name}.hif",
+                    "relative_path": f"cam/{name}.hif",
+                    "start_epoch_ms": str(index * 1000),
+                    "thumb_path": f"/tmp/{name}.jpg",
+                }
             )
-            self.assertEqual(
-                lines,
-                [
-                    "frame_01: people_count=1, performer_view=solo, upper_garment=leotard, lower_garment=tutu, sleeves=long, leg_coverage=long, dominant_colors=blue|white, headwear=none, footwear=ballet_shoes, props=none, dance_style_hint=ballet"
-                ],
-            )
+        self.assertEqual(
+            probe.build_ml_hint_lines_for_candidate(
+                day_id="20260323",
+                joined_rows=joined_rows,
+                cut_index=2,
+                boundary_rows_by_pair={},
+                photo_pre_model_dir=None,
+                ml_hint_context=None,
+                runtime_window_radius=2,
+            ),
+            ["ML hints are unavailable for this window."],
+        )
 
     def test_build_system_prompt_mentions_boundary_after_frame_in_schema_mode(self):
         self.assertIn("boundary_after_frame", probe.build_system_prompt("on"))
@@ -512,16 +947,18 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     "start_epoch_ms": "2000",
                 },
             ],
-            window_size=10,
-            overlap=2,
+            window_radius=2,
             raw_response='{"decision":"cut_after_1","frame_notes":{"frame_01":"black-white","frame_02":"red-black"},"primary_evidence":["different performer"],"summary":"New act."}',
             parsed_response={"decision": "cut_after_1", "reason": "Summary: New act.", "response_status": "ok"},
         )
         self.assertEqual(row["run_id"], "vlm-20260414033000")
+        self.assertEqual(row["window_radius"], "2")
         self.assertEqual(row["cut_after_local_index"], "1")
         self.assertEqual(row["cut_after_global_row"], "9")
         self.assertEqual(row["cut_left_relative_path"], "cam/a.jpg")
         self.assertEqual(row["cut_right_relative_path"], "cam/b.jpg")
+        self.assertNotIn("window_size", row)
+        self.assertNotIn("overlap", row)
 
     def test_build_vlm_request_maps_ollama_fields_to_transport_request(self):
         schema = probe.build_response_schema(window_size=2)
@@ -704,6 +1141,9 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             )
             lines = output_csv.read_text(encoding="utf-8").splitlines()
             self.assertEqual(lines[0], ",".join(probe.OUTPUT_HEADERS))
+            self.assertIn("window_radius", probe.OUTPUT_HEADERS)
+            self.assertNotIn("window_size", probe.OUTPUT_HEADERS)
+            self.assertNotIn("overlap", probe.OUTPUT_HEADERS)
             self.assertEqual(len(lines), 2)
 
     def test_append_result_rows_appends_without_overwrite_mode(self):
@@ -724,13 +1164,20 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         run_id = probe.build_run_id(datetime_text="2026-04-14T05:30:12+02:00")
         self.assertEqual(run_id, "vlm-20260414053012")
 
+    def test_build_user_prompt_template_uses_boundary_left_and_right_ml_hints(self):
+        template = probe.build_user_prompt_template(window_size=4)
+        self.assertIn("ML hint for the main candidate gap in this window: likely cut", template)
+        self.assertIn("ML hint for the left side of the candidate gap: likely", template)
+        self.assertIn("ML hint for the right side of the candidate gap: likely", template)
+        self.assertNotIn("likely segment on the right side of the candidate gap", template)
+        self.assertNotIn("likely cut at the main candidate gap", template)
+
     def test_build_config_hash_is_stable(self):
         first = probe.build_config_hash(
             {
                 "embedded_manifest_csv": "/tmp/a.csv",
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "max_batches": 100,
                 "model": "qwen3.5:9b",
                 "ollama_base_url": "http://127.0.0.1:11434",
@@ -751,8 +1198,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "ollama_num_ctx": 16384,
                 "image_variant": "thumb",
                 "embedded_manifest_csv": "/tmp/a.csv",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "max_batches": 100,
                 "model": "qwen3.5:9b",
                 "ollama_base_url": "http://127.0.0.1:11434",
@@ -780,8 +1226,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 output_csv=workspace_dir / "vlm_boundary_results.csv",
                 args_payload={
                     "image_variant": "preview",
-                    "window_size": 5,
-                    "overlap": 2,
+                    "window_radius": 2,
                     "max_batches": 100,
                     "model": "qwen3.5:9b",
                     "response_schema_mode": "on",
@@ -796,24 +1241,210 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertTrue(metadata_path.exists())
             stored = json.loads(metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(stored["user_prompt_template"], "user-template")
-            self.assertEqual(stored["args"]["window_size"], 5)
+            self.assertEqual(stored["args"]["window_radius"], 2)
             self.assertEqual(stored["args"]["response_schema_mode"], "on")
             self.assertEqual(stored["response_schema"], {"type": "object"})
 
-    def test_read_result_rows_accepts_legacy_header_with_new_run_rows(self):
+    def test_read_result_rows_rejects_pre_follow_up_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base_row = {
+                "generated_at": "2026-04-14T05:30:12+02:00",
+                "run_id": "vlm-20260414053012",
+                "config_hash": "oldhash",
+                "image_variant": "thumb",
+                "model": "qwen3.5:9b",
+                "temperature": "0.0",
+                "batch_index": "1",
+                "start_row": "1",
+                "end_row": "4",
+                "window_size": "4",
+                "overlap": "2",
+                "relative_paths_json": '["cam/a.hif","cam/b.hif"]',
+                "filenames_json": '["a.hif","b.hif"]',
+                "image_paths_json": '["/tmp/a.jpg","/tmp/b.jpg"]',
+                "delta_from_first_seconds_json": "[0.0,1.0]",
+                "delta_from_previous_seconds_json": "[0.0,1.0]",
+                "decision": "cut_after_1",
+                "cut_after_local_index": "1",
+                "cut_after_global_row": "2",
+                "cut_left_relative_path": "cam/a.hif",
+                "cut_right_relative_path": "cam/b.hif",
+                "reason": "boundary",
+                "response_status": "ok",
+                "raw_response": '{"decision":"cut_after_1"}',
+            }
+            cases = [
+                (
+                    "old_current",
+                    [
+                        "generated_at",
+                        "run_id",
+                        "config_hash",
+                        "image_variant",
+                        "model",
+                        "temperature",
+                        "batch_index",
+                        "start_row",
+                        "end_row",
+                        "window_size",
+                        "overlap",
+                        "relative_paths_json",
+                        "filenames_json",
+                        "image_paths_json",
+                        "delta_from_first_seconds_json",
+                        "delta_from_previous_seconds_json",
+                        "decision",
+                        "cut_after_local_index",
+                        "cut_after_global_row",
+                        "cut_left_relative_path",
+                        "cut_right_relative_path",
+                        "reason",
+                        "response_status",
+                        "raw_response",
+                    ],
+                ),
+                (
+                    "old_mid",
+                    [
+                        "generated_at",
+                        "run_id",
+                        "image_variant",
+                        "model",
+                        "temperature",
+                        "batch_index",
+                        "start_row",
+                        "end_row",
+                        "window_size",
+                        "overlap",
+                        "relative_paths_json",
+                        "filenames_json",
+                        "image_paths_json",
+                        "delta_from_first_seconds_json",
+                        "delta_from_previous_seconds_json",
+                        "decision",
+                        "cut_after_local_index",
+                        "cut_after_global_row",
+                        "cut_left_relative_path",
+                        "cut_right_relative_path",
+                        "reason",
+                        "response_status",
+                        "raw_response",
+                    ],
+                ),
+                (
+                    "old_legacy",
+                    [
+                        "generated_at",
+                        "image_variant",
+                        "model",
+                        "temperature",
+                        "batch_index",
+                        "start_row",
+                        "end_row",
+                        "window_size",
+                        "overlap",
+                        "relative_paths_json",
+                        "filenames_json",
+                        "image_paths_json",
+                        "delta_from_first_seconds_json",
+                        "delta_from_previous_seconds_json",
+                        "decision",
+                        "cut_after_local_index",
+                        "cut_after_global_row",
+                        "cut_left_relative_path",
+                        "cut_right_relative_path",
+                        "reason",
+                        "response_status",
+                        "raw_response",
+                    ],
+                ),
+            ]
+            for name, headers in cases:
+                output_csv = Path(tmp) / f"{name}.csv"
+                with output_csv.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow(headers)
+                    writer.writerow([base_row[header] for header in headers])
+                with self.assertRaisesRegex(ValueError, "unsupported header"):
+                    probe.read_result_rows(output_csv)
+
+    def test_read_result_rows_rejects_current_rows_appended_to_pre_follow_up_header(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_csv = Path(tmp) / "vlm_boundary_results.csv"
+            legacy_headers = [
+                "generated_at",
+                "image_variant",
+                "model",
+                "temperature",
+                "batch_index",
+                "start_row",
+                "end_row",
+                "window_size",
+                "overlap",
+                "relative_paths_json",
+                "filenames_json",
+                "image_paths_json",
+                "delta_from_first_seconds_json",
+                "delta_from_previous_seconds_json",
+                "decision",
+                "cut_after_local_index",
+                "cut_after_global_row",
+                "cut_left_relative_path",
+                "cut_right_relative_path",
+                "reason",
+                "response_status",
+                "raw_response",
+            ]
+            legacy_row = {
+                "generated_at": "2026-04-14T05:30:12+02:00",
+                "image_variant": "thumb",
+                "model": "qwen3.5:9b",
+                "temperature": "0.0",
+                "batch_index": "1",
+                "start_row": "1",
+                "end_row": "4",
+                "window_size": "4",
+                "overlap": "2",
+                "relative_paths_json": '["cam/a.hif","cam/b.hif"]',
+                "filenames_json": '["a.hif","b.hif"]',
+                "image_paths_json": '["/tmp/a.jpg","/tmp/b.jpg"]',
+                "delta_from_first_seconds_json": "[0.0,1.0]",
+                "delta_from_previous_seconds_json": "[0.0,1.0]",
+                "decision": "no_cut",
+                "cut_after_local_index": "",
+                "cut_after_global_row": "",
+                "cut_left_relative_path": "",
+                "cut_right_relative_path": "",
+                "reason": "same segment",
+                "response_status": "ok",
+                "raw_response": '{"decision":"no_cut"}',
+            }
+            current_row = {header: "" for header in probe.OUTPUT_HEADERS}
+            current_row["generated_at"] = "2026-04-14T05:31:12+02:00"
+            current_row["run_id"] = "vlm-20260414053112"
+            current_row["config_hash"] = "newhash"
+            current_row["image_variant"] = "preview"
+            current_row["model"] = "qwen3.5:9b"
+            current_row["temperature"] = "0.1"
+            current_row["batch_index"] = "2"
+            current_row["start_row"] = "5"
+            current_row["end_row"] = "8"
+            current_row["window_radius"] = "3"
+            current_row["decision"] = "cut_after_2"
+            current_row["cut_after_local_index"] = "2"
+            current_row["cut_after_global_row"] = "6"
+            current_row["cut_left_relative_path"] = "cam/f.hif"
+            current_row["cut_right_relative_path"] = "cam/g.hif"
+            current_row["reason"] = "boundary"
+            current_row["response_status"] = "ok"
+            current_row["raw_response"] = '{"decision":"cut_after_2"}'
             with output_csv.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
-                writer.writerow(probe.LEGACY_OUTPUT_HEADERS)
-                writer.writerow(["legacy"] * len(probe.LEGACY_OUTPUT_HEADERS))
-                writer.writerow(["current"] * len(probe.OUTPUT_HEADERS))
-            rows = probe.read_result_rows(output_csv)
-            self.assertEqual(len(rows), 2)
-            self.assertEqual(rows[0]["run_id"], "")
-            self.assertEqual(rows[0]["generated_at"], "legacy")
-            self.assertEqual(rows[1]["run_id"], "current")
-            self.assertEqual(rows[1]["generated_at"], "current")
+                writer.writerow(legacy_headers)
+                writer.writerow([legacy_row[header] for header in legacy_headers])
+                writer.writerow([current_row[header] for header in probe.OUTPUT_HEADERS])
+            with self.assertRaisesRegex(ValueError, "unsupported header"):
+                probe.read_result_rows(output_csv)
 
     def test_append_result_rows_writes_config_hash_column(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -858,6 +1489,111 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             )
             self.assertEqual(state["run_id"], "vlm-20260414053113")
             self.assertEqual(state["completed_batches"], 1)
+
+    def test_resolve_run_state_rejects_pre_follow_up_rows_for_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
+            runs_dir.mkdir(parents=True)
+            output_csv = workspace_dir / "vlm_boundary_results.csv"
+            legacy_headers = [
+                "generated_at",
+                "run_id",
+                "config_hash",
+                "image_variant",
+                "model",
+                "temperature",
+                "batch_index",
+                "start_row",
+                "end_row",
+                "window_size",
+                "overlap",
+                "relative_paths_json",
+                "filenames_json",
+                "image_paths_json",
+                "delta_from_first_seconds_json",
+                "delta_from_previous_seconds_json",
+                "decision",
+                "cut_after_local_index",
+                "cut_after_global_row",
+                "cut_left_relative_path",
+                "cut_right_relative_path",
+                "reason",
+                "response_status",
+                "raw_response",
+            ]
+            with output_csv.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(legacy_headers)
+                writer.writerow(
+                    [
+                        "2026-04-14T05:30:12+02:00",
+                        "vlm-20260414053012",
+                        "samehash",
+                        "thumb",
+                        "qwen3.5:9b",
+                        "0.0",
+                        "1",
+                        "1",
+                        "4",
+                        "4",
+                        "2",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "no_cut",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "same segment",
+                        "ok",
+                        '{"decision":"no_cut"}',
+                    ]
+                )
+                writer.writerow(
+                    [
+                        "2026-04-14T05:31:12+02:00",
+                        "vlm-20260414053113",
+                        "samehash",
+                        "thumb",
+                        "qwen3.5:9b",
+                        "0.0",
+                        "2",
+                        "5",
+                        "8",
+                        "4",
+                        "2",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "[]",
+                        "cut_after_1",
+                        "1",
+                        "6",
+                        "cam/f.hif",
+                        "cam/g.hif",
+                        "boundary",
+                        "ok",
+                        '{"decision":"cut_after_1"}',
+                    ]
+                )
+            for run_id in ("vlm-20260414053012", "vlm-20260414053113"):
+                (runs_dir / f"{run_id}.json").write_text(
+                    json.dumps({"run_id": run_id, "config_hash": "samehash", "args": {}}),
+                    encoding="utf-8",
+                )
+            with self.assertRaisesRegex(ValueError, "unsupported header"):
+                probe.resolve_run_state(
+                    workspace_dir=workspace_dir,
+                    output_csv=output_csv,
+                    config_hash="samehash",
+                    new_run=False,
+                    run_id=None,
+                )
 
     def test_resolve_run_state_uses_explicit_run_id_when_provided(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -912,7 +1648,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             runs_dir.mkdir(parents=True)
             output_csv = workspace_dir / "vlm_boundary_results.csv"
             (runs_dir / "vlm-20260414053113.json").write_text(
-                json.dumps({"run_id": "vlm-20260414053113", "config_hash": "oldhash", "args": {"window_size": 5}}),
+                json.dumps({"run_id": "vlm-20260414053113", "config_hash": "oldhash", "args": {"window_radius": 2}}),
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "Run configuration mismatch"):
@@ -934,8 +1670,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "embedded_manifest_csv": "/tmp/a.csv",
                 "photo_manifest_csv": "/tmp/b.csv",
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "model": "qwen3.5:9b",
                 "ollama_base_url": "http://127.0.0.1:11434",
                 "ollama_num_ctx": 16384,
@@ -1062,7 +1797,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             with photo_manifest_csv.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=MEDIA_MANIFEST_HEADERS)
                 writer.writeheader()
-                for index, name in enumerate(("a", "b", "c", "d", "e")):
+                epoch_values = (0, 1000, 2000, 3000, 20000)
+                for index, (name, epoch_ms) in enumerate(zip(("a", "b", "c", "d", "e"), epoch_values)):
                     writer.writerow(
                         {
                             "day": day_dir.name,
@@ -1082,7 +1818,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                             "capture_subsec": "000",
                             "photo_order_index": str(index),
                             "start_local": f"2026-03-23T10:00:0{index}",
-                            "start_epoch_ms": str(index * 1000),
+                            "start_epoch_ms": str(epoch_ms),
                             "timestamp_source": "test",
                             "metadata_status": "ok",
                         }
@@ -1092,9 +1828,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
-                "boundary_gap_seconds": 0,
+                "window_radius": 2,
+                "boundary_gap_seconds": 10,
                 "max_batches": 100,
                 "model": "qwen3.5:9b",
                 "ollama_base_url": "http://127.0.0.1:11434",
@@ -1127,15 +1862,15 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 probe, "run_vlm_request"
             ) as run_vlm_mock:
                 row_count = probe.probe_vlm_photo_boundaries(
+                    day_id=day_dir.name,
                     workspace_dir=workspace_dir,
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,
                     output_csv=output_csv,
                     provider="ollama",
                     image_variant="thumb",
-                    window_size=5,
-                    overlap=2,
-                    boundary_gap_seconds=0,
+                    window_radius=2,
+                    boundary_gap_seconds=10,
                     max_batches=100,
                     model="qwen3.5:9b",
                     ollama_base_url="http://127.0.0.1:11434",
@@ -1152,6 +1887,80 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 )
             self.assertEqual(row_count, 0)
             run_vlm_mock.assert_not_called()
+
+    def test_probe_vlm_photo_boundaries_fails_fast_when_ml_hint_context_load_fails(self):
+        args_payload = {
+            "embedded_manifest_csv": "/tmp/photo_embedded_manifest.csv",
+            "photo_manifest_csv": "/tmp/media_manifest.csv",
+            "image_variant": "thumb",
+            "window_radius": 2,
+            "boundary_gap_seconds": 10,
+            "max_batches": 100,
+            "model": "qwen3.5:9b",
+            "ollama_base_url": "http://127.0.0.1:11434",
+            "ollama_num_ctx": 16384,
+            "ollama_num_predict": None,
+            "ollama_keep_alive": "15m",
+            "timeout_seconds": 300.0,
+            "temperature": 0.0,
+            "ollama_think": "false",
+            "extra_instructions": "",
+            "extra_instructions_file": None,
+            "effective_extra_instructions": "",
+        }
+
+        with mock.patch.object(
+            probe,
+            "read_joined_rows",
+            return_value=[
+                {"start_epoch_ms": "1000"},
+                {"start_epoch_ms": "2000"},
+                {"start_epoch_ms": "3000"},
+                {"start_epoch_ms": "4000"},
+            ],
+        ), mock.patch.object(
+            probe,
+            "read_boundary_scores_by_pair",
+            return_value={},
+        ), mock.patch.object(
+            probe,
+            "load_ml_hint_context",
+            side_effect=ValueError("ml hint context load failed: missing training window_radius"),
+        ), mock.patch.object(
+            probe,
+            "build_candidate_windows",
+            side_effect=AssertionError("runtime should fail before building candidates"),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "ml hint context load failed: missing training window_radius",
+            ):
+                probe.probe_vlm_photo_boundaries(
+                    day_id="20260323",
+                    workspace_dir=Path("/tmp/workspace"),
+                    embedded_manifest_csv=Path("/tmp/photo_embedded_manifest.csv"),
+                    photo_manifest_csv=Path("/tmp/media_manifest.csv"),
+                    output_csv=Path("/tmp/vlm_boundary_results.csv"),
+                    provider="ollama",
+                    image_variant="thumb",
+                    window_radius=2,
+                    boundary_gap_seconds=10,
+                    max_batches=100,
+                    model="qwen3.5:9b",
+                    ollama_base_url="http://127.0.0.1:11434",
+                    ollama_num_ctx=16384,
+                    ollama_num_predict=None,
+                    ollama_keep_alive="15m",
+                    timeout_seconds=300.0,
+                    temperature=0.0,
+                    ollama_think="false",
+                    extra_instructions="",
+                    dump_debug_dir=None,
+                    ml_model_run_id="ml-run-001",
+                    ml_model_dir=Path("/tmp/model-run"),
+                    args_payload=args_payload,
+                    new_run=True,
+                )
 
     def test_probe_vlm_photo_boundaries_appends_each_batch_immediately(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1211,8 +2020,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "boundary_gap_seconds": 0,
                 "max_batches": 2,
                 "model": "qwen3.5:9b",
@@ -1240,7 +2048,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     model="qwen3.5:9b",
                     text=(
                         '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                        '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                        '"frame_03":"same dancer","frame_04":"same dancer"},'
                         '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
                     ),
                     json_payload=None,
@@ -1250,7 +2058,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "message": {
                             "content": (
                                 '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                                '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                                '"frame_03":"same dancer","frame_04":"same dancer"},'
                                 '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
                             )
                         }
@@ -1261,14 +2069,14 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 probe, "build_run_id", return_value="vlm-20260414060000"
             ):
                 row_count = probe.probe_vlm_photo_boundaries(
+                    day_id=day_dir.name,
                     workspace_dir=workspace_dir,
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,
                     output_csv=output_csv,
                     provider="ollama",
                     image_variant="thumb",
-                    window_size=5,
-                    overlap=2,
+                    window_radius=2,
                     boundary_gap_seconds=0,
                     max_batches=2,
                     model="qwen3.5:9b",
@@ -1346,8 +2154,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "boundary_gap_seconds": 0,
                 "max_batches": 0,
                 "model": "qwen3.5:9b",
@@ -1370,7 +2177,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     model="qwen3.5:9b",
                     text=(
                         '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                        '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                        '"frame_03":"same dancer","frame_04":"same dancer"},'
                         '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
                     ),
                     json_payload=None,
@@ -1380,7 +2187,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "message": {
                             "content": (
                                 '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                                '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                                '"frame_03":"same dancer","frame_04":"same dancer"},'
                                 '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
                             )
                         }
@@ -1388,14 +2195,14 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 ),
             ), mock.patch.object(probe, "build_run_id", return_value="vlm-20260414061000"):
                 row_count = probe.probe_vlm_photo_boundaries(
+                    day_id=day_dir.name,
                     workspace_dir=workspace_dir,
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,
                     output_csv=output_csv,
                     provider="ollama",
                     image_variant="thumb",
-                    window_size=5,
-                    overlap=2,
+                    window_radius=2,
                     boundary_gap_seconds=0,
                     max_batches=0,
                     model="qwen3.5:9b",
@@ -1411,8 +2218,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     args_payload=args_payload,
                     new_run=True,
                 )
-            self.assertEqual(row_count, 7)
-            self.assertEqual(len(probe.read_result_rows(output_csv)), 7)
+            self.assertEqual(row_count, 8)
+            self.assertEqual(len(probe.read_result_rows(output_csv)), 8)
 
     def test_probe_vlm_photo_boundaries_only_evaluates_candidate_gaps(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1474,8 +2281,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "embedded_manifest_csv": str(embedded_manifest_csv),
                 "photo_manifest_csv": str(photo_manifest_csv),
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "boundary_gap_seconds": 10,
                 "max_batches": 10,
                 "model": "qwen3.5:9b",
@@ -1500,7 +2306,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     model="qwen3.5:9b",
                     text=(
                         '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                        '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                        '"frame_03":"same dancer","frame_04":"same dancer"},'
                         '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
                     ),
                     json_payload=None,
@@ -1510,7 +2316,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         "message": {
                             "content": (
                                 '{"decision":"no_cut","frame_notes":{"frame_01":"same dancer","frame_02":"same dancer",'
-                                '"frame_03":"same dancer","frame_04":"same dancer","frame_05":"same dancer"},'
+                                '"frame_03":"same dancer","frame_04":"same dancer"},'
                                 '"primary_evidence":["same performer","same costume"],"summary":"Same segment."}'
                             )
                         }
@@ -1518,14 +2324,14 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 ),
             ) as run_vlm_mock, mock.patch.object(probe, "build_run_id", return_value="vlm-20260414070000"):
                 row_count = probe.probe_vlm_photo_boundaries(
+                    day_id=day_dir.name,
                     workspace_dir=workspace_dir,
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,
                     output_csv=output_csv,
                     provider="ollama",
                     image_variant="thumb",
-                    window_size=5,
-                    overlap=2,
+                    window_radius=2,
                     boundary_gap_seconds=10,
                     max_batches=10,
                     model="qwen3.5:9b",
@@ -1546,7 +2352,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             rows = probe.read_result_rows(output_csv)
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["start_row"], "3")
-            self.assertEqual(rows[0]["end_row"], "7")
+            self.assertEqual(rows[0]["end_row"], "6")
 
     def test_probe_vlm_photo_boundaries_runs_provider_neutral_transport_request(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1608,8 +2414,7 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "photo_manifest_csv": str(photo_manifest_csv),
                 "provider": "vllm",
                 "image_variant": "thumb",
-                "window_size": 5,
-                "overlap": 2,
+                "window_radius": 2,
                 "boundary_gap_seconds": 10,
                 "max_batches": 1,
                 "model": "Qwen/Qwen2.5-VL-7B-Instruct",
@@ -1629,10 +2434,10 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 provider="vllm",
                 model="Qwen/Qwen2.5-VL-7B-Instruct",
                 text=(
-                    '{"boundary_after_frame":"frame_04","left_segment_type":"dance","right_segment_type":"ceremony",'
+                    '{"boundary_after_frame":"frame_03","left_segment_type":"dance","right_segment_type":"ceremony",'
                     '"frame_notes":{"frame_01":"same dancer","frame_02":"same dancer","frame_03":"same dancer",'
-                    '"frame_04":"same dancer","frame_05":"host on stage"},'
-                    '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 4."}'
+                    '"frame_04":"host on stage"},'
+                    '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 3."}'
                 ),
                 json_payload=None,
                 finish_reason="stop",
@@ -1642,10 +2447,10 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                         {
                             "message": {
                                 "content": (
-                                    '{"boundary_after_frame":"frame_04","left_segment_type":"dance","right_segment_type":"ceremony",'
+                                    '{"boundary_after_frame":"frame_03","left_segment_type":"dance","right_segment_type":"ceremony",'
                                     '"frame_notes":{"frame_01":"same dancer","frame_02":"same dancer","frame_03":"same dancer",'
-                                    '"frame_04":"same dancer","frame_05":"host on stage"},'
-                                    '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 4."}'
+                                    '"frame_04":"host on stage"},'
+                                    '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 3."}'
                                 )
                             },
                             "finish_reason": "stop",
@@ -1654,18 +2459,26 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 },
             )
 
-            with mock.patch.object(probe, "run_vlm_request", return_value=response) as run_vlm_mock, mock.patch.object(
+            with mock.patch.object(
+                probe,
+                "build_ml_hint_lines_for_candidate",
+                return_value=[
+                    "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
+                    "ML hint for the left side of the candidate gap: likely dance (confidence 0.76).",
+                    "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.74).",
+                ],
+            ), mock.patch.object(probe, "run_vlm_request", return_value=response) as run_vlm_mock, mock.patch.object(
                 probe, "build_run_id", return_value="vlm-20260414071000"
             ):
                 row_count = probe.probe_vlm_photo_boundaries(
+                    day_id=day_dir.name,
                     workspace_dir=workspace_dir,
                     embedded_manifest_csv=embedded_manifest_csv,
                     photo_manifest_csv=photo_manifest_csv,
                     output_csv=output_csv,
                     provider="vllm",
                     image_variant="thumb",
-                    window_size=5,
-                    overlap=2,
+                    window_radius=2,
                     boundary_gap_seconds=10,
                     max_batches=1,
                     model="Qwen/Qwen2.5-VL-7B-Instruct",
@@ -1698,13 +2511,16 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     "type": "json_schema",
                     "json_schema": {
                         "name": "photo_boundary_probe",
-                        "schema": probe.build_response_schema(window_size=5),
+                        "schema": probe.build_response_schema(window_size=4),
                     },
                 },
             )
+            self.assertIn("ML hint for the main candidate gap in this window", request.messages[1]["content"])
+            self.assertNotIn("Heuristic hints for consecutive gaps", request.messages[1]["content"])
+            self.assertNotIn("Optional pre-model per-image annotations", request.messages[1]["content"])
             rows = probe.read_result_rows(output_csv)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["decision"], "cut_after_4")
+            self.assertEqual(rows[0]["decision"], "cut_after_3")
 
     def test_dump_debug_artifacts_writes_prompt_request_and_response(self):
         with tempfile.TemporaryDirectory() as tmp:

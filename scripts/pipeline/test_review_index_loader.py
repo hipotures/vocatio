@@ -507,6 +507,87 @@ class ReviewIndexLoaderTests(unittest.TestCase):
             self.assertEqual(normalized["workspace_dir"], str(external_workspace_dir.resolve()))
             self.assertEqual(normalized["performances"][0]["photos"][0]["source_path"], "/tmp/source.jpg")
 
+    def test_load_review_index_normalizes_legacy_absolute_source_path_to_relative_photo_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            day_dir = tmp_path / "20260323"
+            workspace_dir = day_dir / "_workspace"
+            day_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+            source_path = day_dir / "cam_a" / "IMG_0001.ARW"
+            source_path.parent.mkdir(parents=True)
+            source_path.write_bytes(b"raw")
+
+            payload = {
+                "day": day_dir.name,
+                "workspace_dir": str(workspace_dir),
+                "performance_count": 1,
+                "photo_count": 1,
+                "performances": [
+                    {
+                        "performance_number": "101",
+                        "photos": [
+                            {
+                                "source_path": str(source_path.resolve()),
+                                "proxy_path": "/tmp/proxy.jpg",
+                                "photo_start_local": "2026-03-23 10:00:00",
+                                "adjusted_start_local": "2026-03-23 10:00:00",
+                                "assignment_status": "assigned",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            normalized = review_index_loader.load_review_index(self.write_payload(workspace_dir, payload))
+
+            photo = normalized["performances"][0]["photos"][0]
+            self.assertEqual(photo["photo_id"], "cam_a/IMG_0001.ARW")
+            self.assertEqual(photo["relative_path"], "cam_a/IMG_0001.ARW")
+            self.assertEqual(photo["source_path"], str(source_path.resolve()))
+
+    def test_load_review_index_normalizes_legacy_absolute_source_path_to_relative_photo_id_with_external_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            day_dir = tmp_path / "20260323"
+            external_workspace_dir = tmp_path / "20260323DWC"
+            day_dir.mkdir(parents=True)
+            external_workspace_dir.mkdir(parents=True)
+            source_path = day_dir / "cam_a" / "IMG_0001.ARW"
+            source_path.parent.mkdir(parents=True)
+            source_path.write_bytes(b"raw")
+
+            payload = {
+                "day": day_dir.name,
+                "workspace_dir": str(external_workspace_dir.resolve()),
+                "performance_count": 1,
+                "photo_count": 1,
+                "performances": [
+                    {
+                        "performance_number": "101",
+                        "photos": [
+                            {
+                                "source_path": str(source_path.resolve()),
+                                "proxy_path": "/tmp/proxy.jpg",
+                                "photo_start_local": "2026-03-23 10:00:00",
+                                "adjusted_start_local": "2026-03-23 10:00:00",
+                                "assignment_status": "assigned",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            normalized = review_index_loader.load_review_index(
+                self.write_payload(external_workspace_dir, payload),
+                day_dir=day_dir,
+            )
+
+            photo = normalized["performances"][0]["photos"][0]
+            self.assertEqual(photo["photo_id"], "cam_a/IMG_0001.ARW")
+            self.assertEqual(photo["relative_path"], "cam_a/IMG_0001.ARW")
+            self.assertEqual(photo["source_path"], str(source_path.resolve()))
+
     def test_load_review_index_rejects_relative_workspace_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

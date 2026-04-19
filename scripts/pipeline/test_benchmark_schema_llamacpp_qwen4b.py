@@ -47,7 +47,7 @@ class BenchmarkSchemaLlamacppQwen4BTests(unittest.TestCase):
         parsed = benchmark.parse_schema_content(
             json.dumps(
                 {
-                    "people_count": "3",
+                    "people_count": "duet_trio",
                     "performer_view": "group",
                     "upper_garment": "mixed",
                     "lower_garment": "tutu",
@@ -61,12 +61,12 @@ class BenchmarkSchemaLlamacppQwen4BTests(unittest.TestCase):
                 }
             )
         )
-        self.assertEqual(parsed["people_count"], "3")
+        self.assertEqual(parsed["people_count"], "duet_trio")
         self.assertEqual(parsed["dominant_colors"], ["purple", "black"])
 
     def test_validate_schema_result_rejects_missing_field(self):
         with self.assertRaises(ValueError):
-            benchmark.validate_schema_result({"people_count": "1"})
+            benchmark.validate_schema_result({"people_count": "solo"})
 
 
 if __name__ == "__main__":

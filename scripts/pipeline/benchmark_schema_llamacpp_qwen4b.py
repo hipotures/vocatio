@@ -31,6 +31,18 @@ from lib.caption_scene_common import (
     positive_int_arg,
     resolve_path,
 )
+from lib.photo_pre_model_annotations import (
+    COLOR_VALUES,
+    DANCE_STYLE_VALUES,
+    FOOTWEAR_VALUES,
+    HEADWEAR_VALUES,
+    LEG_COVERAGE_VALUES,
+    LOWER_GARMENT_VALUES,
+    PEOPLE_COUNT_VALUES,
+    PERFORMER_VIEW_VALUES,
+    SLEEVES_VALUES,
+    UPPER_GARMENT_VALUES,
+)
 
 
 from lib.workspace_dir import resolve_workspace_dir
@@ -48,36 +60,6 @@ DEFAULT_PROMPT = (
     "Describe only visible people and costume-related attributes. "
     "Do not infer background, venue, organization, or event names."
 )
-
-PEOPLE_COUNT_VALUES = ["1", "2", "3", "4plus", "unclear"]
-PERFORMER_VIEW_VALUES = ["solo", "duo", "group", "unclear"]
-UPPER_GARMENT_VALUES = ["leotard", "top", "shirt", "jacket", "dress_upper", "unitard_upper", "mixed", "unclear"]
-LOWER_GARMENT_VALUES = ["tutu", "skirt", "dress", "pants", "shorts", "unitard", "mixed", "unclear"]
-SLEEVES_VALUES = ["none", "short", "long", "mixed", "unclear"]
-LEG_COVERAGE_VALUES = ["bare", "short", "long", "mixed", "unclear"]
-HEADWEAR_VALUES = ["none", "hat", "headband", "hair_accessory", "mixed", "unclear"]
-FOOTWEAR_VALUES = ["barefoot", "ballet_shoes", "dance_shoes", "sneakers", "mixed", "unclear"]
-DANCE_STYLE_VALUES = ["ballet", "contemporary", "jazz", "ballroom", "latin", "hiphop", "folk", "tap", "other", "unclear"]
-COLOR_VALUES = [
-    "black",
-    "white",
-    "gray",
-    "silver",
-    "gold",
-    "red",
-    "pink",
-    "purple",
-    "lavender",
-    "blue",
-    "turquoise",
-    "green",
-    "yellow",
-    "orange",
-    "brown",
-    "beige",
-    "multicolor",
-    "unclear",
-]
 
 
 def build_progress_columns() -> tuple[object, ...]:

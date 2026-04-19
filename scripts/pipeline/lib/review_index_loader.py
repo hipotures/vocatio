@@ -123,6 +123,13 @@ def resolve_day_and_workspace_dir(
 
     if index_path.parent.name == "_workspace" and index_path.parent.parent.name == day:
         return index_path.parent.parent.resolve(), declared_workspace_dir.resolve()
+    if day_dir is not None:
+        if day_dir.name != day:
+            raise ValueError(
+                "review index payload day/day_dir mismatch: "
+                f"day={day} day_dir={day_dir}"
+            )
+        return day_dir.resolve(), declared_workspace_dir.resolve()
     if declared_workspace_dir.parent.name == day:
         return declared_workspace_dir.parent.resolve(), declared_workspace_dir.resolve()
     return index_path.parent.resolve(), declared_workspace_dir.resolve()
@@ -287,9 +294,24 @@ def normalize_photo(
     proxy_path = str(photo.get("proxy_path", "") or "").strip()
     filename = str(photo.get("filename", "") or Path(source_path).name).strip()
     adjusted_start_local = str(photo.get("adjusted_start_local", "") or photo.get("photo_start_local", "") or "").strip()
+    relative_path = ""
+    if source_path:
+        source_candidate = Path(source_path).expanduser()
+        if source_candidate.is_absolute():
+            try:
+                relative_path = source_candidate.resolve().relative_to(day_dir.resolve()).as_posix()
+            except ValueError:
+                relative_path = ""
+        else:
+            try:
+                relative_path = normalize_relative_path(source_path, "source_path", day_dir).as_posix()
+            except ValueError:
+                relative_path = ""
     normalized_photo = dict(photo)
-    normalized_photo["photo_id"] = str(photo.get("photo_id", "") or source_path or filename).strip()
+    normalized_photo["photo_id"] = str(relative_path or photo.get("photo_id", "") or source_path or filename).strip()
     normalized_photo["filename"] = filename
+    if relative_path:
+        normalized_photo["relative_path"] = relative_path
     normalized_photo["source_path"] = source_path
     normalized_photo["proxy_path"] = proxy_path
     normalized_photo["proxy_exists"] = (

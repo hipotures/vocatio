@@ -8,6 +8,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 
 import probe_vlm_photo_boundaries as probe
 from lib.pipeline_io import atomic_write_json
@@ -18,6 +27,22 @@ console = Console()
 
 DEFAULT_OUTPUT_FILENAME = probe.DEFAULT_OUTPUT_FILENAME
 DEFAULT_GUI_INDEX_FILENAME = "performance_proxy_index.json"
+
+TYPE_CODE_BY_SEGMENT_TYPE = {
+    "performance": "P",
+    "ceremony": "C",
+    "warmup": "W",
+    "dance": "D",
+    "audience": "A",
+    "rehearsal": "R",
+    "other": "O",
+}
+
+ML_HINT_CONTRACT_ERROR_PREFIXES = (
+    "feature_columns.json is inconsistent with training ",
+    "ml model window_radius mismatch: ",
+    "run row window_radius mismatch: ",
+)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -50,6 +75,196 @@ def load_run_metadata(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def extract_segment_types(raw_response: str) -> tuple[str, str]:
+    if not raw_response.strip():
+        return "", ""
+    try:
+        payload = json.loads(probe.extract_json_object_text(raw_response))
+    except Exception:
+        return "", ""
+    left_segment_type = str(payload.get("left_segment_type", "") or "").strip()
+    right_segment_type = str(payload.get("right_segment_type", "") or "").strip()
+    if left_segment_type not in probe.SEGMENT_TYPES:
+        left_segment_type = ""
+    if right_segment_type not in probe.SEGMENT_TYPES:
+        right_segment_type = ""
+    return left_segment_type, right_segment_type
+
+
+def choose_segment_type(candidates: Sequence[str]) -> str:
+    normalized_candidates = [value for value in candidates if value]
+    if not normalized_candidates:
+        return ""
+    counts: Dict[str, int] = {}
+    for value in normalized_candidates:
+        counts[value] = counts.get(value, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return ""
+    return ranked[0][0]
+
+
+def segment_type_to_code(segment_type: str) -> str:
+    return TYPE_CODE_BY_SEGMENT_TYPE.get(segment_type.strip().lower(), "?")
+
+
+def resolve_ml_model_run_id(run_metadata: Mapping[str, Any]) -> str:
+    args = run_metadata.get("args")
+    if not isinstance(args, Mapping):
+        return ""
+    for key in ("effective_ml_model_run_id", "ml_model_run_id"):
+        value = str(args.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def resolve_runtime_window_radius(run_metadata: Mapping[str, Any]) -> int:
+    args = run_metadata.get("args")
+    if not isinstance(args, Mapping):
+        raise ValueError("run metadata args are unavailable")
+    raw_window_radius = str(args.get("window_radius", "") or "").strip()
+    if not raw_window_radius:
+        raise ValueError("run metadata window_radius is unavailable")
+    return probe.positive_window_radius_arg(raw_window_radius)
+
+
+def build_ml_hint_pairs_for_run(
+    *,
+    day_dir: Path,
+    workspace_dir: Path,
+    run_metadata: Mapping[str, Any],
+    run_rows: Sequence[Mapping[str, str]],
+    joined_rows: Sequence[Mapping[str, str]],
+    ml_model_run_id: str,
+) -> tuple[str, list[Dict[str, Any]], str]:
+    normalized_run_id = ml_model_run_id.strip()
+    if not normalized_run_id:
+        return "", [], ""
+    runtime_window_radius = resolve_runtime_window_radius(run_metadata)
+    try:
+        effective_ml_model_run_id, resolved_ml_model_dir = probe.resolve_ml_model_run(workspace_dir, normalized_run_id)
+        ml_hint_context = probe.load_ml_hint_context(
+            ml_model_run_id=effective_ml_model_run_id,
+            ml_model_dir=resolved_ml_model_dir,
+        )
+        if ml_hint_context is None:
+            return effective_ml_model_run_id, [], "ML model directory is unavailable"
+        if ml_hint_context.window_radius != runtime_window_radius:
+            raise ValueError(
+                "ml model window_radius mismatch: "
+                f"runtime={runtime_window_radius}, artifact={ml_hint_context.window_radius}"
+            )
+        args = run_metadata.get("args")
+        photo_pre_model_dir_value = (
+            str(args.get("photo_pre_model_dir", "") or probe.DEFAULT_PHOTO_PRE_MODEL_DIR)
+            if isinstance(args, Mapping)
+            else probe.DEFAULT_PHOTO_PRE_MODEL_DIR
+        )
+        photo_pre_model_dir = probe.resolve_path(workspace_dir, photo_pre_model_dir_value)
+        boundary_rows_by_pair = probe.read_boundary_scores_by_pair(
+            workspace_dir / probe.PHOTO_BOUNDARY_SCORES_FILENAME
+        )
+        joined_rows_by_relative_path = {
+            str(row.get("relative_path", "") or "").strip(): row
+            for row in joined_rows
+        }
+        candidate_windows: list[list[Mapping[str, str]]] = []
+        seen_pairs: set[tuple[str, str]] = set()
+        expected_window_size = probe.window_radius_to_window_size(runtime_window_radius)
+        for result_row in run_rows:
+            relative_paths_json = str(result_row.get("relative_paths_json", "") or "").strip()
+            if not relative_paths_json:
+                continue
+            try:
+                relative_paths = json.loads(relative_paths_json)
+            except Exception as error:
+                raise ValueError(f"run row relative_paths_json is invalid JSON: {error}") from error
+            if not isinstance(relative_paths, list):
+                raise ValueError("run row relative_paths_json must decode to a list")
+            normalized_relative_paths = [str(value or "").strip() for value in relative_paths]
+            if any(not value for value in normalized_relative_paths):
+                raise ValueError("run row relative_paths_json must not contain blank relative paths")
+            if len(normalized_relative_paths) != expected_window_size:
+                raise ValueError(
+                    "run row window_radius mismatch: "
+                    f"runtime={runtime_window_radius}, row_frame_count={len(normalized_relative_paths)}"
+                )
+            row_window_radius_text = str(result_row.get("window_radius", "") or "").strip()
+            if row_window_radius_text:
+                row_window_radius = probe.positive_window_radius_arg(row_window_radius_text)
+                if row_window_radius != runtime_window_radius:
+                    raise ValueError(
+                        "run row window_radius mismatch: "
+                        f"runtime={runtime_window_radius}, row={row_window_radius}"
+                    )
+            main_left_index = runtime_window_radius - 1
+            main_right_index = main_left_index + 1
+            if main_right_index >= len(normalized_relative_paths):
+                continue
+            pair = (
+                normalized_relative_paths[main_left_index],
+                normalized_relative_paths[main_right_index],
+            )
+            if pair in seen_pairs:
+                continue
+            try:
+                candidate_rows = [joined_rows_by_relative_path[relative_path] for relative_path in normalized_relative_paths]
+            except KeyError:
+                continue
+            seen_pairs.add(pair)
+            candidate_windows.append(candidate_rows)
+        ml_hint_pairs: list[Dict[str, Any]] = []
+        total_pair_count = len(candidate_windows)
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(bar_width=40),
+            MofNCompleteColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            expand=False,
+            console=console,
+        ) as progress:
+            task_id = progress.add_task("Build ML GUI hints".ljust(25), total=total_pair_count)
+            for candidate_rows in candidate_windows:
+                left_relative_path = str(
+                    candidate_rows[runtime_window_radius - 1].get("relative_path", "") or ""
+                ).strip()
+                right_relative_path = str(
+                    candidate_rows[runtime_window_radius].get("relative_path", "") or ""
+                ).strip()
+                prediction = probe.predict_ml_hint_for_candidate(
+                    ml_hint_context=ml_hint_context,
+                    candidate_row=probe._build_ml_candidate_row(
+                        candidate_rows,
+                        day_id=day_dir.name,
+                        window_radius=runtime_window_radius,
+                    ),
+                    boundary_rows_by_pair=boundary_rows_by_pair,
+                    photo_pre_model_dir=photo_pre_model_dir,
+                )
+                ml_hint_pairs.append(
+                    {
+                        "left_relative_path": left_relative_path,
+                        "right_relative_path": right_relative_path,
+                        "boundary_prediction": bool(prediction.boundary_prediction),
+                        "boundary_confidence": f"{prediction.boundary_confidence:.2f}",
+                        "left_segment_type_prediction": str(prediction.left_segment_type_prediction),
+                        "left_segment_type_confidence": f"{prediction.left_segment_type_confidence:.2f}",
+                        "right_segment_type_prediction": str(prediction.right_segment_type_prediction),
+                        "right_segment_type_confidence": f"{prediction.right_segment_type_confidence:.2f}",
+                    }
+                )
+                progress.advance(task_id)
+        return effective_ml_model_run_id, ml_hint_pairs, ""
+    except Exception as error:
+        error_text = str(error)
+        if error_text.startswith(ML_HINT_CONTRACT_ERROR_PREFIXES):
+            raise
+        return normalized_run_id, [], str(error)
+
+
 def select_run_metadata(*, workspace_dir: Path, run_id: Optional[str]) -> Dict[str, Any]:
     runs_dir = workspace_dir / probe.RUN_METADATA_DIRNAME
     if not runs_dir.exists():
@@ -73,6 +288,7 @@ def build_gui_index_for_run(
     output_csv: Path,
 ) -> tuple[Dict[str, Any], int]:
     image_variant = str(run_metadata["args"]["image_variant"])
+    runtime_window_radius = resolve_runtime_window_radius(run_metadata)
     embedded_manifest_csv = Path(str(run_metadata["embedded_manifest_csv"]))
     photo_manifest_csv = Path(str(run_metadata["photo_manifest_csv"]))
     all_result_rows = probe.read_result_rows(output_csv)
@@ -96,6 +312,27 @@ def build_gui_index_for_run(
         run_id=run_id,
         ordered_rows=ordered_rows,
         result_rows=run_rows,
+    )
+    requested_ml_model_run_id = resolve_ml_model_run_id(run_metadata)
+    resolved_ml_model_run_id, ml_hint_pairs, ml_hints_error = build_ml_hint_pairs_for_run(
+        day_dir=day_dir,
+        workspace_dir=workspace_dir,
+        run_metadata=run_metadata,
+        run_rows=run_rows,
+        joined_rows=ordered_rows,
+        ml_model_run_id=requested_ml_model_run_id,
+    )
+    payload["ml_model_run_id"] = resolved_ml_model_run_id
+    payload["window_radius"] = runtime_window_radius
+    payload["ml_hint_pairs"] = ml_hint_pairs
+    payload["ml_hints_error"] = ml_hints_error
+    payload["embedded_manifest_csv"] = str(embedded_manifest_csv)
+    payload["photo_manifest_csv"] = str(photo_manifest_csv)
+    args = run_metadata.get("args")
+    payload["photo_pre_model_dir"] = (
+        str(args.get("photo_pre_model_dir", "") or "").strip()
+        if isinstance(args, Mapping)
+        else ""
     )
     return payload, len(run_rows)
 

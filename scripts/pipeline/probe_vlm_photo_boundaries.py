@@ -6,9 +6,10 @@ import argparse
 import csv
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence
 
 from rich.console import Console
 from rich.progress import (
@@ -23,6 +24,13 @@ from rich.progress import (
 )
 
 from lib.image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1
+from lib.ml_boundary_dataset import normalize_timestamp
+from lib.ml_boundary_features import build_candidate_feature_row
+from lib.ml_boundary_training_data import (
+    HEURISTIC_VALUE_COLUMNS,
+    heuristic_pair_join_columns_for_window_radius,
+    image_feature_columns_for_mode as training_image_feature_columns_for_mode,
+)
 from lib.media_manifest import read_media_manifest, select_photo_rows
 from lib.pipeline_io import atomic_write_json
 from lib.photo_pre_model_annotations import (
@@ -30,7 +38,23 @@ from lib.photo_pre_model_annotations import (
     load_photo_pre_model_annotations_by_relative_path,
 )
 from lib.vlm_transport import VlmRequest, build_provider_request_payload, get_vlm_capabilities, run_vlm_request
+from lib.window_radius_contract import (
+    DEFAULT_WINDOW_RADIUS,
+    build_centered_window_bounds,
+    build_window_start_indexes,
+    positive_window_radius_arg,
+    window_radius_to_window_size,
+)
 from lib.workspace_dir import load_vocatio_config, resolve_workspace_dir
+from train_ml_boundary_verifier import (
+    BOUNDARY_MODEL_DIRNAME,
+    FEATURE_COLUMNS_FILENAME,
+    LEFT_SEGMENT_TYPE_MODEL_DIRNAME,
+    RIGHT_SEGMENT_TYPE_MODEL_DIRNAME,
+    TRAINING_METADATA_FILENAME,
+    load_multimodal_predictor_class,
+    load_tabular_predictor_class,
+)
 
 console = Console()
 
@@ -40,8 +64,6 @@ PHOTO_BOUNDARY_SCORES_FILENAME = "photo_boundary_scores.csv"
 DEFAULT_OUTPUT_FILENAME = "vlm_boundary_results.csv"
 RUN_METADATA_DIRNAME = "vlm_runs"
 DEFAULT_IMAGE_VARIANT = "preview"
-DEFAULT_WINDOW_SIZE = 10
-DEFAULT_OVERLAP = 2
 DEFAULT_BOUNDARY_GAP_SECONDS = 10
 DEFAULT_MAX_BATCHES = 10
 DEFAULT_MODEL_NAME = "qwen3.5:9b"
@@ -54,7 +76,23 @@ DEFAULT_RESPONSE_SCHEMA_MODE = "off"
 DEFAULT_JSON_VALIDATION_MODE = "strict"
 DEFAULT_PHOTO_PRE_MODEL_DIR = DEFAULT_PHOTO_PRE_MODEL_DIRNAME
 DEFAULT_PROVIDER = "ollama"
+DEFAULT_ML_MODEL_RUN_ID = ""
 SEGMENT_TYPES = ("dance", "ceremony", "audience", "rehearsal", "other")
+ML_SEGMENT_TYPE_TO_PROMPT_LABEL = {
+    "performance": "dance",
+    "ceremony": "ceremony",
+    "warmup": "rehearsal",
+}
+GUI_TYPE_CODE_BY_SEGMENT_TYPE = {
+    "performance": "P",
+    "ceremony": "C",
+    "warmup": "W",
+    "dance": "D",
+    "audience": "A",
+    "rehearsal": "R",
+    "other": "O",
+}
+ML_MODEL_ROOT_DIR_PARTS = ("ml_boundary_corpus", "ml_boundary_models")
 EMBEDDED_MANIFEST_REQUIRED_COLUMNS = frozenset({"relative_path", "thumb_path", "preview_path"})
 PHOTO_BOUNDARY_SCORES_REQUIRED_COLUMNS = frozenset(
     {
@@ -75,8 +113,7 @@ OUTPUT_HEADERS = [
     "batch_index",
     "start_row",
     "end_row",
-    "window_size",
-    "overlap",
+    "window_radius",
     "relative_paths_json",
     "filenames_json",
     "image_paths_json",
@@ -91,15 +128,12 @@ OUTPUT_HEADERS = [
     "response_status",
     "raw_response",
 ]
-MID_OUTPUT_HEADERS = [header for header in OUTPUT_HEADERS if header != "config_hash"]
-LEGACY_OUTPUT_HEADERS = [header for header in OUTPUT_HEADERS if header not in {"run_id", "config_hash"}]
 RESUME_CONFIG_KEYS = (
     "embedded_manifest_csv",
     "photo_manifest_csv",
     "provider",
     "image_variant",
-    "window_size",
-    "overlap",
+    "window_radius",
     "boundary_gap_seconds",
     "model",
     "ollama_base_url",
@@ -112,8 +146,87 @@ RESUME_CONFIG_KEYS = (
     "response_schema_mode",
     "json_validation_mode",
     "photo_pre_model_dir",
+    "effective_ml_model_run_id",
     "effective_extra_instructions",
 )
+
+
+class MlHintContext(NamedTuple):
+    run_id: str
+    mode: str
+    model_dir: Path
+    window_radius: int
+    boundary_predictor: object
+    left_segment_type_predictor: object
+    right_segment_type_predictor: object
+    boundary_feature_columns: list[str]
+    left_segment_type_feature_columns: list[str]
+    right_segment_type_feature_columns: list[str]
+    descriptor_field_registry: dict[str, str]
+
+
+class MlHintPrediction(NamedTuple):
+    boundary_prediction: bool
+    boundary_confidence: float
+    left_segment_type_prediction: str
+    left_segment_type_confidence: float
+    right_segment_type_prediction: str
+    right_segment_type_confidence: float
+
+
+def _validate_ml_hint_feature_columns_contract(
+    *,
+    mode: str,
+    window_radius: int,
+    image_feature_columns: Sequence[str],
+    boundary_feature_columns: Sequence[str],
+    left_segment_type_feature_columns: Sequence[str],
+    right_segment_type_feature_columns: Sequence[str],
+) -> None:
+    expected_image_feature_columns = training_image_feature_columns_for_mode(
+        mode,
+        window_radius=window_radius,
+    )
+    if list(image_feature_columns) != expected_image_feature_columns:
+        raise ValueError(
+            "feature_columns.json is inconsistent with training "
+            f"window_radius={window_radius}: image_feature_columns mismatch"
+        )
+    descriptor_field_registry = _build_descriptor_field_registry_from_feature_columns(
+        sorted(
+            set(
+                boundary_feature_columns
+                + left_segment_type_feature_columns
+                + right_segment_type_feature_columns
+            )
+        )
+    )
+    synthetic_candidate_row: dict[str, object] = {"window_radius": window_radius}
+    for frame_index in range(1, window_radius_to_window_size(window_radius) + 1):
+        synthetic_candidate_row[f"frame_{frame_index:02d}_timestamp"] = float(frame_index)
+        synthetic_candidate_row[f"frame_{frame_index:02d}_photo_id"] = f"photo-{frame_index:02d}"
+    expected_predictor_feature_columns = list(
+        build_candidate_feature_row(
+            synthetic_candidate_row,
+            descriptors={},
+            embeddings=None,
+            descriptor_field_registry=descriptor_field_registry,
+            heuristic_features=None,
+            window_radius=window_radius,
+        ).keys()
+    ) + expected_image_feature_columns
+
+    def validate_predictor_columns(predictor_name: str, columns: Sequence[str]) -> None:
+        normalized_columns = [str(column_name) for column_name in columns]
+        if normalized_columns != expected_predictor_feature_columns:
+            raise ValueError(
+                "feature_columns.json is inconsistent with training "
+                f"window_radius={window_radius}: {predictor_name} mismatch"
+            )
+
+    validate_predictor_columns("boundary_feature_columns", boundary_feature_columns)
+    validate_predictor_columns("left_segment_type_feature_columns", left_segment_type_feature_columns)
+    validate_predictor_columns("right_segment_type_feature_columns", right_segment_type_feature_columns)
 
 SYSTEM_PROMPT = (
     "You analyze consecutive stage performance photos. "
@@ -198,16 +311,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help=f"Embedded image variant to send to the VLM. Default: {DEFAULT_IMAGE_VARIANT}",
     )
     parser.add_argument(
-        "--window-size",
-        type=positive_int_arg,
-        default=DEFAULT_WINDOW_SIZE,
-        help=f"Number of consecutive images per VLM batch. Default: {DEFAULT_WINDOW_SIZE}",
-    )
-    parser.add_argument(
-        "--overlap",
-        type=non_negative_int_arg,
-        default=DEFAULT_OVERLAP,
-        help=f"Number of images shared between adjacent windows. Default: {DEFAULT_OVERLAP}",
+        "--window-radius",
+        type=positive_window_radius_arg,
+        default=DEFAULT_WINDOW_RADIUS,
+        help=(
+            "Number of photos to include on each side of the main candidate cut. "
+            f"Internal window size is 2 * radius. Default: {DEFAULT_WINDOW_RADIUS}"
+        ),
     )
     parser.add_argument(
         "--boundary-gap-seconds",
@@ -297,6 +407,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--ml-model-run-id",
+        default=DEFAULT_ML_MODEL_RUN_ID,
+        help=(
+            "Optional ML boundary model run id used for prompt hints. "
+            "Default: auto-select the latest available run in ml_boundary_corpus/ml_boundary_models."
+        ),
+    )
+    parser.add_argument(
         "--extra-instructions",
         default="",
         help="Optional extra instructions appended to the default VLM prompt.",
@@ -328,6 +446,40 @@ def resolve_path(base_dir: Path, value: str) -> Path:
     if candidate.is_absolute():
         return candidate
     return base_dir / candidate
+
+
+def resolve_ml_model_run(
+    workspace_dir: Path,
+    requested_run_id: str,
+) -> tuple[str, Optional[Path]]:
+    model_root_dir = workspace_dir.joinpath(*ML_MODEL_ROOT_DIR_PARTS)
+    normalized_run_id = requested_run_id.strip()
+    if normalized_run_id:
+        candidate_dir = model_root_dir / normalized_run_id
+        if candidate_dir.is_dir():
+            return normalized_run_id, candidate_dir.resolve()
+        return normalized_run_id, None
+    if not model_root_dir.is_dir():
+        return "", None
+    candidate_dirs = sorted(
+        [
+            path
+            for path in model_root_dir.iterdir()
+            if path.is_dir() and not path.name.startswith(".")
+        ],
+        key=lambda path: (path.stat().st_mtime, path.name),
+    )
+    if not candidate_dirs:
+        return "", None
+    selected_dir = candidate_dirs[-1]
+    return selected_dir.name, selected_dir.resolve()
+
+
+def build_default_output_filename(ml_model_run_id: str) -> str:
+    normalized_run_id = re.sub(r"[^A-Za-z0-9._-]+", "-", ml_model_run_id.strip()).strip("-")
+    if normalized_run_id:
+        return f"vlm_boundary_results.ml-{normalized_run_id}.csv"
+    return "vlm_boundary_results.ml-hints.csv"
 
 
 def read_embedded_manifest(path: Path) -> List[Dict[str, str]]:
@@ -373,8 +525,7 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
     apply_string("embedded_manifest_csv", PHOTO_EMBEDDED_MANIFEST_FILENAME, "VLM_EMBEDDED_MANIFEST_CSV")
     apply_string("photo_manifest_csv", PHOTO_MANIFEST_FILENAME, "VLM_PHOTO_MANIFEST_CSV")
     apply_string("image_variant", DEFAULT_IMAGE_VARIANT, "VLM_IMAGE_VARIANT")
-    apply_int("window_size", DEFAULT_WINDOW_SIZE, "VLM_WINDOW_SIZE", positive_int_arg)
-    apply_int("overlap", DEFAULT_OVERLAP, "VLM_OVERLAP", non_negative_int_arg)
+    apply_int("window_radius", DEFAULT_WINDOW_RADIUS, "VLM_WINDOW_RADIUS", positive_window_radius_arg)
     apply_int(
         "boundary_gap_seconds",
         DEFAULT_BOUNDARY_GAP_SECONDS,
@@ -393,6 +544,7 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
     apply_string("response_schema_mode", DEFAULT_RESPONSE_SCHEMA_MODE, "VLM_RESPONSE_SCHEMA_MODE")
     apply_string("json_validation_mode", DEFAULT_JSON_VALIDATION_MODE, "VLM_JSON_VALIDATION_MODE")
     apply_string("photo_pre_model_dir", DEFAULT_PHOTO_PRE_MODEL_DIR, "VLM_PHOTO_PRE_MODEL_DIR")
+    apply_string("ml_model_run_id", DEFAULT_ML_MODEL_RUN_ID, "VLM_ML_MODEL_RUN_ID")
     if args.dump_debug_dir is None:
         configured_dump_debug_dir = str(config.get("VLM_DUMP_DEBUG_DIR", "") or "").strip()
         if configured_dump_debug_dir:
@@ -450,32 +602,15 @@ def read_joined_rows(
         raise ValueError(f"{embedded_manifest_csv.name} contains no rows")
     return joined_rows
 
-
-def build_window_start_indexes(total_rows: int, window_size: int, overlap: int) -> List[int]:
-    if total_rows < window_size:
-        raise ValueError(f"Need at least {window_size} rows, got {total_rows}")
-    if overlap >= window_size:
-        raise ValueError("overlap must be smaller than window_size")
-    stride = window_size - overlap
-    starts = list(range(0, total_rows - window_size + 1, stride))
-    final_start = total_rows - window_size
-    if not starts or starts[-1] != final_start:
-        starts.append(final_start)
-    return starts
-
-
 def build_candidate_windows(
     rows: Sequence[Mapping[str, str]],
-    window_size: int,
-    overlap: int,
+    window_radius: int,
     boundary_gap_seconds: int,
 ) -> List[Dict[str, int]]:
+    window_size = window_radius_to_window_size(window_radius)
     total_rows = len(rows)
     if total_rows < window_size:
         raise ValueError(f"Need at least {window_size} rows, got {total_rows}")
-    if overlap >= window_size:
-        raise ValueError("overlap must be smaller than window_size")
-    final_start = total_rows - window_size
     candidates_by_start: Dict[int, Dict[str, int]] = {}
     for cut_index in range(total_rows - 1):
         left_epoch_ms = int(str(rows[cut_index]["start_epoch_ms"]))
@@ -483,11 +618,7 @@ def build_candidate_windows(
         time_gap_seconds = rounded_seconds(right_epoch_ms - left_epoch_ms)
         if time_gap_seconds <= boundary_gap_seconds:
             continue
-        start_index = cut_index - overlap + 1
-        if start_index < 0:
-            start_index = 0
-        if start_index > final_start:
-            start_index = final_start
+        start_index, _ = build_centered_window_bounds(total_rows, cut_index, window_radius)
         existing = candidates_by_start.get(start_index)
         candidate = {
             "start_index": start_index,
@@ -501,16 +632,14 @@ def build_candidate_windows(
 
 def build_candidate_window_start_indexes(
     rows: Sequence[Mapping[str, str]],
-    window_size: int,
-    overlap: int,
+    window_radius: int,
     boundary_gap_seconds: int,
 ) -> List[int]:
     return [
         int(candidate["start_index"])
         for candidate in build_candidate_windows(
             rows,
-            window_size=window_size,
-            overlap=overlap,
+            window_radius=window_radius,
             boundary_gap_seconds=boundary_gap_seconds,
         )
     ]
@@ -535,34 +664,6 @@ def build_temporal_lines(rows: Sequence[Mapping[str, str]]) -> List[str]:
     return lines
 
 
-def classify_time_gap_level(seconds: int) -> str:
-    if seconds < 10:
-        return "low"
-    if seconds < 60:
-        return "medium"
-    return "high"
-
-
-def classify_visual_distance_level(value: float) -> str:
-    if value < 0.10:
-        return "low"
-    if value < 0.35:
-        return "medium"
-    return "high"
-
-
-def classify_boundary_score_level(value: float) -> str:
-    if value < 0.33:
-        return "low"
-    if value < 0.66:
-        return "medium"
-    return "high"
-
-
-def format_prompt_float(value: float) -> str:
-    return f"{value:.3f}"
-
-
 def read_boundary_scores_by_pair(path: Path) -> Dict[tuple[str, str], Dict[str, str]]:
     if not path.exists():
         return {}
@@ -579,34 +680,445 @@ def read_boundary_scores_by_pair(path: Path) -> Dict[tuple[str, str], Dict[str, 
     }
 
 
-def build_gap_hint_lines(
-    rows: Sequence[Mapping[str, str]],
-    boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
-) -> List[str]:
-    lines: List[str] = []
-    for index in range(1, len(rows)):
-        left_row = rows[index - 1]
-        right_row = rows[index]
-        pair = (str(left_row["relative_path"]), str(right_row["relative_path"]))
-        boundary_row = boundary_rows_by_pair.get(pair)
-        if boundary_row is None:
-            visual_distance_text = "unknown"
-            visual_distance_level = "unknown"
-            boundary_score_text = "unknown"
-            boundary_score_level = "unknown"
+def _load_required_json(path: Path) -> Dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _to_plain_list(values: object) -> list[Any]:
+    if hasattr(values, "tolist"):
+        converted = values.tolist()
+        if isinstance(converted, list):
+            return converted
+        return [converted]
+    if isinstance(values, list):
+        return list(values)
+    if isinstance(values, tuple):
+        return list(values)
+    return [values]
+
+
+def _to_model_frame(rows: list[dict[str, object]]) -> object:
+    try:
+        import pandas as pd
+    except ImportError:
+        return rows
+    return pd.DataFrame(rows)
+
+
+def _normalize_boundary_prediction(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes"}:
+        return True
+    if text in {"0", "false", "no"}:
+        return False
+    raise ValueError(f"unsupported boundary prediction value: {value!r}")
+
+
+def _extract_positive_class_probability(probability_payload: object) -> float:
+    if hasattr(probability_payload, "columns"):
+        columns = list(probability_payload.columns)
+        for candidate in (1, "1", True, "true", "True"):
+            if candidate in columns:
+                values = _to_plain_list(probability_payload[candidate])
+                if len(values) != 1:
+                    raise ValueError("boundary probability output must contain exactly one row")
+                return float(values[0])
+        if len(columns) == 2:
+            values = _to_plain_list(probability_payload[columns[1]])
+            if len(values) != 1:
+                raise ValueError("boundary probability output must contain exactly one row")
+            return float(values[0])
+        raise ValueError("unable to resolve positive boundary probability column")
+    values = _to_plain_list(probability_payload)
+    if len(values) != 1:
+        raise ValueError("boundary probability output must contain exactly one row")
+    row = values[0]
+    if isinstance(row, dict):
+        for candidate in (1, "1", True, "true", "True"):
+            if candidate in row:
+                return float(row[candidate])
+        raise ValueError("boundary probability dict is missing positive-class key")
+    if isinstance(row, (list, tuple)):
+        return float(row[-1])
+    return float(row)
+
+
+def _extract_label_probability(probability_payload: object, predicted_label: str) -> float:
+    if hasattr(probability_payload, "columns"):
+        columns = list(probability_payload.columns)
+        if predicted_label not in columns:
+            raise ValueError(f"segment_type probability output is missing label column {predicted_label!r}")
+        values = _to_plain_list(probability_payload[predicted_label])
+        if len(values) != 1:
+            raise ValueError("segment_type probability output must contain exactly one row")
+        return float(values[0])
+    values = _to_plain_list(probability_payload)
+    if len(values) != 1:
+        raise ValueError("segment_type probability output must contain exactly one row")
+    row = values[0]
+    if isinstance(row, dict):
+        if predicted_label not in row:
+            raise ValueError(f"segment_type probability dict is missing label key {predicted_label!r}")
+        return float(row[predicted_label])
+    raise ValueError("unsupported segment_type probability output format")
+
+
+def _build_descriptor_field_registry_from_feature_columns(
+    feature_columns: Sequence[str],
+) -> dict[str, str]:
+    excluded_side_feature_names = {
+        "left_internal_gap_mean",
+        "right_internal_gap_mean",
+        "left_consistency_score",
+        "right_consistency_score",
+    }
+    registry: dict[str, str] = {}
+    for column_name in feature_columns:
+        if column_name in excluded_side_feature_names:
+            continue
+        if column_name.startswith("left_"):
+            descriptor_name = column_name[len("left_") :]
+        elif column_name.startswith("right_"):
+            descriptor_name = column_name[len("right_") :]
         else:
-            visual_distance = float(str(boundary_row.get("dino_cosine_distance", "") or "0"))
-            boundary_score = float(str(boundary_row.get("boundary_score", "") or "0"))
-            visual_distance_text = format_prompt_float(visual_distance)
-            visual_distance_level = classify_visual_distance_level(visual_distance)
-            boundary_score_text = format_prompt_float(boundary_score)
-            boundary_score_level = classify_boundary_score_level(boundary_score)
-        lines.append(
-            f"gap_{index:02d}_{index + 1:02d}: "
-            f"visual_distance={visual_distance_text} ({visual_distance_level}), "
-            f"heuristic_boundary_score={boundary_score_text} ({boundary_score_level})"
+            continue
+        suffix = descriptor_name.rsplit("_", 1)
+        if len(suffix) == 2 and len(suffix[1]) == 2 and suffix[1].isdigit():
+            registry[suffix[0]] = "multivalue"
+            continue
+        registry.setdefault(descriptor_name, "scalar")
+    return registry
+
+
+def load_ml_hint_context(
+    *,
+    ml_model_run_id: str,
+    ml_model_dir: Optional[Path],
+) -> Optional[MlHintContext]:
+    if ml_model_dir is None:
+        return None
+    training_metadata = _load_required_json(ml_model_dir / TRAINING_METADATA_FILENAME)
+    feature_columns_payload = _load_required_json(ml_model_dir / FEATURE_COLUMNS_FILENAME)
+    mode = str(training_metadata.get("mode", "tabular_only") or "tabular_only")
+    window_radius = int(training_metadata["window_radius"])
+    if window_radius < 1:
+        raise ValueError("window_radius must be at least 1")
+    image_feature_columns = [str(value) for value in feature_columns_payload.get("image_feature_columns", [])]
+    boundary_feature_columns = [str(value) for value in feature_columns_payload.get("boundary_feature_columns", [])]
+    left_segment_type_feature_columns = [
+        str(value) for value in feature_columns_payload.get("left_segment_type_feature_columns", [])
+    ]
+    right_segment_type_feature_columns = [
+        str(value) for value in feature_columns_payload.get("right_segment_type_feature_columns", [])
+    ]
+    _validate_ml_hint_feature_columns_contract(
+        mode=mode,
+        window_radius=window_radius,
+        image_feature_columns=image_feature_columns,
+        boundary_feature_columns=boundary_feature_columns,
+        left_segment_type_feature_columns=left_segment_type_feature_columns,
+        right_segment_type_feature_columns=right_segment_type_feature_columns,
+    )
+    descriptor_field_registry = _build_descriptor_field_registry_from_feature_columns(
+        sorted(
+            set(
+                boundary_feature_columns
+                + left_segment_type_feature_columns
+                + right_segment_type_feature_columns
+            )
         )
-    return lines
+    )
+    predictor_class = load_multimodal_predictor_class() if mode == "tabular_plus_thumbnail" else load_tabular_predictor_class()
+    if not hasattr(predictor_class, "load"):
+        raise ValueError(f"{predictor_class.__name__} does not support load()")
+    left_segment_type_model_dir = ml_model_dir / LEFT_SEGMENT_TYPE_MODEL_DIRNAME
+    right_segment_type_model_dir = ml_model_dir / RIGHT_SEGMENT_TYPE_MODEL_DIRNAME
+    boundary_model_dir = ml_model_dir / BOUNDARY_MODEL_DIRNAME
+    left_segment_type_predictor = predictor_class.load(str(left_segment_type_model_dir))
+    right_segment_type_predictor = predictor_class.load(str(right_segment_type_model_dir))
+    boundary_predictor = predictor_class.load(str(boundary_model_dir))
+    return MlHintContext(
+        run_id=ml_model_run_id,
+        mode=mode,
+        model_dir=ml_model_dir,
+        window_radius=window_radius,
+        boundary_predictor=boundary_predictor,
+        left_segment_type_predictor=left_segment_type_predictor,
+        right_segment_type_predictor=right_segment_type_predictor,
+        boundary_feature_columns=boundary_feature_columns,
+        left_segment_type_feature_columns=left_segment_type_feature_columns,
+        right_segment_type_feature_columns=right_segment_type_feature_columns,
+        descriptor_field_registry=descriptor_field_registry,
+    )
+
+
+def _build_ml_candidate_window_rows(
+    joined_rows: Sequence[Mapping[str, str]],
+    *,
+    cut_index: int,
+    window_radius: int,
+) -> Optional[list[Mapping[str, str]]]:
+    window_size = window_radius_to_window_size(window_radius)
+    if len(joined_rows) < window_size:
+        return None
+    try:
+        window_start, window_end = build_centered_window_bounds(
+            len(joined_rows),
+            cut_index,
+            window_radius,
+        )
+    except ValueError:
+        return None
+    rows = list(joined_rows[window_start:window_end])
+    if len(rows) != window_size:
+        return None
+    return rows
+
+
+def _build_ml_candidate_row(
+    rows: Sequence[Mapping[str, str]],
+    *,
+    day_id: str,
+    window_radius: int,
+) -> dict[str, object]:
+    window_size = window_radius_to_window_size(window_radius)
+    if len(rows) != window_size:
+        raise ValueError(f"ML candidate rows must contain exactly {window_size} frames")
+    normalized_day_id = day_id.strip()
+    if normalized_day_id == "":
+        raise ValueError("day_id must not be blank for ML prompt inference")
+    candidate_row: dict[str, object] = {
+        "day_id": normalized_day_id,
+        "window_radius": window_radius,
+        "center_left_photo_id": str(
+            rows[window_radius - 1].get("photo_id", "") or rows[window_radius - 1].get("relative_path", "")
+        ).strip(),
+        "center_right_photo_id": str(
+            rows[window_radius].get("photo_id", "") or rows[window_radius].get("relative_path", "")
+        ).strip(),
+        "boundary": False,
+        "split_name": "",
+    }
+    for frame_index, row in enumerate(rows, start=1):
+        suffix = f"{frame_index:02d}"
+        photo_id = str(row.get("photo_id", "") or row.get("relative_path", "")).strip()
+        relative_path = str(row.get("relative_path", "") or "").strip()
+        if photo_id == "" or relative_path == "":
+            raise ValueError("joined photo rows must include photo_id and relative_path for ML hints")
+        timestamp_seconds = normalize_timestamp(row.get("start_epoch_ms")) / 1000.0
+        candidate_row[f"frame_{suffix}_photo_id"] = photo_id
+        candidate_row[f"frame_{suffix}_relpath"] = relative_path
+        candidate_row[f"frame_{suffix}_timestamp"] = timestamp_seconds
+        candidate_row[f"frame_{suffix}_thumb_path"] = str(row.get("thumb_path", "") or "").strip()
+    return candidate_row
+
+
+def _load_ml_candidate_descriptors(
+    candidate_row: Mapping[str, object],
+    *,
+    photo_pre_model_dir: Optional[Path],
+    window_radius: int,
+) -> dict[str, dict[str, object]]:
+    if photo_pre_model_dir is None or not photo_pre_model_dir.exists():
+        return {}
+    frame_count = window_radius_to_window_size(window_radius)
+    relative_paths = [
+        str(candidate_row.get(f"frame_{frame_index:02d}_relpath", "") or "").strip()
+        for frame_index in range(1, frame_count + 1)
+    ]
+    annotations_by_relative_path = load_photo_pre_model_annotations_by_relative_path(
+        photo_pre_model_dir,
+        relative_paths,
+    )
+    descriptors: dict[str, dict[str, object]] = {}
+    for frame_index in range(1, frame_count + 1):
+        suffix = f"{frame_index:02d}"
+        photo_id = str(candidate_row.get(f"frame_{suffix}_photo_id", "") or "").strip()
+        relative_path = str(candidate_row.get(f"frame_{suffix}_relpath", "") or "").strip()
+        if photo_id == "" or relative_path == "":
+            continue
+        annotation = annotations_by_relative_path.get(relative_path)
+        if annotation is not None:
+            descriptors[photo_id] = annotation
+    return descriptors
+
+
+def _build_ml_candidate_heuristic_features(
+    candidate_row: Mapping[str, object],
+    boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
+    *,
+    window_radius: int,
+) -> dict[str, dict[str, str]]:
+    heuristic_features: dict[str, dict[str, str]] = {}
+    for pair_name, left_column, right_column in heuristic_pair_join_columns_for_window_radius(window_radius):
+        pair_row = boundary_rows_by_pair.get(
+            (
+                str(candidate_row.get(left_column, "") or "").strip(),
+                str(candidate_row.get(right_column, "") or "").strip(),
+            )
+        )
+        if pair_row is None:
+            continue
+        heuristic_features[pair_name] = {
+            column_name: str(pair_row.get(column_name, "") or "").strip()
+            for column_name in HEURISTIC_VALUE_COLUMNS
+        }
+    return heuristic_features
+
+
+def _build_predictor_feature_row(
+    *,
+    feature_columns: Sequence[str],
+    candidate_row: Mapping[str, object],
+    derived_features: Mapping[str, object],
+) -> dict[str, object]:
+    row: dict[str, object] = {}
+    for column_name in feature_columns:
+        if column_name in derived_features:
+            row[column_name] = derived_features[column_name]
+            continue
+        if column_name in candidate_row:
+            row[column_name] = candidate_row[column_name]
+            continue
+        raise ValueError(f"missing ML predictor feature column {column_name!r} for prompt inference")
+    return row
+
+
+def predict_ml_hint_for_candidate(
+    *,
+    ml_hint_context: MlHintContext,
+    candidate_row: Mapping[str, object],
+    boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
+    photo_pre_model_dir: Optional[Path],
+) -> MlHintPrediction:
+    candidate_window_radius = int(str(candidate_row.get("window_radius", "") or "").strip())
+    if candidate_window_radius != ml_hint_context.window_radius:
+        raise ValueError(
+            "ml model window_radius mismatch: "
+            f"runtime={candidate_window_radius}, artifact={ml_hint_context.window_radius}"
+        )
+    descriptors = _load_ml_candidate_descriptors(
+        candidate_row,
+        photo_pre_model_dir=photo_pre_model_dir,
+        window_radius=ml_hint_context.window_radius,
+    )
+    heuristic_features = _build_ml_candidate_heuristic_features(
+        candidate_row,
+        boundary_rows_by_pair,
+        window_radius=ml_hint_context.window_radius,
+    )
+    derived_features = build_candidate_feature_row(
+        candidate_row,
+        descriptors=descriptors,
+        embeddings=None,
+        descriptor_field_registry=ml_hint_context.descriptor_field_registry,
+        heuristic_features=heuristic_features,
+        window_radius=ml_hint_context.window_radius,
+    )
+    left_segment_type_row = _build_predictor_feature_row(
+        feature_columns=ml_hint_context.left_segment_type_feature_columns,
+        candidate_row=candidate_row,
+        derived_features=derived_features,
+    )
+    right_segment_type_row = _build_predictor_feature_row(
+        feature_columns=ml_hint_context.right_segment_type_feature_columns,
+        candidate_row=candidate_row,
+        derived_features=derived_features,
+    )
+    boundary_row = _build_predictor_feature_row(
+        feature_columns=ml_hint_context.boundary_feature_columns,
+        candidate_row=candidate_row,
+        derived_features=derived_features,
+    )
+    left_segment_type_frame = _to_model_frame([left_segment_type_row])
+    right_segment_type_frame = _to_model_frame([right_segment_type_row])
+    boundary_frame = _to_model_frame([boundary_row])
+
+    left_segment_type_prediction = str(
+        _to_plain_list(ml_hint_context.left_segment_type_predictor.predict(left_segment_type_frame))[0]
+    ).strip()
+    left_segment_type_confidence = _extract_label_probability(
+        ml_hint_context.left_segment_type_predictor.predict_proba(left_segment_type_frame),
+        left_segment_type_prediction,
+    )
+    right_segment_type_prediction = str(
+        _to_plain_list(ml_hint_context.right_segment_type_predictor.predict(right_segment_type_frame))[0]
+    ).strip()
+    right_segment_type_confidence = _extract_label_probability(
+        ml_hint_context.right_segment_type_predictor.predict_proba(right_segment_type_frame),
+        right_segment_type_prediction,
+    )
+
+    boundary_prediction = _normalize_boundary_prediction(
+        _to_plain_list(ml_hint_context.boundary_predictor.predict(boundary_frame))[0]
+    )
+    positive_boundary_probability = _extract_positive_class_probability(
+        ml_hint_context.boundary_predictor.predict_proba(boundary_frame)
+    )
+    boundary_confidence = positive_boundary_probability if boundary_prediction else 1.0 - positive_boundary_probability
+    return MlHintPrediction(
+        boundary_prediction=boundary_prediction,
+        boundary_confidence=boundary_confidence,
+        left_segment_type_prediction=left_segment_type_prediction,
+        left_segment_type_confidence=left_segment_type_confidence,
+        right_segment_type_prediction=right_segment_type_prediction,
+        right_segment_type_confidence=right_segment_type_confidence,
+    )
+
+
+def build_ml_hint_lines(
+    prediction: Optional[MlHintPrediction],
+) -> List[str]:
+    if prediction is None:
+        return ["ML hints are unavailable for this window."]
+    boundary_label = "cut" if prediction.boundary_prediction else "no cut"
+    left_segment_label = ML_SEGMENT_TYPE_TO_PROMPT_LABEL.get(
+        prediction.left_segment_type_prediction,
+        prediction.left_segment_type_prediction,
+    )
+    right_segment_label = ML_SEGMENT_TYPE_TO_PROMPT_LABEL.get(
+        prediction.right_segment_type_prediction,
+        prediction.right_segment_type_prediction,
+    )
+    return [
+        f"ML hint for the main candidate gap in this window: likely {boundary_label} (confidence {prediction.boundary_confidence:.2f}).",
+        f"ML hint for the left side of the candidate gap: likely {left_segment_label} (confidence {prediction.left_segment_type_confidence:.2f}).",
+        f"ML hint for the right side of the candidate gap: likely {right_segment_label} (confidence {prediction.right_segment_type_confidence:.2f}).",
+    ]
+
+
+def build_ml_hint_lines_for_candidate(
+    *,
+    day_id: str,
+    joined_rows: Sequence[Mapping[str, str]],
+    cut_index: int,
+    boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
+    photo_pre_model_dir: Optional[Path],
+    ml_hint_context: Optional[MlHintContext],
+    runtime_window_radius: int,
+) -> List[str]:
+    if ml_hint_context is None:
+        return build_ml_hint_lines(None)
+    candidate_rows = _build_ml_candidate_window_rows(
+        joined_rows,
+        cut_index=cut_index,
+        window_radius=runtime_window_radius,
+    )
+    if candidate_rows is None:
+        return build_ml_hint_lines(None)
+    prediction = predict_ml_hint_for_candidate(
+        ml_hint_context=ml_hint_context,
+        candidate_row=_build_ml_candidate_row(
+            candidate_rows,
+            day_id=day_id,
+            window_radius=runtime_window_radius,
+        ),
+        boundary_rows_by_pair=boundary_rows_by_pair,
+        photo_pre_model_dir=photo_pre_model_dir,
+    )
+    return build_ml_hint_lines(prediction)
 
 
 def load_extra_instructions(inline_value: str, file_value: Optional[str]) -> str:
@@ -674,13 +1186,12 @@ def build_response_schema(window_size: int) -> Dict[str, Any]:
 
 def build_user_prompt(
     window_size: int,
-    gap_hint_lines: Sequence[str],
+    ml_hint_lines: Sequence[str],
     extra_instructions: str = "",
     response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
-    pre_model_lines: Sequence[str] = (),
 ) -> str:
     frames_block = "\n".join([f"frame_{index:02d} = attached image {index}" for index in range(1, window_size + 1)])
-    hints_block = "\n".join(gap_hint_lines) if gap_hint_lines else "No heuristic gap hints are available."
+    hints_block = "\n".join(ml_hint_lines) if ml_hint_lines else "ML hints are unavailable for this window."
     if response_schema_mode == "on":
         decisions_block = "\n".join([f'- {value!r}' if value is not None else "- null" for value in build_boundary_after_frame_values(window_size)])
         response_header = "Allowed boundary_after_frame values:\n"
@@ -785,24 +1296,9 @@ def build_user_prompt(
         "If the change is only a new pose, new movement phrase, or another choreography moment within the same act, you must return null.\n\n"
         "Decision priority:\n"
         "1. images\n"
-        "2. heuristic hints\n\n"
-        "If images clearly contradict heuristic hints, trust the images first.\n\n"
-        + (
-            "Optional pre-model per-image annotations:\n"
-            + "\n".join(pre_model_lines)
-            + "\n\n"
-            if pre_model_lines
-            else ""
-        )
-        +
-        "Hint interpretation:\n"
-        "- low = weak signal\n"
-        "- medium = ambiguous signal\n"
-        "- high = strong signal\n"
-        "- unknown = unavailable hint\n"
-        "- larger visual_distance means more visual change between adjacent frames\n"
-        "- heuristic_boundary_score near 0 suggests continuity, near 1 suggests a likely boundary\n\n"
-        "Heuristic hints for consecutive gaps:\n"
+        "2. ML hints\n\n"
+        "Images take priority over ML hints.\n\n"
+        "ML hints:\n"
         f"{hints_block}\n\n"
         f"{response_header}"
         f"{decisions_block}\n\n"
@@ -903,6 +1399,39 @@ def extract_json_object_text(raw_response: str) -> str:
     if start == -1 or end == -1 or end < start:
         raise ValueError("JSON object not found in model response")
     return text[start : end + 1]
+
+
+def extract_segment_types(raw_response: str) -> tuple[str, str]:
+    if not raw_response.strip():
+        return "", ""
+    try:
+        payload = json.loads(extract_json_object_text(raw_response))
+    except Exception:
+        return "", ""
+    left_segment_type = str(payload.get("left_segment_type", "") or "").strip()
+    right_segment_type = str(payload.get("right_segment_type", "") or "").strip()
+    if left_segment_type not in SEGMENT_TYPES:
+        left_segment_type = ""
+    if right_segment_type not in SEGMENT_TYPES:
+        right_segment_type = ""
+    return left_segment_type, right_segment_type
+
+
+def choose_segment_type(candidates: Sequence[str]) -> str:
+    normalized_candidates = [value for value in candidates if value]
+    if not normalized_candidates:
+        return ""
+    counts: Dict[str, int] = {}
+    for value in normalized_candidates:
+        counts[value] = counts.get(value, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return ""
+    return ranked[0][0]
+
+
+def segment_type_to_code(segment_type: str) -> str:
+    return GUI_TYPE_CODE_BY_SEGMENT_TYPE.get(segment_type.strip().lower(), "?")
 
 
 def parse_model_response(
@@ -1012,8 +1541,7 @@ def build_result_row(
     start_row: int,
     end_row: int,
     rows: Sequence[Mapping[str, str]],
-    window_size: int,
-    overlap: int,
+    window_radius: int,
     raw_response: str,
     parsed_response: Mapping[str, str],
     model: str = DEFAULT_MODEL_NAME,
@@ -1049,8 +1577,7 @@ def build_result_row(
         "batch_index": str(batch_index),
         "start_row": str(start_row),
         "end_row": str(end_row),
-        "window_size": str(window_size),
-        "overlap": str(overlap),
+        "window_radius": str(window_radius),
         "relative_paths_json": json.dumps([str(row["relative_path"]) for row in rows], ensure_ascii=True),
         "filenames_json": json.dumps([str(row["filename"]) for row in rows], ensure_ascii=True),
         "image_paths_json": json.dumps([str(row["image_path"]) for row in rows], ensure_ascii=True),
@@ -1105,58 +1632,17 @@ def build_user_prompt_template(
     extra_instructions: str = "",
     response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
 ) -> str:
-    gap_hint_lines = [
-        f"gap_{index:02d}_{index + 1:02d}: visual_distance=<value> (<level>), heuristic_boundary_score=<value> (<level>)"
-        for index in range(1, window_size)
+    ml_hint_lines = [
+        "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
+        "ML hint for the left side of the candidate gap: likely dance (confidence 0.74).",
+        "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.73).",
     ]
     return build_user_prompt(
         window_size=window_size,
-        gap_hint_lines=gap_hint_lines,
+        ml_hint_lines=ml_hint_lines,
         extra_instructions=extra_instructions,
         response_schema_mode=response_schema_mode,
     )
-
-
-def build_photo_pre_model_lines(
-    rows: Sequence[Mapping[str, str]],
-    photo_pre_model_dir: Optional[Path],
-) -> List[str]:
-    if photo_pre_model_dir is None or not photo_pre_model_dir.exists():
-        return []
-    relative_paths = [str(row["relative_path"]) for row in rows]
-    annotations_by_relative_path = load_photo_pre_model_annotations_by_relative_path(photo_pre_model_dir, relative_paths)
-    lines: List[str] = []
-    for index, row in enumerate(rows, start=1):
-        annotation = annotations_by_relative_path.get(str(row["relative_path"]))
-        if not annotation:
-            continue
-        dominant_colors = annotation.get("dominant_colors")
-        props = annotation.get("props")
-        dominant_colors_text = (
-            "|".join(str(value).strip() for value in dominant_colors if str(value).strip())
-            if isinstance(dominant_colors, list)
-            else ""
-        )
-        props_text = (
-            "|".join(str(value).strip() for value in props if str(value).strip())
-            if isinstance(props, list)
-            else ""
-        )
-        parts = [
-            f"people_count={annotation.get('people_count', '')}",
-            f"performer_view={annotation.get('performer_view', '')}",
-            f"upper_garment={annotation.get('upper_garment', '')}",
-            f"lower_garment={annotation.get('lower_garment', '')}",
-            f"sleeves={annotation.get('sleeves', '')}",
-            f"leg_coverage={annotation.get('leg_coverage', '')}",
-            f"dominant_colors={dominant_colors_text}",
-            f"headwear={annotation.get('headwear', '')}",
-            f"footwear={annotation.get('footwear', '')}",
-            f"props={props_text}",
-            f"dance_style_hint={annotation.get('dance_style_hint', '')}",
-        ]
-        lines.append(f"frame_{index:02d}: " + ", ".join(parts))
-    return lines
 
 
 def write_run_metadata(
@@ -1246,6 +1732,7 @@ def build_gui_index_payload(
     result_rows: Sequence[Mapping[str, str]],
 ) -> Dict[str, Any]:
     cut_reasons_by_pair: Dict[tuple[str, str], List[str]] = {}
+    segment_types_by_pair: Dict[tuple[str, str], Dict[str, List[str]]] = {}
     for result_row in result_rows:
         if str(result_row.get("response_status", "")) != "ok":
             continue
@@ -1255,9 +1742,16 @@ def build_gui_index_payload(
             continue
         pair = (left_relative_path, right_relative_path)
         cut_reasons_by_pair.setdefault(pair, []).append(str(result_row.get("reason", "") or "").strip())
+        left_segment_type, right_segment_type = extract_segment_types(str(result_row.get("raw_response", "") or ""))
+        pair_segment_types = segment_types_by_pair.setdefault(pair, {"left": [], "right": []})
+        if left_segment_type:
+            pair_segment_types["left"].append(left_segment_type)
+        if right_segment_type:
+            pair_segment_types["right"].append(right_segment_type)
 
     segments: List[Dict[str, Any]] = []
     current_rows: List[Dict[str, Any]] = []
+    current_left_boundary_pair: Optional[tuple[str, str]] = None
     for row in ordered_rows:
         relative_path = str(row["relative_path"])
         is_new_segment_start = False
@@ -1273,17 +1767,22 @@ def build_gui_index_payload(
             segments.append(
                 {
                     "rows": current_rows,
+                    "left_boundary_pair": current_left_boundary_pair,
+                    "right_boundary_pair": split_pair,
                     "cut_hits": len(reasons),
                     "cut_reasons": reasons,
                 }
             )
             current_rows = [row]
+            current_left_boundary_pair = split_pair
             continue
         current_rows.append(row)
     if current_rows:
         segments.append(
             {
                 "rows": current_rows,
+                "left_boundary_pair": current_left_boundary_pair,
+                "right_boundary_pair": None,
                 "cut_hits": 0,
                 "cut_reasons": [],
             }
@@ -1295,6 +1794,16 @@ def build_gui_index_payload(
         rows = list(segment["rows"])
         if not rows:
             continue
+        segment_type_candidates: List[str] = []
+        left_boundary_pair = segment.get("left_boundary_pair")
+        if isinstance(left_boundary_pair, tuple):
+            pair_segment_types = segment_types_by_pair.get(left_boundary_pair, {})
+            segment_type_candidates.extend(pair_segment_types.get("right", []))
+        right_boundary_pair = segment.get("right_boundary_pair")
+        if isinstance(right_boundary_pair, tuple):
+            pair_segment_types = segment_types_by_pair.get(right_boundary_pair, {})
+            segment_type_candidates.extend(pair_segment_types.get("left", []))
+        segment_type = choose_segment_type(segment_type_candidates)
         photos: List[Dict[str, Any]] = []
         for row in rows:
             photos.append(
@@ -1325,6 +1834,8 @@ def build_gui_index_payload(
                 "duplicate_status": "normal",
                 "performance_start_local": str(rows[0].get("start_local", "") or ""),
                 "performance_end_local": str(rows[-1].get("start_local", "") or ""),
+                "segment_type": segment_type,
+                "type_code": segment_type_to_code(segment_type),
                 "segment_confidence": image_variant,
                 "vlm_boundary_hits": str(int(segment["cut_hits"])),
                 "vlm_boundary_reasons": list(segment["cut_reasons"]),
@@ -1352,55 +1863,31 @@ def read_result_rows(output_csv: Path) -> List[Dict[str, str]]:
         except StopIteration:
             return rows
         header = [str(value) for value in header_row]
-        if header == OUTPUT_HEADERS:
-            for row in reader:
-                if not row:
-                    continue
-                padded = list(row) + [""] * max(0, len(OUTPUT_HEADERS) - len(row))
-                rows.append({key: padded[index] for index, key in enumerate(OUTPUT_HEADERS)})
-            return rows
-        if header == MID_OUTPUT_HEADERS:
-            for row in reader:
-                if not row:
-                    continue
-                if len(row) == len(MID_OUTPUT_HEADERS):
-                    rows.append({key: row[index] for index, key in enumerate(MID_OUTPUT_HEADERS)} | {"config_hash": ""})
-                    continue
-                if len(row) == len(OUTPUT_HEADERS):
-                    rows.append({key: row[index] for index, key in enumerate(OUTPUT_HEADERS)})
-                    continue
-                raise ValueError(
-                    f"{output_csv.name} has unsupported row width {len(row)} for mid header; expected "
-                    f"{len(MID_OUTPUT_HEADERS)} or {len(OUTPUT_HEADERS)} columns"
-                )
-            return rows
-        if header == LEGACY_OUTPUT_HEADERS:
-            for row in reader:
-                if not row:
-                    continue
-                if len(row) == len(LEGACY_OUTPUT_HEADERS):
-                    rows.append(
-                        {key: row[index] for index, key in enumerate(LEGACY_OUTPUT_HEADERS)}
-                        | {"run_id": "", "config_hash": ""}
-                    )
-                    continue
-                if len(row) == len(MID_OUTPUT_HEADERS):
-                    rows.append(
-                        {key: row[index] for index, key in enumerate(MID_OUTPUT_HEADERS)}
-                        | {"config_hash": ""}
-                    )
-                    continue
-                if len(row) == len(OUTPUT_HEADERS):
-                    rows.append({key: row[index] for index, key in enumerate(OUTPUT_HEADERS)})
-                    continue
-                raise ValueError(
-                    f"{output_csv.name} has unsupported row width {len(row)} for legacy header; expected "
-                    f"{len(LEGACY_OUTPUT_HEADERS)}, {len(MID_OUTPUT_HEADERS)} or {len(OUTPUT_HEADERS)} columns"
-                )
-            return rows
-    raise ValueError(
-        f"{output_csv.name} has unsupported header; expected current or legacy VLM probe columns"
-    )
+        if header != OUTPUT_HEADERS:
+            raise ValueError(f"{output_csv.name} has unsupported header; expected current VLM probe columns")
+        for row in reader:
+            if not row:
+                continue
+            row_headers = detect_result_row_headers(output_csv.name, header, row)
+            row_values = list(row) + [""] * max(0, len(row_headers) - len(row))
+            rows.append(normalize_result_row({key: row_values[index] for index, key in enumerate(row_headers)}))
+        return rows
+
+
+def detect_result_row_headers(csv_name: str, file_header: Sequence[str], row: Sequence[str]) -> Sequence[str]:
+    header_list = list(file_header)
+    row_length = len(row)
+    if header_list == OUTPUT_HEADERS and row_length <= len(OUTPUT_HEADERS):
+        return OUTPUT_HEADERS
+    raise ValueError(f"{csv_name} has unsupported row width {row_length}")
+
+
+def normalize_result_row(row: Mapping[str, str]) -> Dict[str, str]:
+    normalized = {header: "" for header in OUTPUT_HEADERS}
+    for header in OUTPUT_HEADERS:
+        if header in row:
+            normalized[header] = str(row.get(header, ""))
+    return normalized
 
 
 def resolve_run_state(
@@ -1500,14 +1987,14 @@ def build_batch_result_message(
 
 def probe_vlm_photo_boundaries(
     *,
+    day_id: str,
     workspace_dir: Path,
     embedded_manifest_csv: Path,
     photo_manifest_csv: Path,
     output_csv: Path,
     provider: str,
     image_variant: str,
-    window_size: int,
-    overlap: int,
+    window_radius: int,
     boundary_gap_seconds: int,
     max_batches: int,
     model: str,
@@ -1521,10 +2008,13 @@ def probe_vlm_photo_boundaries(
     extra_instructions: str,
     dump_debug_dir: Optional[Path],
     photo_pre_model_dir: Optional[Path] = None,
+    ml_model_run_id: str = "",
+    ml_model_dir: Optional[Path] = None,
     json_validation_mode: str = DEFAULT_JSON_VALIDATION_MODE,
     args_payload: Mapping[str, Any],
     new_run: bool,
 ) -> int:
+    window_size = window_radius_to_window_size(window_radius)
     config_hash = build_config_hash(args_payload)
     joined_rows = read_joined_rows(
         workspace_dir=workspace_dir,
@@ -1533,10 +2023,13 @@ def probe_vlm_photo_boundaries(
         image_variant=image_variant,
     )
     boundary_rows_by_pair = read_boundary_scores_by_pair(workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME)
+    ml_hint_context = load_ml_hint_context(
+        ml_model_run_id=ml_model_run_id,
+        ml_model_dir=ml_model_dir,
+    )
     all_candidates = build_candidate_windows(
         joined_rows,
-        window_size=window_size,
-        overlap=overlap,
+        window_radius=window_radius,
         boundary_gap_seconds=boundary_gap_seconds,
     )
     run_state = resolve_run_state(
@@ -1624,14 +2117,20 @@ def probe_vlm_photo_boundaries(
             time_gap_seconds = int(candidate["time_gap_seconds"])
             end_index = start_index + window_size
             window_rows = joined_rows[start_index:end_index]
-            gap_hint_lines = build_gap_hint_lines(window_rows, boundary_rows_by_pair)
-            pre_model_lines = build_photo_pre_model_lines(window_rows, photo_pre_model_dir)
+            ml_hint_lines = build_ml_hint_lines_for_candidate(
+                day_id=day_id,
+                joined_rows=joined_rows,
+                cut_index=cut_index,
+                boundary_rows_by_pair=boundary_rows_by_pair,
+                photo_pre_model_dir=photo_pre_model_dir,
+                ml_hint_context=ml_hint_context,
+                runtime_window_radius=window_radius,
+            )
             prompt = build_user_prompt(
                 window_size=window_size,
-                gap_hint_lines=gap_hint_lines,
+                ml_hint_lines=ml_hint_lines,
                 extra_instructions=extra_instructions,
                 response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
-                pre_model_lines=pre_model_lines,
             )
             request = build_vlm_request(
                 provider=provider,
@@ -1688,8 +2187,7 @@ def probe_vlm_photo_boundaries(
                 start_row=start_index + 1,
                 end_row=end_index,
                 rows=window_rows,
-                window_size=window_size,
-                overlap=overlap,
+                window_radius=window_radius,
                 raw_response=raw_response,
                 parsed_response=parsed_response,
                 model=model,
@@ -1726,6 +2224,12 @@ def main() -> int:
         raise SystemExit(f"Day directory does not exist: {day_dir}")
     args = apply_vocatio_defaults(args, day_dir)
     workspace_dir = resolve_workspace_dir(day_dir, args.workspace_dir)
+    effective_ml_model_run_id, resolved_ml_model_dir = resolve_ml_model_run(
+        workspace_dir,
+        args.ml_model_run_id,
+    )
+    if args.output == DEFAULT_OUTPUT_FILENAME:
+        args.output = build_default_output_filename(effective_ml_model_run_id)
     embedded_manifest_csv = resolve_path(workspace_dir, args.embedded_manifest_csv)
     photo_manifest_csv = resolve_path(workspace_dir, args.photo_manifest_csv)
     output_csv = resolve_path(workspace_dir, args.output)
@@ -1742,8 +2246,7 @@ def main() -> int:
         "photo_manifest_csv": str(photo_manifest_csv),
         "output_csv": str(output_csv),
         "image_variant": args.image_variant,
-        "window_size": args.window_size,
-        "overlap": args.overlap,
+        "window_radius": args.window_radius,
         "boundary_gap_seconds": args.boundary_gap_seconds,
         "max_batches": args.max_batches,
         "model": args.model,
@@ -1757,20 +2260,23 @@ def main() -> int:
         "response_schema_mode": args.response_schema_mode,
         "json_validation_mode": args.json_validation_mode,
         "photo_pre_model_dir": str(resolve_path(workspace_dir, args.photo_pre_model_dir)),
+        "requested_ml_model_run_id": args.ml_model_run_id,
+        "effective_ml_model_run_id": effective_ml_model_run_id,
+        "ml_model_dir": str(resolved_ml_model_dir) if resolved_ml_model_dir is not None else "",
         "extra_instructions": args.extra_instructions,
         "extra_instructions_file": args.extra_instructions_file,
         "effective_extra_instructions": load_extra_instructions(args.extra_instructions, args.extra_instructions_file),
         "dump_debug_dir": args.dump_debug_dir,
     }
     row_count = probe_vlm_photo_boundaries(
+        day_id=day_dir.name,
         workspace_dir=workspace_dir,
         embedded_manifest_csv=embedded_manifest_csv,
         photo_manifest_csv=photo_manifest_csv,
         output_csv=output_csv,
         provider=args.provider,
         image_variant=args.image_variant,
-        window_size=args.window_size,
-        overlap=args.overlap,
+        window_radius=args.window_radius,
         boundary_gap_seconds=args.boundary_gap_seconds,
         max_batches=args.max_batches,
         model=args.model,
@@ -1788,6 +2294,8 @@ def main() -> int:
             if str(args.photo_pre_model_dir or "").strip()
             else None
         ),
+        ml_model_run_id=effective_ml_model_run_id,
+        ml_model_dir=resolved_ml_model_dir,
         json_validation_mode=args.json_validation_mode,
         args_payload=args_payload,
         new_run=bool(args.new_run),

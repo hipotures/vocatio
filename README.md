@@ -428,8 +428,7 @@ Default behavior:
 python3 scripts/pipeline/probe_vlm_photo_boundaries.py DAY \
   --photo-manifest-csv DAY/_workspace/media_manifest.csv \
   --image-variant thumb \
-  --window-size 7 \
-  --overlap 2 \
+  --window-radius 2 \
   --boundary-gap-seconds 10 \
   --max-batches 100 \
   --response-schema-mode on \
@@ -441,6 +440,9 @@ python3 scripts/pipeline/probe_vlm_photo_boundaries.py DAY \
 Important behavior:
 
 - provider selection comes from `--provider` or `.vocatio` (`VLM_PROVIDER`, `VLM_BASE_URL`, `VLM_MODEL`)
+- symmetric VLM context is configured only through `--window-radius` or `.vocatio` `VLM_WINDOW_RADIUS`
+- `vlm_boundary_results.csv`, VLM run metadata, and downstream GUI/review artifacts persist `window_radius` only
+- legacy probe CSVs with `window_size` / `overlap` are not resumable; start a fresh run with `--new-run`
 - only gaps larger than `--boundary-gap-seconds` are probed
 - default `--max-batches` is `10`, so use a larger explicit value for real runs and rerun the same command or continue with `--run-id`
 - `--new-run` starts a fresh VLM run
@@ -458,8 +460,7 @@ Optional debugging:
 python3 scripts/pipeline/probe_vlm_photo_boundaries.py DAY \
   --photo-manifest-csv DAY/_workspace/media_manifest.csv \
   --image-variant thumb \
-  --window-size 7 \
-  --overlap 2 \
+  --window-radius 2 \
   --boundary-gap-seconds 10 \
   --max-batches 100 \
   --dump-debug-dir /tmp \
@@ -485,6 +486,147 @@ python3 scripts/pipeline/review_performance_proxy_gui.py DAY \
 ```
 
 Use a dedicated VLM review-state file so you do not mix VLM review decisions with the heuristic image-only or audio-assisted states.
+
+### ML Boundary Verifier
+
+The ML verifier flow starts from reviewed image-only segmentation truth and trains two independent predictors (`segment_type`, `boundary`) on fixed 5-photo candidate windows.
+
+#### One-command end-to-end pipeline (recommended)
+
+Single-day run with explicit split config:
+
+```bash
+python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 \
+  --mode tabular_only \
+  --split-strategy global_stratified \
+  --train-fraction 0.70 \
+  --validation-fraction 0.15 \
+  --test-fraction 0.15 \
+  --split-seed 42 \
+  --model-run-id run-001
+```
+
+Multi-day run with `global_stratified`:
+
+```bash
+python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 /data/20260324 /data/20260325 \
+  --mode tabular_only \
+  --split-strategy global_stratified \
+  --model-run-id run-001
+```
+
+Multi-day prepare-only run:
+
+```bash
+python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 /data/20260324 /data/20260325 \
+  --mode tabular_only \
+  --prepare-only \
+  --model-run-id run-001
+```
+
+By default this uses each day's `.vocatio` `WORKSPACE_DIR` (or `DAY/_workspace`), then:
+
+1. exports reviewed truth (`ml_boundary_reviewed_truth.csv`) from GUI index + state
+2. builds and validates per-day candidate datasets
+3. merges day candidates into a corpus dataset
+4. builds day metadata and a merged-corpus split manifest
+5. validates corpus + split policy
+6. trains model artifacts under `ml_boundary_models/RUN_ID`
+7. evaluates on the `test` split under `ml_boundary_eval/RUN_ID`
+
+Main corpus outputs are written to:
+
+- `FIRST_DAY_WORKSPACE/ml_boundary_corpus/` (or `--corpus-workspace`)
+
+Use `--prepare-only` to stop before train/evaluate.
+
+Global corpus split rule:
+
+- all input days are merged into one candidate corpus first
+- train/validation/test split is applied to merged candidate rows
+- input days are data sources, not split units
+- one day is enough as long as the merged corpus contains at least 3 candidate rows
+- supported strategies are `global_random` and `global_stratified`
+- `global_stratified` is the requested strategy by default; the pipeline may fall back to `global_random` when stratified allocation or held-out coverage cannot be satisfied
+- the corpus split surface is `--split-strategy`, `--train-fraction`, `--validation-fraction`, `--test-fraction`, `--split-seed`, `--required-heldout-classes`
+
+Exact defaults:
+
+- `split_strategy = global_stratified`
+- `train_fraction = 0.70`
+- `validation_fraction = 0.15`
+- `test_fraction = 0.15`
+- `split_seed = 42`
+
+`.vocatio` support:
+
+- `run_ml_boundary_pipeline.py` reads these keys from the first day directory's `.vocatio`
+- CLI flags override `.vocatio` when both are provided
+
+```bash
+ML_SPLIT_STRATEGY=global_stratified
+ML_SPLIT_TRAIN_FRACTION=0.70
+ML_SPLIT_VALIDATION_FRACTION=0.15
+ML_SPLIT_TEST_FRACTION=0.15
+ML_SPLIT_SEED=42
+```
+
+The default resolution path is:
+
+- CLI flags if provided
+- otherwise the first day directory's `.vocatio`
+- otherwise built-in defaults shown above
+
+Verification:
+
+- inspect `FIRST_DAY_WORKSPACE/ml_boundary_corpus/ml_boundary_pipeline_summary.json`
+- check `window_radius` and `candidate_rule_params_json` to confirm the merged corpus and downstream training/eval artifacts stayed on the radius contract
+- check `requested_split_strategy` and `effective_split_strategy` to confirm whether the run stayed on `global_stratified` or fell back to `global_random`
+- inspect `required_heldout_classes` in the same summary to confirm which held-out coverage classes were enforced for the run
+
+#### Manual flow (step-by-step)
+
+1. Export reviewed truth per day:
+
+```bash
+python3 scripts/pipeline/export_ml_boundary_reviewed_truth.py DAY
+```
+
+2. Build and validate per-day candidates:
+
+```bash
+python3 scripts/pipeline/build_ml_boundary_candidate_dataset.py DAY
+python3 scripts/pipeline/validate_ml_boundary_dataset.py DAY
+```
+
+3. Train with AutoGluon (isolated dependency group):
+
+```bash
+uv run --no-default-groups --group autogluon \
+  python3 scripts/pipeline/train_ml_boundary_verifier.py \
+  CORPUS/ml_boundary_candidates.corpus.csv \
+  --split-manifest-csv CORPUS/ml_boundary_splits.csv \
+  --mode tabular_only \
+  --output-dir CORPUS/ml_boundary_models/run-001
+```
+
+4. Evaluate trained predictors on the `test` split:
+
+```bash
+uv run --no-default-groups --group autogluon \
+  python3 scripts/pipeline/evaluate_ml_boundary_verifier.py \
+  CORPUS/ml_boundary_candidates.corpus.csv \
+  --model-dir CORPUS/ml_boundary_models/run-001 \
+  --split-manifest-csv CORPUS/ml_boundary_splits.csv \
+  --output-dir CORPUS/ml_boundary_eval/run-001
+```
+
+Notes:
+
+- `tabular_plus_thumbnail` preserves ordered image inputs through:
+  - `frame_01_thumb_path` ... `frame_05_thumb_path`
+- the merged corpus split requires at least 3 candidate rows total
+- evaluation is real model inference on the explicit `test` split (not truth replay)
 
 ## Export Profiles
 

@@ -78,6 +78,71 @@ Image-only stage 1 pipeline:
 - `build_photo_segments.py` -> `_workspace/photo_segments.csv`
 - `build_photo_review_index.py` -> `_workspace/performance_proxy_index.json`
 
+ML boundary verifier:
+
+- `export_ml_boundary_reviewed_truth.py` -> `_workspace/ml_boundary_reviewed_truth.csv` from `performance_proxy_index.json` + `review_state.json`
+- `build_ml_boundary_candidate_dataset.py` -> `_workspace/ml_boundary_candidates.csv`, `_workspace/ml_boundary_attrition.json`, `_workspace/ml_boundary_dataset_report.json`
+- `validate_ml_boundary_dataset.py` -> validates candidate CSV + attrition JSON and can write `_workspace/ml_boundary_validation_report.json`
+- public dataset/model contract is `window_radius` only; external `window_size` / `overlap` columns are rejected
+- `run_ml_boundary_pipeline.py` -> end-to-end orchestrator (per-day export/build/validate, merged-corpus split, train, evaluate)
+- `train_ml_boundary_verifier.py` -> writes training artifacts:
+  - `.../ml_boundary_models/RUN/training_plan.json`
+  - `.../ml_boundary_models/RUN/training_metadata.json`
+  - `.../ml_boundary_models/RUN/feature_columns.json`
+  - `.../ml_boundary_models/RUN/training_summary.json`
+- `evaluate_ml_boundary_verifier.py` -> writes evaluation metrics from model inference on test split:
+  - `.../ml_boundary_eval/RUN/metrics.json`
+
+VLM image-boundary probe contract:
+
+- `probe_vlm_photo_boundaries.py` uses `--window-radius` on the CLI and `VLM_WINDOW_RADIUS` in `.vocatio`
+- `vlm_boundary_results.csv` and VLM run metadata persist `window_radius` only
+- `build_vlm_photo_boundary_gui_index.py` and `review_performance_proxy_gui.py` require matching `window_radius` values across run metadata, result rows, and ML hint artifacts
+- legacy VLM probe CSVs with `window_size` / `overlap` are not resumable; start a fresh run with `--new-run`
+
+ML boundary corpus split surface:
+
+- all input days are merged into one candidate corpus first
+- train/validation/test split is applied to merged candidate rows
+- input days are data sources, not split units
+- one-day runs are allowed when the merged corpus has at least 3 candidate rows
+- `--split-strategy` accepts `global_random` or `global_stratified`
+- `global_stratified` is the requested default, but the pipeline may fall back to `global_random` when stratified allocation or held-out coverage cannot be satisfied
+- exact defaults:
+  - `split_strategy = global_stratified`
+  - `train_fraction = 0.70`
+  - `validation_fraction = 0.15`
+  - `test_fraction = 0.15`
+  - `split_seed = 42`
+- fraction and seed controls:
+  - `--train-fraction`
+  - `--validation-fraction`
+  - `--test-fraction`
+  - `--split-seed`
+  - `--required-heldout-classes`
+- `.vocatio` keys on the first day directory:
+  - `ML_SPLIT_STRATEGY`
+  - `ML_SPLIT_TRAIN_FRACTION`
+  - `ML_SPLIT_VALIDATION_FRACTION`
+  - `ML_SPLIT_TEST_FRACTION`
+  - `ML_SPLIT_SEED`
+- CLI flags override `.vocatio`; `.vocatio` overrides built-in defaults
+
+```bash
+ML_SPLIT_STRATEGY=global_stratified
+ML_SPLIT_TRAIN_FRACTION=0.70
+ML_SPLIT_VALIDATION_FRACTION=0.15
+ML_SPLIT_TEST_FRACTION=0.15
+ML_SPLIT_SEED=42
+```
+
+Important for `uv` users:
+
+- the ML verifier train/eval scaffold should run under the isolated `autogluon` dependency group
+- use:
+  - `uv run --no-default-groups --group autogluon ...`
+- this avoids the intentional `torch` / `torchvision` conflict with the default `gpu` group
+
 Manual smoke checklist:
 
 ```bash
@@ -91,3 +156,18 @@ python3 scripts/pipeline/build_photo_segments.py /data/20260323
 python3 scripts/pipeline/build_photo_review_index.py /data/20260323
 python3 scripts/pipeline/review_performance_proxy_gui.py /data/20260323 --index performance_proxy_index.json
 ```
+
+ML boundary verifier checklist:
+
+```bash
+python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 --mode tabular_only --split-strategy global_stratified --train-fraction 0.70 --validation-fraction 0.15 --test-fraction 0.15 --split-seed 42 --model-run-id run-001
+python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 /data/20260324 /data/20260325 --mode tabular_only --split-strategy global_stratified --model-run-id run-001
+python3 scripts/pipeline/run_ml_boundary_pipeline.py /data/20260323 /data/20260324 /data/20260325 --mode tabular_only --prepare-only --model-run-id run-001
+```
+
+After a pipeline run, inspect `FIRST_DAY_WORKSPACE/ml_boundary_corpus/ml_boundary_pipeline_summary.json` and verify:
+
+- `window_radius` and `candidate_rule_params_json` to confirm the corpus/train/eval flow stayed on the radius contract
+- `requested_split_strategy`
+- `effective_split_strategy`
+- `required_heldout_classes` to confirm which held-out coverage classes were enforced for the run
