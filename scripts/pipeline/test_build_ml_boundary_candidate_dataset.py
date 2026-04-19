@@ -11,6 +11,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
 from build_ml_boundary_candidate_dataset import (
     DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1,
+    _serialize_candidate_row,
     CANDIDATE_ROW_HEADERS,
     build_candidate_rows,
     candidate_row_headers,
@@ -186,7 +187,7 @@ def test_build_candidate_rows_preserves_ordered_frame_fields_and_labels() -> Non
     assert row["window_radius"] == 2
     assert row["candidate_rule_name"] == "gap_threshold"
     assert row["candidate_rule_version"] == "gap-v1"
-    assert row["candidate_rule_params_json"] == "{\"gap_threshold_seconds\":10.0}"
+    assert row["candidate_rule_params_json"] == "{\"gap_threshold_seconds\":10.0,\"window_radius\":2}"
     assert row["descriptor_schema_version"] == DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1
     assert row["split_name"] == ""
     assert row["frame_01_thumb_path"] == ""
@@ -237,6 +238,66 @@ def test_build_candidate_rows_produces_deterministic_candidate_ids() -> None:
         row["candidate_id"] for row in second_rows
     ]
     assert first_rows[0]["candidate_id"] == second_rows[0]["candidate_id"]
+
+
+def test_build_candidate_rows_include_window_radius_in_rule_params_and_candidate_identity() -> None:
+    photos = [
+        {"photo_id": "p1", "order_idx": 1, "timestamp": 0.0, "relative_path": "cam/p1.jpg"},
+        {"photo_id": "p2", "order_idx": 2, "timestamp": 1.0, "relative_path": "cam/p2.jpg"},
+        {"photo_id": "p3", "order_idx": 3, "timestamp": 2.0, "relative_path": "cam/p3.jpg"},
+        {"photo_id": "p4", "order_idx": 4, "timestamp": 30.0, "relative_path": "cam/p4.jpg"},
+        {"photo_id": "p5", "order_idx": 5, "timestamp": 31.0, "relative_path": "cam/p5.jpg"},
+        {"photo_id": "p6", "order_idx": 6, "timestamp": 32.0, "relative_path": "cam/p6.jpg"},
+    ]
+    truth = build_final_photo_truth(
+        [
+            {"photo_id": "p1", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p2", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p3", "segment_id": "s1", "segment_type": "performance"},
+            {"photo_id": "p4", "segment_id": "s2", "segment_type": "ceremony"},
+            {"photo_id": "p5", "segment_id": "s2", "segment_type": "ceremony"},
+            {"photo_id": "p6", "segment_id": "s2", "segment_type": "ceremony"},
+        ]
+    )
+
+    radius_two_rows, radius_two_report = build_candidate_rows(
+        photos=photos,
+        truth=truth,
+        gap_threshold_seconds=10.0,
+        day_id="20250325",
+        candidate_rule_version="gap-v1",
+        window_radius=2,
+    )
+    radius_three_rows, radius_three_report = build_candidate_rows(
+        photos=photos,
+        truth=truth,
+        gap_threshold_seconds=10.0,
+        day_id="20250325",
+        candidate_rule_version="gap-v1",
+        window_radius=3,
+    )
+
+    assert radius_two_report["candidate_count_retained"] == 1
+    assert radius_three_report["candidate_count_retained"] == 1
+    assert radius_two_rows[0]["center_left_photo_id"] == radius_three_rows[0]["center_left_photo_id"] == "p3"
+    assert radius_two_rows[0]["center_right_photo_id"] == radius_three_rows[0]["center_right_photo_id"] == "p4"
+    assert radius_two_rows[0]["candidate_rule_params_json"] == (
+        "{\"gap_threshold_seconds\":10.0,\"window_radius\":2}"
+    )
+    assert radius_three_rows[0]["candidate_rule_params_json"] == (
+        "{\"gap_threshold_seconds\":10.0,\"window_radius\":3}"
+    )
+    assert radius_two_rows[0]["candidate_id"] != radius_three_rows[0]["candidate_id"]
+
+
+def test_serialize_candidate_row_requires_window_radius() -> None:
+    with pytest.raises(ValueError, match="window_radius"):
+        _serialize_candidate_row(
+            {
+                "candidate_id": "abc123",
+                "day_id": "20250325",
+            }
+        )
 
 
 def test_build_candidate_rows_uses_right_side_segment_type_and_boundary_labels() -> None:

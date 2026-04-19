@@ -180,6 +180,25 @@ def test_build_temporal_gap_features_for_radius_three() -> None:
     assert features["gap_56"] == 1.0
 
 
+def test_build_candidate_feature_row_requires_candidate_window_radius() -> None:
+    candidate = {
+        "frame_01_timestamp": 0.0,
+        "frame_02_timestamp": 1.0,
+        "frame_03_timestamp": 2.0,
+        "frame_04_timestamp": 3.0,
+        "frame_01_photo_id": "p1",
+        "frame_02_photo_id": "p2",
+        "frame_03_photo_id": "p3",
+        "frame_04_photo_id": "p4",
+    }
+
+    with pytest.raises(ValueError, match="candidate window_radius is required"):
+        build_candidate_feature_row(candidate, descriptors={}, embeddings=None)
+
+    with pytest.raises(ValueError, match="candidate window_radius is required"):
+        build_candidate_feature_row(candidate, descriptors={}, embeddings=None, window_radius=2)
+
+
 def test_build_candidate_feature_row_includes_pairwise_heuristic_features() -> None:
     candidate = _radius_two_candidate(timestamps=["0", "5", "10", "40"])
     heuristic_features = {
@@ -557,6 +576,29 @@ def test_build_candidate_feature_row_handles_zero_non_central_median() -> None:
     assert row["gap_ratio"] == math.inf
     assert row["gap_is_local_outlier"] == 1
     assert row["cross_boundary_outlier_score"] == math.inf
+
+
+def test_build_candidate_feature_row_radius_one_keeps_outlier_features_finite() -> None:
+    candidate = {
+        "window_radius": 1,
+        "frame_01_timestamp": 0.0,
+        "frame_02_timestamp": 5.0,
+        "frame_01_photo_id": "p1",
+        "frame_02_photo_id": "p2",
+    }
+    embeddings = {
+        "p1": [1.0, 0.0],
+        "p2": [0.0, 1.0],
+    }
+
+    row = build_candidate_feature_row(candidate, descriptors={}, embeddings=embeddings)
+
+    assert row["gap_12"] == 5.0
+    assert row["gap_ratio"] == 1.0
+    assert row["gap_is_local_outlier"] == 0
+    assert row["left_consistency_score"] == 0.0
+    assert row["right_consistency_score"] == 0.0
+    assert row["cross_boundary_outlier_score"] == 0.0
 
 
 def test_build_candidate_feature_row_rejects_non_finite_timestamps() -> None:

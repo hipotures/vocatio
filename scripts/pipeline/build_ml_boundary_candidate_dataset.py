@@ -200,13 +200,38 @@ def _extract_optional_workspace_path(row: Mapping[str, object], field_name: str)
     return str(value).strip()
 
 
-def _build_rule_params_json(*, gap_threshold_seconds: float) -> str:
+def _require_window_radius(value: object, *, field_name: str = "window_radius") -> int:
+    if value is None or not str(value).strip():
+        raise ValueError(f"{field_name} is required and must not be blank")
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer")
+    try:
+        window_radius = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be an integer") from exc
+    if window_radius < 1:
+        raise ValueError(f"{field_name} must be at least 1")
+    return window_radius
+
+
+def _build_rule_params_json(*, gap_threshold_seconds: float, window_radius: int) -> str:
     return json.dumps(
-        {"gap_threshold_seconds": float(gap_threshold_seconds)},
+        {
+            "gap_threshold_seconds": float(gap_threshold_seconds),
+            "window_radius": int(window_radius),
+        },
         separators=(",", ":"),
         ensure_ascii=True,
         sort_keys=True,
     )
+
+
+def _candidate_identity_rule_version(
+    *,
+    candidate_rule_version: str,
+    candidate_rule_params_json: str,
+) -> str:
+    return f"{candidate_rule_version}|{candidate_rule_params_json}"
 
 
 def _resolve_workspace_path(workspace_dir: Path, value: Optional[str], default_name: str) -> Path:
@@ -290,8 +315,9 @@ def _manifest_photo_to_candidate_row(row: Mapping[str, str]) -> dict[str, object
 
 
 def _serialize_candidate_row(row: Mapping[str, object]) -> dict[str, object]:
+    window_radius = _require_window_radius(row.get("window_radius"))
     headers = candidate_row_headers(
-        window_radius=int(row.get("window_radius", DEFAULT_WINDOW_RADIUS)),
+        window_radius=window_radius,
         include_thumbnail=True,
     )
     serialized: dict[str, object] = {}
@@ -354,7 +380,8 @@ def build_candidate_rows(
         "true_boundary_coverage_after_exclusions": 0,
     }
     candidate_rule_params_json = _build_rule_params_json(
-        gap_threshold_seconds=gap_threshold_seconds
+        gap_threshold_seconds=gap_threshold_seconds,
+        window_radius=window_radius,
     )
     window_size = window_radius_to_window_size(window_radius)
 
@@ -396,7 +423,10 @@ def build_candidate_rows(
                     day_id=day_id,
                     center_left_photo_id=left_photo_id,
                     center_right_photo_id=right_photo_id,
-                    candidate_rule_version=candidate_rule_version,
+                    candidate_rule_version=_candidate_identity_rule_version(
+                        candidate_rule_version=candidate_rule_version,
+                        candidate_rule_params_json=candidate_rule_params_json,
+                    ),
                 ),
                 "day_id": day_id,
                 "window_radius": window_radius,

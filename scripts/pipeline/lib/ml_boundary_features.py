@@ -284,32 +284,16 @@ def _resolve_candidate_window_radius(
             raise ValueError("window_radius must be at least 1")
 
     candidate_radius = candidate.get("window_radius")
-    if candidate_radius is not None and str(candidate_radius).strip():
-        parsed_candidate_radius = int(str(candidate_radius).strip())
-        if parsed_candidate_radius < 1:
-            raise ValueError("window_radius must be at least 1")
-        if explicit_radius is not None and explicit_radius != parsed_candidate_radius:
-            raise ValueError(
-                f"window_radius mismatch: candidate={parsed_candidate_radius}, expected={explicit_radius}"
-            )
-        return parsed_candidate_radius
-
-    if explicit_radius is not None:
-        return explicit_radius
-
-    frame_count = 0
-    while True:
-        next_index = frame_count + 1
-        field_prefix = f"frame_{next_index:02d}_"
-        if any(key.startswith(field_prefix) for key in candidate):
-            frame_count += 1
-            continue
-        break
-    if frame_count == 0:
+    if candidate_radius is None or not str(candidate_radius).strip():
         raise ValueError("candidate window_radius is required")
-    if frame_count % 2 != 0:
-        raise ValueError("candidate window must contain an even number of frames")
-    return frame_count // 2
+    parsed_candidate_radius = int(str(candidate_radius).strip())
+    if parsed_candidate_radius < 1:
+        raise ValueError("window_radius must be at least 1")
+    if explicit_radius is not None and explicit_radius != parsed_candidate_radius:
+        raise ValueError(
+            f"window_radius mismatch: candidate={parsed_candidate_radius}, expected={explicit_radius}"
+        )
+    return parsed_candidate_radius
 
 
 def _require_embedding(
@@ -422,8 +406,10 @@ def build_gap_features(
             ),
             "local_gap_median": local_gap_median,
             "gap_ratio": safe_divide(gaps[center_gap_index], local_gap_median),
-            "gap_is_local_outlier": int(
-                gaps[center_gap_index] > GAP_OUTLIER_K * non_central_gap_median
+            "gap_is_local_outlier": (
+                int(gaps[center_gap_index] > GAP_OUTLIER_K * non_central_gap_median)
+                if non_central_gaps
+                else 0
             ),
             "max_gap_in_window": max(gaps),
             "gap_variance": float(pvariance(gaps)),
@@ -542,9 +528,13 @@ def build_candidate_feature_row(
                 if right_internal_embed_dists
                 else 0.0
             ),
-            "cross_boundary_outlier_score": safe_divide(
-                embed_dists[center_pair_index],
-                non_central_embed_median,
+            "cross_boundary_outlier_score": (
+                safe_divide(
+                    embed_dists[center_pair_index],
+                    non_central_embed_median,
+                )
+                if non_central_embed_dists
+                else 0.0
             ),
         }
     )
