@@ -168,3 +168,9 @@ result = whisperx.align(
 - Design and implement a single canonical media indexing file that can serve both the legacy audio-first pipeline and the new image-only pipeline.
 - Keep media identity stable across both flows, with one shared contract for source paths, relative paths, timestamps, and logical ordering.
 - Ensure the shared index can be rebuilt without breaking legacy artifacts already stored under `_workspace`.
+
+## ML Boundary Follow-Up
+
+- Add a separate `left_segment_type` model for the ML boundary pipeline.
+- Keep `boundary` and `right_segment_type` as separate predictors; do not try to force a fake multilabel setup in AutoGluon.
+- Revisit how `left_segment_type` and `right_segment_type` should be exposed to the downstream VLM prompt after the extra model exists.
