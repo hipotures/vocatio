@@ -10,13 +10,13 @@ from lib.photo_pre_model_annotations import (
     build_photo_pre_model_descriptor_field_registry,
     flatten_annotation_data,
 )
+from lib.window_radius_contract import window_radius_to_window_size
 
 GAP_OUTLIER_K = 3.0
 CANONICAL_MISSING = "__missing__"
 HEURISTIC_NUMERIC_MISSING = math.nan
 DESCRIPTOR_LIST_DELIMITERS = (",", ";", "|", "/")
 DESCRIPTOR_MAX_VALUES_PER_FIELD = 5
-HEURISTIC_PAIR_NAMES = ("12", "23", "34", "45")
 CANONICAL_COSTUME_TYPE_VOCABULARY = frozenset(
     {
         "ballgown",
@@ -263,6 +263,55 @@ def _require_photo_id(candidate: Mapping[str, object], field_name: str) -> str:
     return str(value)
 
 
+def _frame_numbers_for_window_radius(window_radius: int) -> list[int]:
+    return list(range(1, window_radius_to_window_size(window_radius) + 1))
+
+
+def _pair_names_for_window_radius(window_radius: int) -> list[str]:
+    frame_numbers = _frame_numbers_for_window_radius(window_radius)
+    return [f"{left}{right}" for left, right in zip(frame_numbers, frame_numbers[1:])]
+
+
+def _resolve_candidate_window_radius(
+    candidate: Mapping[str, object],
+    *,
+    window_radius: int | None = None,
+) -> int:
+    explicit_radius = window_radius
+    if explicit_radius is not None:
+        explicit_radius = int(explicit_radius)
+        if explicit_radius < 1:
+            raise ValueError("window_radius must be at least 1")
+
+    candidate_radius = candidate.get("window_radius")
+    if candidate_radius is not None and str(candidate_radius).strip():
+        parsed_candidate_radius = int(str(candidate_radius).strip())
+        if parsed_candidate_radius < 1:
+            raise ValueError("window_radius must be at least 1")
+        if explicit_radius is not None and explicit_radius != parsed_candidate_radius:
+            raise ValueError(
+                f"window_radius mismatch: candidate={parsed_candidate_radius}, expected={explicit_radius}"
+            )
+        return parsed_candidate_radius
+
+    if explicit_radius is not None:
+        return explicit_radius
+
+    frame_count = 0
+    while True:
+        next_index = frame_count + 1
+        field_prefix = f"frame_{next_index:02d}_"
+        if any(key.startswith(field_prefix) for key in candidate):
+            frame_count += 1
+            continue
+        break
+    if frame_count == 0:
+        raise ValueError("candidate window_radius is required")
+    if frame_count % 2 != 0:
+        raise ValueError("candidate window must contain an even number of frames")
+    return frame_count // 2
+
+
 def _require_embedding(
     embeddings: Mapping[str, Sequence[float]],
     *,
@@ -299,9 +348,11 @@ def _normalize_heuristic_label(value: object) -> str:
 
 def build_heuristic_feature_block(
     heuristic_features: Mapping[str, Mapping[str, object]] | None,
+    *,
+    window_radius: int,
 ) -> dict[str, float | str]:
     row: dict[str, float | str] = {}
-    for pair_name in HEURISTIC_PAIR_NAMES:
+    for pair_name in _pair_names_for_window_radius(window_radius):
         pair_features: Mapping[str, object]
         if heuristic_features is None:
             pair_features = {}
@@ -330,58 +381,89 @@ def build_heuristic_feature_block(
     return row
 
 
+def build_gap_features(
+    candidate: Mapping[str, object],
+    *,
+    window_radius: int,
+) -> dict[str, float | int]:
+    frame_numbers = _frame_numbers_for_window_radius(window_radius)
+    timestamps = [
+        _require_timestamp(candidate, f"frame_{frame_index:02d}_timestamp")
+        for frame_index in frame_numbers
+    ]
+    if any(right < left for left, right in zip(timestamps, timestamps[1:])):
+        raise ValueError("frame timestamps must be non-decreasing")
+
+    gaps = [right - left for left, right in zip(timestamps, timestamps[1:])]
+    pair_names = _pair_names_for_window_radius(window_radius)
+    center_gap_index = window_radius - 1
+    non_central_gaps = [
+        gap_value
+        for index, gap_value in enumerate(gaps)
+        if index != center_gap_index
+    ]
+    local_gap_median = float(median(gaps))
+    non_central_gap_median = float(median(non_central_gaps)) if non_central_gaps else 0.0
+    left_internal_gaps = gaps[:center_gap_index]
+    right_internal_gaps = gaps[center_gap_index + 1 :]
+
+    row: dict[str, float | int] = {
+        f"gap_{pair_name}": gap_value
+        for pair_name, gap_value in zip(pair_names, gaps, strict=True)
+    }
+    row.update(
+        {
+            "center_gap_seconds": gaps[center_gap_index],
+            "left_internal_gap_mean": (
+                sum(left_internal_gaps) / len(left_internal_gaps) if left_internal_gaps else 0.0
+            ),
+            "right_internal_gap_mean": (
+                sum(right_internal_gaps) / len(right_internal_gaps) if right_internal_gaps else 0.0
+            ),
+            "local_gap_median": local_gap_median,
+            "gap_ratio": safe_divide(gaps[center_gap_index], local_gap_median),
+            "gap_is_local_outlier": int(
+                gaps[center_gap_index] > GAP_OUTLIER_K * non_central_gap_median
+            ),
+            "max_gap_in_window": max(gaps),
+            "gap_variance": float(pvariance(gaps)),
+        }
+    )
+    return row
+
+
 def build_candidate_feature_row(
     candidate: Mapping[str, object],
     descriptors: Mapping[str, object],
     embeddings: Mapping[str, Sequence[float]] | None,
     descriptor_field_registry: Mapping[str, str] | None = None,
     heuristic_features: Mapping[str, Mapping[str, object]] | None = None,
+    *,
+    window_radius: int | None = None,
 ) -> dict[str, float | int | str]:
-
-    timestamps = [
-        _require_timestamp(candidate, "frame_01_timestamp"),
-        _require_timestamp(candidate, "frame_02_timestamp"),
-        _require_timestamp(candidate, "frame_03_timestamp"),
-        _require_timestamp(candidate, "frame_04_timestamp"),
-        _require_timestamp(candidate, "frame_05_timestamp"),
-    ]
-    if any(right < left for left, right in zip(timestamps, timestamps[1:])):
-        raise ValueError("frame timestamps must be non-decreasing")
-
-    gaps = [
-        timestamps[1] - timestamps[0],
-        timestamps[2] - timestamps[1],
-        timestamps[3] - timestamps[2],
-        timestamps[4] - timestamps[3],
-    ]
-    non_central_gaps = [gaps[0], gaps[1], gaps[3]]
-    local_gap_median = float(median(gaps))
-    non_central_gap_median = float(median(non_central_gaps))
-
-    row: dict[str, float | int | str] = {
-        "gap_12": gaps[0],
-        "gap_23": gaps[1],
-        "gap_34": gaps[2],
-        "gap_45": gaps[3],
-        "center_gap_seconds": gaps[2],
-        "left_internal_gap_mean": (gaps[0] + gaps[1]) / 2.0,
-        "right_internal_gap_mean": gaps[3],
-        "local_gap_median": local_gap_median,
-        "gap_ratio": safe_divide(gaps[2], local_gap_median),
-        "gap_is_local_outlier": int(gaps[2] > GAP_OUTLIER_K * non_central_gap_median),
-        "max_gap_in_window": max(gaps),
-        "gap_variance": float(pvariance(gaps)),
-    }
-    row.update(build_heuristic_feature_block(heuristic_features))
+    resolved_window_radius = _resolve_candidate_window_radius(
+        candidate,
+        window_radius=window_radius,
+    )
+    frame_numbers = _frame_numbers_for_window_radius(resolved_window_radius)
+    pair_names = _pair_names_for_window_radius(resolved_window_radius)
+    row: dict[str, float | int | str] = dict(
+        build_gap_features(candidate, window_radius=resolved_window_radius)
+    )
+    row.update(
+        build_heuristic_feature_block(
+            heuristic_features,
+            window_radius=resolved_window_radius,
+        )
+    )
 
     left_photo_ids = [
-        _require_photo_id(candidate, "frame_01_photo_id"),
-        _require_photo_id(candidate, "frame_02_photo_id"),
-        _require_photo_id(candidate, "frame_03_photo_id"),
+        _require_photo_id(candidate, f"frame_{frame_index:02d}_photo_id")
+        for frame_index in frame_numbers[:resolved_window_radius]
     ]
     right_photo_ids = [
-        _require_photo_id(candidate, "frame_04_photo_id"),
-        _require_photo_id(candidate, "frame_05_photo_id"),
+        _require_photo_id(candidate, f"frame_{frame_index:02d}_photo_id")
+        for frame_index in frame_numbers[resolved_window_radius:]
     ]
     descriptor_map = {photo_id: value for photo_id, value in descriptors.items() if isinstance(photo_id, str)}
     left_descriptor_records = [
@@ -414,29 +496,56 @@ def build_candidate_feature_row(
         return row
 
     ordered_embeddings = [
-        _require_embedding(embeddings, candidate=candidate, field_name="frame_01_photo_id"),
-        _require_embedding(embeddings, candidate=candidate, field_name="frame_02_photo_id"),
-        _require_embedding(embeddings, candidate=candidate, field_name="frame_03_photo_id"),
-        _require_embedding(embeddings, candidate=candidate, field_name="frame_04_photo_id"),
-        _require_embedding(embeddings, candidate=candidate, field_name="frame_05_photo_id"),
+        _require_embedding(
+            embeddings,
+            candidate=candidate,
+            field_name=f"frame_{frame_index:02d}_photo_id",
+        )
+        for frame_index in frame_numbers
     ]
     embed_dists = [
-        cosine_distance(ordered_embeddings[0], ordered_embeddings[1]),
-        cosine_distance(ordered_embeddings[1], ordered_embeddings[2]),
-        cosine_distance(ordered_embeddings[2], ordered_embeddings[3]),
-        cosine_distance(ordered_embeddings[3], ordered_embeddings[4]),
+        cosine_distance(left_embedding, right_embedding)
+        for left_embedding, right_embedding in zip(
+            ordered_embeddings,
+            ordered_embeddings[1:],
+        )
     ]
-    non_central_embed_median = float(median([embed_dists[0], embed_dists[1], embed_dists[3]]))
+    center_pair_index = resolved_window_radius - 1
+    non_central_embed_dists = [
+        value
+        for index, value in enumerate(embed_dists)
+        if index != center_pair_index
+    ]
+    non_central_embed_median = (
+        float(median(non_central_embed_dists))
+        if non_central_embed_dists
+        else 0.0
+    )
+    left_internal_embed_dists = embed_dists[:center_pair_index]
+    right_internal_embed_dists = embed_dists[center_pair_index + 1 :]
 
     row.update(
         {
-            "embed_dist_12": embed_dists[0],
-            "embed_dist_23": embed_dists[1],
-            "embed_dist_34": embed_dists[2],
-            "embed_dist_45": embed_dists[3],
-            "left_consistency_score": (embed_dists[0] + embed_dists[1]) / 2.0,
-            "right_consistency_score": embed_dists[3],
-            "cross_boundary_outlier_score": safe_divide(embed_dists[2], non_central_embed_median),
+            f"embed_dist_{pair_name}": embed_dist
+            for pair_name, embed_dist in zip(pair_names, embed_dists, strict=True)
+        }
+    )
+    row.update(
+        {
+            "left_consistency_score": (
+                sum(left_internal_embed_dists) / len(left_internal_embed_dists)
+                if left_internal_embed_dists
+                else 0.0
+            ),
+            "right_consistency_score": (
+                sum(right_internal_embed_dists) / len(right_internal_embed_dists)
+                if right_internal_embed_dists
+                else 0.0
+            ),
+            "cross_boundary_outlier_score": safe_divide(
+                embed_dists[center_pair_index],
+                non_central_embed_median,
+            ),
         }
     )
     return row

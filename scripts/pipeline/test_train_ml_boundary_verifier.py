@@ -55,14 +55,14 @@ def _candidate_row(
         {
             "candidate_id": canonical_candidate_id(
                 day_id=day_id,
-                center_left_photo_id=f"{day_id}-p3-{offset}",
-                center_right_photo_id=f"{day_id}-p4-{offset}",
+                center_left_photo_id=f"{day_id}-p2-{offset}",
+                center_right_photo_id=f"{day_id}-p3-{offset}",
                 candidate_rule_version="gap-v1",
             ),
             "day_id": day_id,
-            "window_size": "5",
-            "center_left_photo_id": f"{day_id}-p3-{offset}",
-            "center_right_photo_id": f"{day_id}-p4-{offset}",
+            "window_radius": "2",
+            "center_left_photo_id": f"{day_id}-p2-{offset}",
+            "center_right_photo_id": f"{day_id}-p3-{offset}",
             "left_segment_id": f"{day_id}-seg-a-{offset}",
             "right_segment_id": f"{day_id}-seg-b-{offset}",
             "left_segment_type": "performance",
@@ -74,11 +74,11 @@ def _candidate_row(
             "candidate_rule_params_json": "{\"gap_threshold_seconds\":20.0}",
             "descriptor_schema_version": "not_included_v1",
             "split_name": "",
-            "window_photo_ids": "[\"p1\",\"p2\",\"p3\",\"p4\",\"p5\"]",
-            "window_relative_paths": "[\"cam/p1.jpg\",\"cam/p2.jpg\",\"cam/p3.jpg\",\"cam/p4.jpg\",\"cam/p5.jpg\"]",
+            "window_photo_ids": "[\"p1\",\"p2\",\"p3\",\"p4\"]",
+            "window_relative_paths": "[\"cam/p1.jpg\",\"cam/p2.jpg\",\"cam/p3.jpg\",\"cam/p4.jpg\"]",
         }
     )
-    for frame_index in range(1, 6):
+    for frame_index in range(1, 5):
         suffix = f"{frame_index:02d}"
         row[f"frame_{suffix}_photo_id"] = f"{day_id}-p{frame_index}-{offset}"
         row[f"frame_{suffix}_relpath"] = f"cam/{day_id}-p{frame_index}-{offset}.jpg"
@@ -208,7 +208,6 @@ def test_image_feature_columns_for_thumbnail_mode_preserve_order() -> None:
         "frame_02_thumb_path",
         "frame_03_thumb_path",
         "frame_04_thumb_path",
-        "frame_05_thumb_path",
     ]
 
 
@@ -273,9 +272,10 @@ def test_validate_dataset_contract_requires_thumbnail_columns_for_thumbnail_mode
     dataset_path.write_text(
         (
             "day_id,segment_type,boundary,"
-            "frame_01_timestamp,frame_02_timestamp,frame_03_timestamp,frame_04_timestamp,frame_05_timestamp,"
-            "frame_01_photo_id,frame_02_photo_id,frame_03_photo_id,frame_04_photo_id,frame_05_photo_id\n"
-            "20250324,performance,0,1,2,3,4,5,p1,p2,p3,p4,p5\n"
+            "window_radius,"
+            "frame_01_timestamp,frame_02_timestamp,frame_03_timestamp,frame_04_timestamp,"
+            "frame_01_photo_id,frame_02_photo_id,frame_03_photo_id,frame_04_photo_id\n"
+            "20250324,performance,0,2,1,2,3,4,p1,p2,p3,p4\n"
         ),
         encoding="utf-8",
     )
@@ -364,6 +364,7 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert training_metadata == {
         "output_dir": str(output_dir),
         "mode": "tabular_only",
+        "window_radius": 2,
         "predictor_names": ["segment_type", "boundary"],
         "train_row_count": 1,
         "validation_row_count": 1,
@@ -372,11 +373,11 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "training_preset": "medium_quality",
         "train_minutes": None,
         "time_limit_seconds": None,
-        "missing_annotation_photo_count": 15,
+        "missing_annotation_photo_count": 12,
         "missing_annotation_candidate_count": 3,
         "heuristic_scores_source_available": False,
-        "total_heuristic_pair_count": 12,
-        "missing_heuristic_pair_count": 12,
+        "total_heuristic_pair_count": 9,
+        "missing_heuristic_pair_count": 9,
         "total_heuristic_candidate_count": 3,
         "missing_heuristic_candidate_count": 3,
         "artifacts": {
@@ -418,7 +419,7 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
             },
         },
         "descriptor_annotation_coverage": {
-            "missing_annotation_photo_count": 15,
+            "missing_annotation_photo_count": 12,
             "missing_annotation_candidate_count": 3,
         },
     }
@@ -433,14 +434,14 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "time_limit_seconds": None,
         "shared_feature_count": len(feature_columns["shared_feature_columns"]),
         "image_feature_count": 0,
-        "missing_annotation_photo_count": 15,
+        "missing_annotation_photo_count": 12,
         "missing_annotation_candidate_count": 3,
         "heuristic_boundary_coverage": {
             "source_available": False,
             "source_path": None,
-            "total_pair_count": 12,
+            "total_pair_count": 9,
             "covered_pair_count": 0,
-            "missing_pair_count": 12,
+            "missing_pair_count": 9,
             "total_candidate_count": 3,
             "complete_candidate_count": 0,
             "missing_candidate_count": 3,
@@ -485,7 +486,7 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
     assert FakeTabularPredictor.instances[1].fit_calls[0]["time_limit"] is None
     assert FakeTabularPredictor.instances[1].eval_metric == "f1"
     train_columns = FakeTabularPredictor.instances[0].fit_calls[0]["train_columns"]
-    assert "gap_34" in train_columns
+    assert "gap_23" in train_columns
     assert "candidate_id" not in train_columns
     assert "candidate_rule_name" not in train_columns
     assert "frame_01_relpath" not in train_columns
@@ -855,7 +856,7 @@ def test_train_cli_uses_multimodal_predictor_for_thumbnail_mode(
     assert len(FakeTabularPredictor.instances) == 0
     assert len(FakeMultiModalPredictor.instances) == 2
     train_columns = FakeMultiModalPredictor.instances[0].fit_calls[0]["train_columns"]
-    assert "gap_34" in train_columns
+    assert "gap_23" in train_columns
     assert "candidate_id" not in train_columns
     assert "frame_01_preview_path" not in train_columns
     assert FakeMultiModalPredictor.instances[0].fit_calls[0]["column_types"] == {
@@ -863,8 +864,46 @@ def test_train_cli_uses_multimodal_predictor_for_thumbnail_mode(
         "frame_02_thumb_path": "image_path",
         "frame_03_thumb_path": "image_path",
         "frame_04_thumb_path": "image_path",
-        "frame_05_thumb_path": "image_path",
     }
+
+
+def test_training_metadata_records_window_radius(tmp_path: Path, monkeypatch) -> None:
+    FakeTabularPredictor.instances.clear()
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    output_dir = tmp_path / "models" / "run-radius"
+    _write_candidate_csv(
+        dataset_path,
+        [
+            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+        ],
+    )
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"day_id": "20250324", "split_name": "train"},
+            {"day_id": "20250325", "split_name": "validation"},
+        ],
+    )
+    monkeypatch.setattr(
+        "train_ml_boundary_verifier.load_tabular_predictor_class",
+        lambda: FakeTabularPredictor,
+    )
+
+    exit_code = main(
+        [
+            str(dataset_path),
+            "--split-manifest-csv",
+            str(split_manifest_path),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    metadata = json.loads((output_dir / TRAINING_METADATA_FILENAME).read_text(encoding="utf-8"))
+    assert metadata["window_radius"] == 2
 
 
 def test_train_cli_rejects_existing_artifacts_without_overwrite(tmp_path: Path) -> None:

@@ -419,6 +419,12 @@ def _build_metrics_payload(
         mode=mode,
         require_train_validation=False,
     )
+    model_window_radius = int(training_metadata["window_radius"])
+    if training_bundle.window_radius != model_window_radius:
+        raise ValueError(
+            "ml model window_radius mismatch: "
+            f"runtime={training_bundle.window_radius}, artifact={model_window_radius}"
+        )
     if not training_bundle.test_rows.rows:
         raise ValueError(
             "split manifest must assign at least one test row for evaluation"

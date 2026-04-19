@@ -31,14 +31,14 @@ def _candidate_row(
         {
             "candidate_id": canonical_candidate_id(
                 day_id=day_id,
-                center_left_photo_id=f"{day_id}-p3",
-                center_right_photo_id=f"{day_id}-p4",
+                center_left_photo_id=f"{day_id}-p2",
+                center_right_photo_id=f"{day_id}-p3",
                 candidate_rule_version=candidate_rule_version,
             ),
             "day_id": day_id,
-            "window_size": "5",
-            "center_left_photo_id": f"{day_id}-p3",
-            "center_right_photo_id": f"{day_id}-p4",
+            "window_radius": "2",
+            "center_left_photo_id": f"{day_id}-p2",
+            "center_right_photo_id": f"{day_id}-p3",
             "left_segment_id": f"{day_id}-seg-a",
             "right_segment_id": f"{day_id}-seg-b",
             "left_segment_type": "performance",
@@ -50,11 +50,11 @@ def _candidate_row(
             "candidate_rule_params_json": "{\"gap_threshold_seconds\":20.0}",
             "descriptor_schema_version": "not_included_v1",
             "split_name": "",
-            "window_photo_ids": "[\"p1\",\"p2\",\"p3\",\"p4\",\"p5\"]",
-            "window_relative_paths": "[\"cam/p1.jpg\",\"cam/p2.jpg\",\"cam/p3.jpg\",\"cam/p4.jpg\",\"cam/p5.jpg\"]",
+            "window_photo_ids": "[\"p1\",\"p2\",\"p3\",\"p4\"]",
+            "window_relative_paths": "[\"cam/p1.jpg\",\"cam/p2.jpg\",\"cam/p3.jpg\",\"cam/p4.jpg\"]",
         }
     )
-    for frame_index in range(1, 6):
+    for frame_index in range(1, 5):
         suffix = f"{frame_index:02d}"
         row[f"frame_{suffix}_photo_id"] = f"{day_id}-p{frame_index}"
         row[f"frame_{suffix}_relpath"] = f"cam/{day_id}-p{frame_index}.jpg"
@@ -88,9 +88,9 @@ def _write_boundary_scores_csv(path: Path, rows: list[dict[str, str]]) -> None:
 
 def _shift_candidate_window(row: dict[str, str], *, day_id: str, first_photo_index: int) -> dict[str, str]:
     shifted_row = dict(row)
-    window_photo_ids = [f"{day_id}-p{photo_index}" for photo_index in range(first_photo_index, first_photo_index + 5)]
+    window_photo_ids = [f"{day_id}-p{photo_index}" for photo_index in range(first_photo_index, first_photo_index + 4)]
     window_relative_paths = [f"cam/{photo_id}.jpg" for photo_id in window_photo_ids]
-    for frame_index, photo_index in enumerate(range(first_photo_index, first_photo_index + 5), start=1):
+    for frame_index, photo_index in enumerate(range(first_photo_index, first_photo_index + 4), start=1):
         suffix = f"{frame_index:02d}"
         photo_id = f"{day_id}-p{photo_index}"
         shifted_row[f"frame_{suffix}_photo_id"] = photo_id
@@ -98,12 +98,12 @@ def _shift_candidate_window(row: dict[str, str], *, day_id: str, first_photo_ind
         shifted_row[f"frame_{suffix}_timestamp"] = str(float(photo_index))
         shifted_row[f"frame_{suffix}_thumb_path"] = f"thumb/{photo_id}.jpg"
         shifted_row[f"frame_{suffix}_preview_path"] = f"preview/{photo_id}.jpg"
-    shifted_row["center_left_photo_id"] = window_photo_ids[2]
-    shifted_row["center_right_photo_id"] = window_photo_ids[3]
+    shifted_row["center_left_photo_id"] = window_photo_ids[1]
+    shifted_row["center_right_photo_id"] = window_photo_ids[2]
     shifted_row["candidate_id"] = canonical_candidate_id(
         day_id=day_id,
-        center_left_photo_id=window_photo_ids[2],
-        center_right_photo_id=window_photo_ids[3],
+        center_left_photo_id=window_photo_ids[1],
+        center_right_photo_id=window_photo_ids[2],
         candidate_rule_version=str(shifted_row["candidate_rule_version"]),
     )
     shifted_row["window_photo_ids"] = json.dumps([photo_id.split("-", 1)[1] for photo_id in window_photo_ids])
@@ -178,6 +178,7 @@ def test_load_training_data_bundle_joins_split_manifest_and_selects_train_valida
         mode="tabular_plus_thumbnail",
     )
 
+    assert bundle.window_radius == 2
     assert bundle.train_rows["day_id"].tolist() == ["20250324"]
     assert bundle.validation_rows["day_id"].tolist() == ["20250325"]
     assert bundle.test_rows["day_id"].tolist() == ["20250326"]
@@ -190,9 +191,8 @@ def test_load_training_data_bundle_joins_split_manifest_and_selects_train_valida
         "frame_02_thumb_path",
         "frame_03_thumb_path",
         "frame_04_thumb_path",
-        "frame_05_thumb_path",
     ]
-    assert "gap_34" in bundle.shared_feature_columns
+    assert "gap_23" in bundle.shared_feature_columns
     assert "candidate_id" not in bundle.shared_feature_columns
     assert "candidate_rule_name" not in bundle.shared_feature_columns
     assert "frame_01_relpath" not in bundle.shared_feature_columns
@@ -309,8 +309,8 @@ def test_load_training_data_bundle_requires_thumbnail_columns_for_thumbnail_mode
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
     row = _candidate_row(day_id="20250324", segment_type="performance", boundary="0")
-    row.pop("frame_05_thumb_path")
-    headers = [header for header in CANDIDATE_ROW_HEADERS if header != "frame_05_thumb_path"]
+    row.pop("frame_04_thumb_path")
+    headers = [header for header in CANDIDATE_ROW_HEADERS if header != "frame_04_thumb_path"]
     with dataset_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=headers)
         writer.writeheader()
@@ -320,7 +320,7 @@ def test_load_training_data_bundle_requires_thumbnail_columns_for_thumbnail_mode
         [{"day_id": "20250324", "split_name": "train"}],
     )
 
-    with pytest.raises(ValueError, match="missing required columns: frame_05_thumb_path"):
+    with pytest.raises(ValueError, match="missing required columns: frame_04_thumb_path"):
         load_training_data_bundle(
             dataset_path,
             split_manifest_path=split_manifest_path,
@@ -334,7 +334,7 @@ def test_load_training_data_bundle_requires_relpath_columns_for_heuristic_joins(
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
     row = _candidate_row(day_id="20250324", segment_type="performance", boundary="0")
-    missing_column = "frame_05_relpath"
+    missing_column = "frame_04_relpath"
     row.pop(missing_column)
     headers = [header for header in CANDIDATE_ROW_HEADERS if header != missing_column]
     with dataset_path.open("w", newline="", encoding="utf-8") as handle:
@@ -353,6 +353,33 @@ def test_load_training_data_bundle_requires_relpath_columns_for_heuristic_joins(
             mode="tabular_only",
             require_train_validation=False,
         )
+
+
+def test_training_bundle_reads_window_radius_from_candidates(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    _write_candidate_csv(
+        dataset_path,
+        [
+            _candidate_row(day_id="20250324", segment_type="performance", boundary="0"),
+            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1"),
+        ],
+    )
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"day_id": "20250324", "split_name": "train"},
+            {"day_id": "20250325", "split_name": "validation"},
+        ],
+    )
+
+    bundle = load_training_data_bundle(
+        dataset_path,
+        split_manifest_path=split_manifest_path,
+        mode="tabular_only",
+    )
+
+    assert bundle.window_radius == 2
 
 
 def test_load_training_data_bundle_rejects_missing_labels(tmp_path: Path) -> None:
@@ -443,7 +470,7 @@ def test_load_training_data_bundle_reports_missing_annotation_counts(tmp_path: P
         annotation_dir=annotation_dir,
     )
 
-    assert bundle.missing_annotation_photo_count == 4
+    assert bundle.missing_annotation_photo_count == 3
     assert bundle.missing_annotation_candidate_count == 1
 
 
@@ -564,14 +591,14 @@ def test_load_training_data_bundle_joins_heuristic_boundary_scores_and_counts_mi
     assert bundle.train_rows["heuristic_dino_dist_12"].tolist() == [0.101]
     assert bundle.train_rows["heuristic_boundary_score_23"].tolist() == [0.222]
     assert bundle.train_rows["heuristic_smoothed_distance_zscore_34"].tolist() == [0.303]
-    assert bundle.train_rows["heuristic_time_gap_boost_45"].tolist() == [0.3]
+    assert bundle.train_rows["heuristic_time_gap_boost_34"].tolist() == [0.2]
     assert bundle.train_rows["heuristic_boundary_label_34"].tolist() == ["hard"]
     assert math.isnan(bundle.validation_rows["heuristic_dino_dist_34"].tolist()[0])
-    assert math.isnan(bundle.validation_rows["heuristic_boundary_score_45"].tolist()[0])
+    assert math.isnan(bundle.validation_rows["heuristic_boundary_score_34"].tolist()[0])
     assert bundle.validation_rows["heuristic_boundary_label_34"].tolist() == [CANONICAL_MISSING]
     assert bundle.heuristic_scores_path == boundary_scores_path
-    assert bundle.total_heuristic_pair_count == 8
-    assert bundle.missing_heuristic_pair_count == 2
+    assert bundle.total_heuristic_pair_count == 6
+    assert bundle.missing_heuristic_pair_count == 1
     assert bundle.total_heuristic_candidate_count == 2
     assert bundle.missing_heuristic_candidate_count == 1
 
@@ -683,7 +710,7 @@ def test_load_training_data_bundle_extends_descriptor_registry_from_dataset_anno
         "dance_style_hint": "ballet",
     }
     for day_id in ("20250324", "20250325"):
-        for frame_index in range(1, 6):
+        for frame_index in range(1, 5):
             relative_path = f"cam/{day_id}-p{frame_index}.jpg"
             payload = dict(default_payload)
             if day_id == "20250324":
@@ -713,9 +740,9 @@ def test_load_training_data_bundle_extends_descriptor_registry_from_dataset_anno
     assert bundle.train_rows["left_appearance_silhouette"].tolist() == ["clean-line"]
     assert bundle.train_rows["right_appearance_accents_01"].tolist() == [CANONICAL_MISSING]
     assert bundle.validation_rows["left_appearance_silhouette"].tolist() == [CANONICAL_MISSING]
-    assert bundle.validation_rows["right_appearance_accents_01"].tolist() == ["blue"]
-    assert bundle.validation_rows["right_appearance_accents_02"].tolist() == ["gold"]
-    assert bundle.validation_rows["right_appearance_accents_03"].tolist() == ["silver"]
+    assert bundle.validation_rows["right_appearance_accents_01"].tolist() == ["gold"]
+    assert bundle.validation_rows["right_appearance_accents_02"].tolist() == ["silver"]
+    assert bundle.validation_rows["right_appearance_accents_03"].tolist() == [CANONICAL_MISSING]
 
 
 def test_load_training_data_bundle_resolves_default_annotation_dir_for_corpus_dataset(
@@ -763,7 +790,7 @@ def test_load_training_data_bundle_resolves_default_annotation_dir_for_corpus_da
 
     assert bundle.annotation_dir == annotation_dir
     assert bundle.train_rows["left_upper_garment"].tolist() == ["top"]
-    assert bundle.missing_annotation_photo_count == 2
+    assert bundle.missing_annotation_photo_count == 1
 
 
 def test_load_training_data_bundle_skips_missing_counts_when_default_annotation_dir_is_absent(
@@ -793,7 +820,7 @@ def test_load_training_data_bundle_skips_missing_counts_when_default_annotation_
     assert bundle.heuristic_scores_path is None
     assert bundle.missing_annotation_photo_count == 0
     assert bundle.missing_annotation_candidate_count == 0
-    assert bundle.total_heuristic_pair_count == 4
-    assert bundle.missing_heuristic_pair_count == 4
+    assert bundle.total_heuristic_pair_count == 3
+    assert bundle.missing_heuristic_pair_count == 3
     assert bundle.total_heuristic_candidate_count == 1
     assert bundle.missing_heuristic_candidate_count == 1

@@ -11,6 +11,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 from lib.ml_boundary_features import (
     CANONICAL_MISSING,
     build_candidate_feature_row,
+    build_gap_features,
     cosine_distance,
     normalize_descriptor_value,
 )
@@ -33,6 +34,20 @@ def _default_descriptor_feature_columns() -> set[str]:
                 continue
             columns.add(f"{side_name}_{field_name}")
     return columns
+
+
+def _radius_two_candidate(
+    *,
+    timestamps: list[float | str],
+    photo_ids: list[str] | None = None,
+) -> dict[str, object]:
+    resolved_photo_ids = photo_ids or [f"p{index}" for index in range(1, len(timestamps) + 1)]
+    row: dict[str, object] = {"window_radius": 2}
+    for index, timestamp in enumerate(timestamps, start=1):
+        suffix = f"{index:02d}"
+        row[f"frame_{suffix}_timestamp"] = timestamp
+        row[f"frame_{suffix}_photo_id"] = resolved_photo_ids[index - 1]
+    return row
 
 
 def test_cosine_distance_uses_l2_normalized_embeddings() -> None:
@@ -113,68 +128,60 @@ def test_build_candidate_feature_row_computes_ordered_gap_features() -> None:
     candidate = {
         "frame_01_timestamp": 0.0,
         "frame_02_timestamp": 1.0,
-        "frame_03_timestamp": 2.0,
-        "frame_04_timestamp": 12.0,
-        "frame_05_timestamp": 13.0,
+        "frame_03_timestamp": 12.0,
+        "frame_04_timestamp": 13.0,
         "frame_01_photo_id": "p1",
         "frame_02_photo_id": "p2",
         "frame_03_photo_id": "p3",
         "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
+        "window_radius": 2,
     }
 
     row = build_candidate_feature_row(candidate, descriptors={}, embeddings=None)
 
     assert row["gap_12"] == 1.0
-    assert row["gap_23"] == 1.0
-    assert row["gap_34"] == 10.0
-    assert row["gap_45"] == 1.0
-    assert row["center_gap_seconds"] == 10.0
+    assert row["gap_23"] == 11.0
+    assert row["gap_34"] == 1.0
+    assert row["center_gap_seconds"] == 11.0
     assert row["left_internal_gap_mean"] == 1.0
     assert row["right_internal_gap_mean"] == 1.0
     assert row["local_gap_median"] == 1.0
-    assert row["gap_ratio"] == 10.0
+    assert row["gap_ratio"] == 11.0
     assert row["gap_is_local_outlier"] == 1
-    assert row["max_gap_in_window"] == 10.0
-    assert row["gap_variance"] == 15.1875
+    assert row["max_gap_in_window"] == 11.0
+    assert row["gap_variance"] == 22.22222222222222
 
 
 def test_build_candidate_feature_row_uses_non_central_gap_median_for_outlier_flag() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 1.0,
-        "frame_03_timestamp": 2.0,
-        "frame_04_timestamp": 6.0,
-        "frame_05_timestamp": 16.0,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 1.0, 6.0, 16.0])
 
     row = build_candidate_feature_row(candidate, descriptors={}, embeddings=None)
 
     assert row["gap_12"] == 1.0
-    assert row["gap_23"] == 1.0
-    assert row["gap_34"] == 4.0
-    assert row["gap_45"] == 10.0
-    assert row["gap_is_local_outlier"] == 1
+    assert row["gap_23"] == 5.0
+    assert row["gap_34"] == 10.0
+    assert row["gap_is_local_outlier"] == 0
+
+
+def test_build_temporal_gap_features_for_radius_three() -> None:
+    candidate = {
+        "frame_01_timestamp": 1.0,
+        "frame_02_timestamp": 2.0,
+        "frame_03_timestamp": 3.0,
+        "frame_04_timestamp": 8.0,
+        "frame_05_timestamp": 9.0,
+        "frame_06_timestamp": 10.0,
+    }
+
+    features = build_gap_features(candidate, window_radius=3)
+
+    assert features["gap_12"] == 1.0
+    assert features["gap_34"] == 5.0
+    assert features["gap_56"] == 1.0
 
 
 def test_build_candidate_feature_row_includes_pairwise_heuristic_features() -> None:
-    candidate = {
-        "frame_01_timestamp": "0",
-        "frame_02_timestamp": "5",
-        "frame_03_timestamp": "10",
-        "frame_04_timestamp": "40",
-        "frame_05_timestamp": "45",
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=["0", "5", "10", "40"])
     heuristic_features = {
         "12": {
             "dino_cosine_distance": 0.101,
@@ -192,7 +199,7 @@ def test_build_candidate_feature_row_includes_pairwise_heuristic_features() -> N
             "time_gap_boost": 0.5,
             "boundary_label": "soft",
         },
-        "45": {
+        "34": {
             "dino_cosine_distance": 0.123,
             "boundary_score": 0.234,
             "distance_zscore": -1.0,
@@ -216,44 +223,21 @@ def test_build_candidate_feature_row_includes_pairwise_heuristic_features() -> N
     assert row["heuristic_smoothed_distance_zscore_23"] == 0.444
     assert row["heuristic_time_gap_boost_23"] == 0.5
     assert row["heuristic_boundary_label_23"] == "soft"
-    assert row["heuristic_dino_dist_45"] == 0.123
-    assert row["heuristic_boundary_score_45"] == 0.234
-    assert row["heuristic_distance_zscore_45"] == -1.0
-    assert row["heuristic_smoothed_distance_zscore_45"] == 0.456
-    assert row["heuristic_time_gap_boost_45"] == 0.0
-    assert row["heuristic_boundary_label_45"] == "none"
-    assert isinstance(row["heuristic_dino_dist_34"], float)
-    assert not math.isfinite(row["heuristic_dino_dist_34"])
-    assert isinstance(row["heuristic_boundary_score_34"], float)
-    assert not math.isfinite(row["heuristic_boundary_score_34"])
-    assert isinstance(row["heuristic_distance_zscore_34"], float)
-    assert not math.isfinite(row["heuristic_distance_zscore_34"])
-    assert isinstance(row["heuristic_smoothed_distance_zscore_34"], float)
-    assert not math.isfinite(row["heuristic_smoothed_distance_zscore_34"])
-    assert isinstance(row["heuristic_time_gap_boost_34"], float)
-    assert not math.isfinite(row["heuristic_time_gap_boost_34"])
-    assert row["heuristic_boundary_label_34"] == CANONICAL_MISSING
+    assert row["heuristic_dino_dist_34"] == 0.123
+    assert row["heuristic_boundary_score_34"] == 0.234
+    assert row["heuristic_distance_zscore_34"] == -1.0
+    assert row["heuristic_smoothed_distance_zscore_34"] == 0.456
+    assert row["heuristic_time_gap_boost_34"] == 0.0
+    assert row["heuristic_boundary_label_34"] == "none"
 
 
 def test_build_candidate_feature_row_flattens_scalar_descriptor_fields() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 0.1,
-        "frame_03_timestamp": 0.2,
-        "frame_04_timestamp": 20.2,
-        "frame_05_timestamp": 20.3,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 0.1, 20.2, 20.3])
     descriptors = {
         "p1": {"upper_garment": "Top", "lower_garment": "Skirt"},
         "p2": {"upper_garment": "top", "lower_garment": "skirt"},
-        "p3": {"upper_garment": "Jacket", "lower_garment": "Skirt"},
+        "p3": {"upper_garment": "Top", "lower_garment": "Tutu"},
         "p4": {"upper_garment": "Top", "lower_garment": "Tutu"},
-        "p5": {"upper_garment": "Top", "lower_garment": "Tutu"},
     }
 
     row = build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
@@ -265,24 +249,12 @@ def test_build_candidate_feature_row_flattens_scalar_descriptor_fields() -> None
 
 
 def test_build_candidate_feature_row_flattens_multivalue_descriptor_fields() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 0.1,
-        "frame_03_timestamp": 0.2,
-        "frame_04_timestamp": 20.2,
-        "frame_05_timestamp": 20.3,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 0.1, 20.2, 20.3])
     descriptors = {
         "p1": {"dominant_colors": ["White", "Purple"]},
         "p2": {"dominant_colors": ["purple"]},
-        "p3": {"dominant_colors": ["white", "purple"]},
-        "p4": {"dominant_colors": ["Blue", "White"]},
-        "p5": {"dominant_colors": ["white"]},
+        "p3": {"dominant_colors": ["Blue", "White"]},
+        "p4": {"dominant_colors": ["white"]},
     }
 
     row = build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
@@ -300,24 +272,12 @@ def test_build_candidate_feature_row_flattens_multivalue_descriptor_fields() -> 
 
 
 def test_build_candidate_feature_row_splits_text_values_on_list_delimiters_only() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 0.1,
-        "frame_03_timestamp": 0.2,
-        "frame_04_timestamp": 20.2,
-        "frame_05_timestamp": 20.3,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 0.1, 20.2, 20.3])
     descriptors = {
         "p1": {"footwear": "ballet_shoes"},
         "p2": {"footwear": "ballet_shoes"},
-        "p3": {"footwear": "ballet_shoes"},
-        "p4": {"props": "fan; ribbon"},
-        "p5": {"props": "banner/fan"},
+        "p3": {"props": "fan; ribbon"},
+        "p4": {"props": "banner/fan"},
     }
 
     row = build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
@@ -329,18 +289,7 @@ def test_build_candidate_feature_row_splits_text_values_on_list_delimiters_only(
 
 
 def test_build_candidate_feature_row_uses_explicit_registry_for_stable_descriptor_keys() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 0.1,
-        "frame_03_timestamp": 0.2,
-        "frame_04_timestamp": 20.2,
-        "frame_05_timestamp": 20.3,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 0.1, 20.2, 20.3])
     descriptor_field_registry = {
         "appearance_upper_garment": "scalar",
         "palette_dominant_colors": "multivalue",
@@ -377,18 +326,7 @@ def test_build_candidate_feature_row_uses_explicit_registry_for_stable_descripto
 
 
 def test_build_candidate_feature_row_uses_schema_stable_default_descriptor_keys() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 0.1,
-        "frame_03_timestamp": 0.2,
-        "frame_04_timestamp": 20.2,
-        "frame_05_timestamp": 20.3,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 0.1, 20.2, 20.3])
     sparse_descriptors = {
         "p1": {"upper_garment": "Top", "dominant_colors": ["White", "Purple"]},
         "p2": {"upper_garment": "top"},
@@ -397,7 +335,6 @@ def test_build_candidate_feature_row_uses_schema_stable_default_descriptor_keys(
     other_descriptors = {
         "p1": {"footwear": "ballet_shoes"},
         "p4": {"headwear": "hat"},
-        "p5": {"dance_style_hint": "jazz"},
     }
 
     sparse_row = build_candidate_feature_row(candidate, descriptors=sparse_descriptors, embeddings=None)
@@ -411,18 +348,7 @@ def test_build_candidate_feature_row_uses_schema_stable_default_descriptor_keys(
 
 
 def test_build_candidate_feature_row_default_schema_ignores_extra_flattened_keys() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 0.1,
-        "frame_03_timestamp": 0.2,
-        "frame_04_timestamp": 20.2,
-        "frame_05_timestamp": 20.3,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 0.1, 20.2, 20.3])
     descriptors = {
         "p1": {
             "upper_garment": "Top",
@@ -433,15 +359,11 @@ def test_build_candidate_feature_row_default_schema_ignores_extra_flattened_keys
             "appearance": {"costume": {"silhouette": "bell"}},
         },
         "p3": {
-            "upper_garment": "Jacket",
-            "appearance": {"costume": {"silhouette": "Cape"}},
-        },
-        "p4": {
             "metadata": {"shot_type": "Closeup"},
             "props": ["fan"],
             "scene": {"lighting": {"accent_colors": ["Blue", "Gold"]}},
         },
-        "p5": {
+        "p4": {
             "metadata": {"shot_type": "Closeup"},
             "scene": {"lighting": {"accent_colors": ["gold", "silver"]}},
         },
@@ -458,29 +380,17 @@ def test_build_candidate_feature_row_default_schema_ignores_extra_flattened_keys
 
 
 def test_build_candidate_feature_row_default_schema_is_shape_stable_across_sparse_rows() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 0.1,
-        "frame_03_timestamp": 0.2,
-        "frame_04_timestamp": 20.2,
-        "frame_05_timestamp": 20.3,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 0.1, 20.2, 20.3])
     sparse_descriptors = {
         "p1": {"upper_garment": "Top"},
         "p2": {"upper_garment": "top"},
-        "p4": {"props": "fan; ribbon"},
+        "p3": {"props": "fan; ribbon"},
     }
     mixed_shape_descriptors = {
         "p1": {"dominant_colors": "White/Purple", "upper_garment": "Top"},
         "p2": {"upper_garment": ["Top", "Jacket"]},
-        "p3": {"upper_garment": "top"},
-        "p4": {"props": ["fan"]},
-        "p5": {"headwear": "hat"},
+        "p3": {"props": ["fan"]},
+        "p4": {"headwear": "hat"},
     }
 
     sparse_row = build_candidate_feature_row(candidate, descriptors=sparse_descriptors, embeddings=None)
@@ -494,7 +404,7 @@ def test_build_candidate_feature_row_default_schema_is_shape_stable_across_spars
     assert "left_upper_garment_01" not in sparse_row
     assert "left_upper_garment_01" not in mixed_shape_row
     assert sparse_row["left_upper_garment"] == "top"
-    assert mixed_shape_row["left_upper_garment"] == "top"
+    assert mixed_shape_row["left_upper_garment"] == "jacket"
     assert mixed_shape_row["left_dominant_colors_01"] == "purple"
     assert mixed_shape_row["left_dominant_colors_02"] == "white"
     assert mixed_shape_row["right_props_01"] == "fan"
@@ -502,18 +412,7 @@ def test_build_candidate_feature_row_default_schema_is_shape_stable_across_spars
 
 
 def test_build_candidate_feature_row_supports_extra_nested_fields_only_with_explicit_registry() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 0.1,
-        "frame_03_timestamp": 0.2,
-        "frame_04_timestamp": 20.2,
-        "frame_05_timestamp": 20.3,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 0.1, 20.2, 20.3])
     descriptors = {
         "p1": {
             "appearance": {"costume": {"silhouette": "Bell"}},
@@ -521,10 +420,10 @@ def test_build_candidate_feature_row_supports_extra_nested_fields_only_with_expl
         "p2": {
             "appearance": {"costume": {"silhouette": "bell"}},
         },
-        "p4": {
+        "p3": {
             "scene": {"lighting": {"accent_colors": ["Blue", "Gold"]}},
         },
-        "p5": {
+        "p4": {
             "scene": {"lighting": {"accent_colors": ["gold", "silver"]}},
         },
     }
@@ -548,18 +447,7 @@ def test_build_candidate_feature_row_supports_extra_nested_fields_only_with_expl
 
 
 def test_build_candidate_feature_row_emits_missing_schema_columns_by_default() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 0.1,
-        "frame_03_timestamp": 0.2,
-        "frame_04_timestamp": 20.2,
-        "frame_05_timestamp": 20.3,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 0.1, 20.2, 20.3])
 
     row = build_candidate_feature_row(candidate, descriptors={}, embeddings=None)
     expected_descriptor_columns = _default_descriptor_feature_columns()
@@ -586,22 +474,13 @@ def test_build_candidate_feature_row_emits_missing_schema_columns_by_default() -
 
 
 def test_build_candidate_feature_row_ignores_malformed_multivalue_items() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 0.1,
-        "frame_03_timestamp": 0.2,
-        "frame_04_timestamp": 20.2,
-        "frame_05_timestamp": 20.3,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 0.1, 20.2, 20.3])
     descriptors = {
         "p1": {"dominant_colors": ["White", None, True, "", " / ", "Blue"]},
-        "p2": {"dominant_colors": [False, "blue"]},
-        "p3": {"props": ["fan", None, True, "", " ribbon "]},
+        "p2": {
+            "dominant_colors": [False, "blue"],
+            "props": ["fan", None, True, "", " ribbon "],
+        },
     }
 
     row = build_candidate_feature_row(candidate, descriptors=descriptors, embeddings=None)
@@ -615,18 +494,7 @@ def test_build_candidate_feature_row_ignores_malformed_multivalue_items() -> Non
 
 
 def test_build_candidate_feature_row_rejects_malformed_descriptor_record_shape() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 1.0,
-        "frame_03_timestamp": 2.0,
-        "frame_04_timestamp": 3.0,
-        "frame_05_timestamp": 4.0,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 1.0, 2.0, 3.0])
     descriptors = {
         "p1": {"upper_garment": "top"},
         "p2": "not-a-mapping",
@@ -637,24 +505,12 @@ def test_build_candidate_feature_row_rejects_malformed_descriptor_record_shape()
 
 
 def test_build_candidate_feature_row_computes_embedding_features() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 1.0,
-        "frame_03_timestamp": 2.0,
-        "frame_04_timestamp": 3.0,
-        "frame_05_timestamp": 4.0,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 1.0, 2.0, 3.0])
     embeddings = {
         "p1": [1.0, 0.0],
         "p2": [0.0, 1.0],
         "p3": [0.0, 1.0],
         "p4": [1.0, 0.0],
-        "p5": [0.0, 1.0],
     }
 
     row = build_candidate_feature_row(candidate, descriptors={}, embeddings=embeddings)
@@ -662,64 +518,38 @@ def test_build_candidate_feature_row_computes_embedding_features() -> None:
     assert row["embed_dist_12"] == 1.0
     assert row["embed_dist_23"] == 0.0
     assert row["embed_dist_34"] == 1.0
-    assert row["embed_dist_45"] == 1.0
-    assert row["left_consistency_score"] == 0.5
+    assert row["left_consistency_score"] == 1.0
     assert row["right_consistency_score"] == 1.0
-    assert row["cross_boundary_outlier_score"] == 1.0
+    assert row["cross_boundary_outlier_score"] == 0.0
 
 
 def test_build_candidate_feature_row_uses_non_central_embedding_median_for_cross_boundary_score() -> None:
     angle_36 = math.radians(36.86989764584401)
     angle_42 = math.radians(41.5930222125875)
     angle_132 = math.radians(131.5930222125875)
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 1.0,
-        "frame_03_timestamp": 2.0,
-        "frame_04_timestamp": 3.0,
-        "frame_05_timestamp": 4.0,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 1.0, 2.0, 3.0])
     embeddings = {
         "p1": [math.cos(angle_36), math.sin(angle_36)],
         "p2": [1.0, 0.0],
         "p3": [math.cos(-angle_36), math.sin(-angle_36)],
-        "p4": [math.cos(angle_42), math.sin(angle_42)],
-        "p5": [math.cos(angle_132), math.sin(angle_132)],
+        "p4": [math.cos(angle_132), math.sin(angle_132)],
     }
 
     row = build_candidate_feature_row(candidate, descriptors={}, embeddings=embeddings)
 
     assert row["embed_dist_12"] == pytest.approx(0.2, abs=1e-5)
     assert row["embed_dist_23"] == pytest.approx(0.2, abs=1e-5)
-    assert row["embed_dist_34"] == pytest.approx(0.8, abs=1e-5)
-    assert row["embed_dist_45"] == pytest.approx(1.0, abs=1e-5)
-    assert row["cross_boundary_outlier_score"] == pytest.approx(4.0, abs=2e-5)
+    assert row["embed_dist_34"] == pytest.approx(1.9797954743617838, abs=1e-5)
+    assert row["cross_boundary_outlier_score"] == pytest.approx(0.18350345466109141, abs=2e-5)
 
 
 def test_build_candidate_feature_row_handles_zero_non_central_median() -> None:
-    candidate = {
-        "frame_01_timestamp": 0.0,
-        "frame_02_timestamp": 0.0,
-        "frame_03_timestamp": 0.0,
-        "frame_04_timestamp": 5.0,
-        "frame_05_timestamp": 5.0,
-        "frame_01_photo_id": "p1",
-        "frame_02_photo_id": "p2",
-        "frame_03_photo_id": "p3",
-        "frame_04_photo_id": "p4",
-        "frame_05_photo_id": "p5",
-    }
+    candidate = _radius_two_candidate(timestamps=[0.0, 0.0, 5.0, 5.0])
     embeddings = {
         "p1": [1.0, 0.0],
         "p2": [1.0, 0.0],
-        "p3": [1.0, 0.0],
+        "p3": [0.0, 1.0],
         "p4": [0.0, 1.0],
-        "p5": [0.0, 1.0],
     }
 
     row = build_candidate_feature_row(candidate, descriptors={}, embeddings=embeddings)
@@ -731,11 +561,11 @@ def test_build_candidate_feature_row_handles_zero_non_central_median() -> None:
 
 def test_build_candidate_feature_row_rejects_non_finite_timestamps() -> None:
     base_candidate = {
+        "window_radius": 2,
         "frame_01_timestamp": 0.0,
         "frame_02_timestamp": 1.0,
         "frame_03_timestamp": 2.0,
         "frame_04_timestamp": 3.0,
-        "frame_05_timestamp": 4.0,
     }
 
     for bad_value in (math.nan, math.inf, -math.inf):
@@ -747,11 +577,11 @@ def test_build_candidate_feature_row_rejects_non_finite_timestamps() -> None:
 
 def test_build_candidate_feature_row_rejects_unordered_timestamps() -> None:
     candidate = {
+        "window_radius": 2,
         "frame_01_timestamp": 0.0,
         "frame_02_timestamp": 1.0,
         "frame_03_timestamp": 2.0,
         "frame_04_timestamp": 1.5,
-        "frame_05_timestamp": 4.0,
     }
 
     with pytest.raises(ValueError, match="non-decreasing"):

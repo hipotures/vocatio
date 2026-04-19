@@ -15,13 +15,13 @@ from rich.text import Text
 from lib.ml_boundary_metrics import predictor_metric_spec
 from lib.ml_boundary_training_options import resolve_training_options
 from lib.ml_boundary_training_data import (
-    THUMBNAIL_IMAGE_COLUMNS,
     TRAIN_MODES,
     TrainingDataBundle,
     TrainingTable,
     image_feature_columns_for_mode as training_image_feature_columns_for_mode,
-    load_candidate_training_headers,
+    load_candidate_training_frame,
     load_training_data_bundle,
+    _extract_window_radius_from_candidate_rows,
     validate_candidate_training_columns,
     validate_dataset_path,
     validate_mode,
@@ -59,8 +59,8 @@ def default_boundary_threshold_policy() -> dict[str, float | str]:
     return {"policy": "fixed", "threshold": 0.5}
 
 
-def image_feature_columns_for_mode(mode: str) -> list[str]:
-    return training_image_feature_columns_for_mode(mode)
+def image_feature_columns_for_mode(mode: str, *, window_radius: int = 2) -> list[str]:
+    return training_image_feature_columns_for_mode(mode, window_radius=window_radius)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -176,11 +176,17 @@ def _resolve_corpus_context(
 def validate_dataset_contract(dataset_path: Path, mode: str) -> None:
     validate_mode(mode)
     validate_dataset_path(dataset_path)
-    dataset_columns = load_candidate_training_headers(dataset_path)
+    candidate_frame = load_candidate_training_frame(dataset_path)
+    dataset_columns = candidate_frame.columns
+    window_radius = _extract_window_radius_from_candidate_rows(
+        candidate_frame.rows,
+        resource_name=dataset_path.name,
+    )
     validate_candidate_training_columns(
         dataset_columns,
         mode=mode,
         resource_name=dataset_path.name,
+        window_radius=window_radius,
     )
 
 
@@ -252,6 +258,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 split_manifest_path,
                 training_bundle.split_manifest_scope,
                 args.mode,
+                training_bundle.window_radius,
                 training_options,
             ),
         )
@@ -373,6 +380,7 @@ def _build_training_plan_payload(
     split_manifest_path: Path,
     split_manifest_scope: str,
     mode: str,
+    window_radius: int,
     training_options: dict[str, object],
 ) -> dict[str, object]:
     return {
@@ -384,7 +392,10 @@ def _build_training_plan_payload(
         "train_minutes": training_options["train_minutes"],
         "time_limit_seconds": training_options["time_limit_seconds"],
         "predictors": build_training_plan(mode),
-        "image_feature_columns": image_feature_columns_for_mode(mode),
+        "image_feature_columns": image_feature_columns_for_mode(
+            mode,
+            window_radius=window_radius,
+        ),
         "boundary_threshold_policy": default_boundary_threshold_policy(),
     }
 
@@ -399,6 +410,7 @@ def _build_training_metadata_payload(
     return {
         "output_dir": str(output_dir),
         "mode": mode,
+        "window_radius": training_bundle.window_radius,
         "predictor_names": [predictor["name"] for predictor in build_training_plan(mode)],
         "train_row_count": int(len(training_bundle.train_rows)),
         "validation_row_count": int(len(training_bundle.validation_rows)),
@@ -452,6 +464,7 @@ def _train_predictors(
             predictor_output_dir=predictor_output_dir,
             problem_type=predictor_plan["problem_type"],
             predictor_data=predictor_specs[predictor_name],
+            image_feature_columns=training_bundle.image_feature_columns,
             mode=mode,
             training_options=training_options,
         )
@@ -629,6 +642,7 @@ def _fit_predictor(
     predictor_output_dir: Path,
     problem_type: str,
     predictor_data,
+    image_feature_columns: list[str],
     mode: str,
     training_options: dict[str, object],
 ):
@@ -647,7 +661,7 @@ def _fit_predictor(
             presets=training_options["training_preset"],
             time_limit=training_options["time_limit_seconds"],
             column_types={
-                column_name: "image_path" for column_name in THUMBNAIL_IMAGE_COLUMNS
+                column_name: "image_path" for column_name in image_feature_columns
             },
         )
         return predictor

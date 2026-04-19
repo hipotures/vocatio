@@ -11,7 +11,9 @@ sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
 
 from build_ml_boundary_candidate_dataset import (
     DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1,
+    CANDIDATE_ROW_HEADERS,
     build_candidate_rows,
+    candidate_row_headers,
     main,
 )
 from lib.image_pipeline_contracts import MEDIA_MANIFEST_HEADERS
@@ -70,6 +72,23 @@ def _build_manifest_photo_row(
         }
     )
     return row
+
+
+def test_candidate_headers_for_radius_two() -> None:
+    headers = candidate_row_headers(window_radius=2, include_thumbnail=True)
+
+    assert "window_radius" in headers
+    assert "window_size" not in headers
+    assert "frame_04_photo_id" in headers
+    assert "frame_05_photo_id" not in headers
+
+
+def test_candidate_headers_for_radius_three() -> None:
+    headers = candidate_row_headers(window_radius=3, include_thumbnail=True)
+
+    assert "frame_06_photo_id" in headers
+    assert "frame_06_thumb_path" in headers
+    assert "frame_06_preview_path" in headers
 
 
 def test_build_candidate_rows_excludes_candidates_without_full_window() -> None:
@@ -141,17 +160,15 @@ def test_build_candidate_rows_preserves_ordered_frame_fields_and_labels() -> Non
     }
 
     row = rows[0]
-    assert row["frame_01_photo_id"] == "p1"
-    assert row["frame_02_photo_id"] == "p2"
-    assert row["frame_03_photo_id"] == "p3"
-    assert row["frame_04_photo_id"] == "p4"
-    assert row["frame_05_photo_id"] == "p5"
-    assert row["frame_03_relpath"] == "cam/p3.jpg"
-    assert row["frame_01_timestamp"] == 0.0
-    assert row["frame_05_timestamp"] == 31.0
-    assert row["window_photo_ids"] == ["p1", "p2", "p3", "p4", "p5"]
+    assert row["frame_01_photo_id"] == "p2"
+    assert row["frame_02_photo_id"] == "p3"
+    assert row["frame_03_photo_id"] == "p4"
+    assert row["frame_04_photo_id"] == "p5"
+    assert row["frame_02_relpath"] == "cam/p3.jpg"
+    assert row["frame_01_timestamp"] == 1.0
+    assert row["frame_04_timestamp"] == 31.0
+    assert row["window_photo_ids"] == ["p2", "p3", "p4", "p5"]
     assert row["window_relative_paths"] == [
-        "cam/p1.jpg",
         "cam/p2.jpg",
         "cam/p3.jpg",
         "cam/p4.jpg",
@@ -166,7 +183,7 @@ def test_build_candidate_rows_preserves_ordered_frame_fields_and_labels() -> Non
     assert row["segment_type"] == "ceremony"
     assert row["boundary"] is True
     assert row["day_id"] == "20250325"
-    assert row["window_size"] == 5
+    assert row["window_radius"] == 2
     assert row["candidate_rule_name"] == "gap_threshold"
     assert row["candidate_rule_version"] == "gap-v1"
     assert row["candidate_rule_params_json"] == "{\"gap_threshold_seconds\":10.0}"
@@ -176,12 +193,10 @@ def test_build_candidate_rows_preserves_ordered_frame_fields_and_labels() -> Non
     assert row["frame_02_thumb_path"] == ""
     assert row["frame_03_thumb_path"] == ""
     assert row["frame_04_thumb_path"] == ""
-    assert row["frame_05_thumb_path"] == ""
     assert row["frame_01_preview_path"] == ""
     assert row["frame_02_preview_path"] == ""
     assert row["frame_03_preview_path"] == ""
     assert row["frame_04_preview_path"] == ""
-    assert row["frame_05_preview_path"] == ""
 
 
 def test_build_candidate_rows_produces_deterministic_candidate_ids() -> None:
@@ -301,12 +316,10 @@ def test_build_candidate_rows_emits_schema_stable_proxy_columns_when_missing() -
         "frame_02_thumb_path",
         "frame_03_thumb_path",
         "frame_04_thumb_path",
-        "frame_05_thumb_path",
         "frame_01_preview_path",
         "frame_02_preview_path",
         "frame_03_preview_path",
         "frame_04_preview_path",
-        "frame_05_preview_path",
         "split_name",
     ]
 
@@ -458,20 +471,20 @@ def test_main_writes_candidate_csv_and_reports_from_manifest_and_truth() -> None
         assert rows[0]["center_right_photo_id"] == "p4"
         assert rows[0]["segment_type"] == "ceremony"
         assert rows[0]["boundary"] == "True"
-        assert json.loads(rows[0]["window_photo_ids"]) == ["p1", "p2", "p3", "p4", "p5"]
+        assert rows[0]["window_radius"] == "2"
+        assert json.loads(rows[0]["window_photo_ids"]) == ["p2", "p3", "p4", "p5"]
         assert json.loads(rows[0]["window_relative_paths"]) == [
-            "p-a7r5/p1.jpg",
             "p-a7r5/p2.jpg",
             "p-a7r5/p3.jpg",
             "p-a7r5/p4.jpg",
             "p-a7r5/p5.jpg",
         ]
-        assert rows[0]["frame_01_thumb_path"] == "embedded_jpg/thumb/p1.jpg"
-        assert rows[0]["frame_03_thumb_path"] == "embedded_jpg/thumb/p3.jpg"
-        assert rows[0]["frame_05_thumb_path"] == "embedded_jpg/thumb/p5.jpg"
-        assert rows[0]["frame_01_preview_path"] == "embedded_jpg/preview/p1.jpg"
-        assert rows[0]["frame_03_preview_path"] == "embedded_jpg/preview/p3.jpg"
-        assert rows[0]["frame_05_preview_path"] == "embedded_jpg/preview/p5.jpg"
+        assert rows[0]["frame_01_thumb_path"] == "embedded_jpg/thumb/p2.jpg"
+        assert rows[0]["frame_02_thumb_path"] == "embedded_jpg/thumb/p3.jpg"
+        assert rows[0]["frame_04_thumb_path"] == "embedded_jpg/thumb/p5.jpg"
+        assert rows[0]["frame_01_preview_path"] == "embedded_jpg/preview/p2.jpg"
+        assert rows[0]["frame_02_preview_path"] == "embedded_jpg/preview/p3.jpg"
+        assert rows[0]["frame_04_preview_path"] == "embedded_jpg/preview/p5.jpg"
         assert rows[0]["descriptor_schema_version"] == DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1
 
         attrition_payload = json.loads(attrition_json.read_text(encoding="utf-8"))

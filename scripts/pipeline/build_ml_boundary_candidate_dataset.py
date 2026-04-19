@@ -25,63 +25,64 @@ from lib.pipeline_io import atomic_write_csv, atomic_write_json
 from lib.workspace_dir import resolve_workspace_dir
 from lib.ml_boundary_dataset import canonical_candidate_id, normalize_timestamp, sort_photo_rows
 from lib.ml_boundary_truth import FinalPhotoTruth, build_final_photo_truth
+from lib.window_radius_contract import positive_window_radius_arg, window_radius_to_window_size
 
 
 console = Console()
 
-WINDOW_SIZE = 5
-WINDOW_RADIUS = 2
+DEFAULT_WINDOW_RADIUS = 2
 DEFAULT_CANDIDATE_RULE_NAME = "gap_threshold"
 DEFAULT_TRUTH_FILENAME = "ml_boundary_reviewed_truth.csv"
 DEFAULT_OUTPUT_FILENAME = "ml_boundary_candidates.csv"
 DEFAULT_ATTRITION_FILENAME = "ml_boundary_attrition.json"
 DEFAULT_REPORT_FILENAME = "ml_boundary_dataset_report.json"
 DESCRIPTOR_SCHEMA_VERSION_NOT_INCLUDED_V1 = "not_included_v1"
-CANDIDATE_ROW_HEADERS = [
-    "candidate_id",
-    "day_id",
-    "window_size",
-    "center_left_photo_id",
-    "center_right_photo_id",
-    "left_segment_id",
-    "right_segment_id",
-    "left_segment_type",
-    "right_segment_type",
-    "segment_type",
-    "boundary",
-    "candidate_rule_name",
-    "candidate_rule_version",
-    "candidate_rule_params_json",
-    "descriptor_schema_version",
-    "split_name",
-    "window_photo_ids",
-    "window_relative_paths",
-    "frame_01_photo_id",
-    "frame_02_photo_id",
-    "frame_03_photo_id",
-    "frame_04_photo_id",
-    "frame_05_photo_id",
-    "frame_01_relpath",
-    "frame_02_relpath",
-    "frame_03_relpath",
-    "frame_04_relpath",
-    "frame_05_relpath",
-    "frame_01_timestamp",
-    "frame_02_timestamp",
-    "frame_03_timestamp",
-    "frame_04_timestamp",
-    "frame_05_timestamp",
-    "frame_01_thumb_path",
-    "frame_02_thumb_path",
-    "frame_03_thumb_path",
-    "frame_04_thumb_path",
-    "frame_05_thumb_path",
-    "frame_01_preview_path",
-    "frame_02_preview_path",
-    "frame_03_preview_path",
-    "frame_04_preview_path",
-    "frame_05_preview_path",
-]
+
+
+def frame_numbers_for_radius(window_radius: int) -> list[int]:
+    return list(range(1, window_radius_to_window_size(window_radius) + 1))
+
+
+def candidate_row_headers(*, window_radius: int, include_thumbnail: bool) -> list[str]:
+    headers = [
+        "candidate_id",
+        "day_id",
+        "window_radius",
+        "center_left_photo_id",
+        "center_right_photo_id",
+        "left_segment_id",
+        "right_segment_id",
+        "left_segment_type",
+        "right_segment_type",
+        "segment_type",
+        "boundary",
+        "candidate_rule_name",
+        "candidate_rule_version",
+        "candidate_rule_params_json",
+        "descriptor_schema_version",
+        "split_name",
+        "window_photo_ids",
+        "window_relative_paths",
+    ]
+    for frame_index in frame_numbers_for_radius(window_radius):
+        suffix = f"{frame_index:02d}"
+        headers.extend(
+            [
+                f"frame_{suffix}_photo_id",
+                f"frame_{suffix}_relpath",
+                f"frame_{suffix}_timestamp",
+            ]
+        )
+        if include_thumbnail:
+            headers.append(f"frame_{suffix}_thumb_path")
+        headers.append(f"frame_{suffix}_preview_path")
+    return headers
+
+
+CANDIDATE_ROW_HEADERS = candidate_row_headers(
+    window_radius=DEFAULT_WINDOW_RADIUS,
+    include_thumbnail=True,
+)
 ATTRITION_REPORT_KEYS = [
     "candidate_count_generated",
     "candidate_count_excluded_missing_window",
@@ -144,6 +145,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=_parse_gap_threshold_seconds,
         default=20.0,
         help="Minimum center-gap size in seconds for generating a candidate. Default: 20.0",
+    )
+    parser.add_argument(
+        "--window-radius",
+        type=positive_window_radius_arg,
+        default=DEFAULT_WINDOW_RADIUS,
+        help=f"Number of frames per side in each candidate window. Default: {DEFAULT_WINDOW_RADIUS}",
     )
     parser.add_argument(
         "--candidate-rule-version",
@@ -283,8 +290,12 @@ def _manifest_photo_to_candidate_row(row: Mapping[str, str]) -> dict[str, object
 
 
 def _serialize_candidate_row(row: Mapping[str, object]) -> dict[str, object]:
+    headers = candidate_row_headers(
+        window_radius=int(row.get("window_radius", DEFAULT_WINDOW_RADIUS)),
+        include_thumbnail=True,
+    )
     serialized: dict[str, object] = {}
-    for header in CANDIDATE_ROW_HEADERS:
+    for header in headers:
         value = row.get(header, "")
         if header in {"window_photo_ids", "window_relative_paths"}:
             serialized[header] = json.dumps(
@@ -320,6 +331,7 @@ def build_candidate_rows(
     gap_threshold_seconds: float,
     day_id: str,
     candidate_rule_version: str,
+    window_radius: int = DEFAULT_WINDOW_RADIUS,
     candidate_rule_name: str = DEFAULT_CANDIDATE_RULE_NAME,
 ) -> tuple[list[dict[str, object]], dict[str, int]]:
     if gap_threshold_seconds <= 0.0:
@@ -344,6 +356,7 @@ def build_candidate_rows(
     candidate_rule_params_json = _build_rule_params_json(
         gap_threshold_seconds=gap_threshold_seconds
     )
+    window_size = window_radius_to_window_size(window_radius)
 
     for index in range(len(ordered_photos) - 1):
         left_photo = ordered_photos[index]
@@ -369,8 +382,8 @@ def build_candidate_rows(
         if is_true_boundary:
             report["true_boundary_coverage_before_exclusions"] += 1
 
-        window_start = index - WINDOW_RADIUS
-        window_end = index + WINDOW_RADIUS + 1
+        window_start = index - window_radius + 1
+        window_end = window_start + window_size
         if window_start < 0 or window_end > len(ordered_photos):
             report["candidate_count_excluded_missing_window"] += 1
             continue
@@ -386,7 +399,7 @@ def build_candidate_rows(
                     candidate_rule_version=candidate_rule_version,
                 ),
                 "day_id": day_id,
-                "window_size": WINDOW_SIZE,
+                "window_radius": window_radius,
                 "center_left_photo_id": left_photo_id,
                 "center_right_photo_id": right_photo_id,
                 "left_segment_id": left_truth.segment_id,
@@ -486,6 +499,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             gap_threshold_seconds=args.gap_threshold_seconds,
             day_id=day_id,
             candidate_rule_version=args.candidate_rule_version,
+            window_radius=args.window_radius,
         )
         progress.advance(build_task)
 
@@ -497,7 +511,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             candidate_rule_version=args.candidate_rule_version,
             attrition=attrition,
         )
-        atomic_write_csv(output_csv_path, CANDIDATE_ROW_HEADERS, serialized_rows)
+        headers = candidate_row_headers(window_radius=args.window_radius, include_thumbnail=True)
+        atomic_write_csv(output_csv_path, headers, serialized_rows)
         progress.advance(write_task)
         atomic_write_json(
             attrition_json_path,

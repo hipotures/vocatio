@@ -58,14 +58,14 @@ def _candidate_row(
         {
             "candidate_id": canonical_candidate_id(
                 day_id=day_id,
-                center_left_photo_id=f"{day_id}-p3-{offset}",
-                center_right_photo_id=f"{day_id}-p4-{offset}",
+                center_left_photo_id=f"{day_id}-p2-{offset}",
+                center_right_photo_id=f"{day_id}-p3-{offset}",
                 candidate_rule_version="gap-v1",
             ),
             "day_id": day_id,
-            "window_size": "5",
-            "center_left_photo_id": f"{day_id}-p3-{offset}",
-            "center_right_photo_id": f"{day_id}-p4-{offset}",
+            "window_radius": "2",
+            "center_left_photo_id": f"{day_id}-p2-{offset}",
+            "center_right_photo_id": f"{day_id}-p3-{offset}",
             "left_segment_id": f"{day_id}-seg-left",
             "right_segment_id": f"{day_id}-seg-right",
             "left_segment_type": "performance",
@@ -77,11 +77,11 @@ def _candidate_row(
             "candidate_rule_params_json": "{\"gap_threshold_seconds\":20.0}",
             "descriptor_schema_version": "not_included_v1",
             "split_name": "",
-            "window_photo_ids": "[\"p1\",\"p2\",\"p3\",\"p4\",\"p5\"]",
-            "window_relative_paths": "[\"cam/p1.jpg\",\"cam/p2.jpg\",\"cam/p3.jpg\",\"cam/p4.jpg\",\"cam/p5.jpg\"]",
+            "window_photo_ids": "[\"p1\",\"p2\",\"p3\",\"p4\"]",
+            "window_relative_paths": "[\"cam/p1.jpg\",\"cam/p2.jpg\",\"cam/p3.jpg\",\"cam/p4.jpg\"]",
         }
     )
-    for frame_index in range(1, 6):
+    for frame_index in range(1, 5):
         suffix = f"{frame_index:02d}"
         row[f"frame_{suffix}_photo_id"] = f"{day_id}-p{frame_index}-{offset}"
         row[f"frame_{suffix}_relpath"] = f"cam/{day_id}-p{frame_index}-{offset}.jpg"
@@ -140,6 +140,7 @@ def _write_model_artifacts(
                 "dataset_path": "unused.csv",
                 "output_dir": str(model_dir),
                 "mode": mode,
+                "window_radius": 2,
                 "predictor_names": ["segment_type", "boundary"],
                 "threshold_policy": {
                     "policy": "fixed",
@@ -151,6 +152,46 @@ def _write_model_artifacts(
         ),
         encoding="utf-8",
     )
+
+
+def test_evaluate_rejects_model_window_radius_mismatch(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    _write_candidate_csv(
+        dataset_path,
+        [
+            _candidate_row(day_id="20250324", segment_type="performance", boundary="0", offset=1),
+            _candidate_row(day_id="20250325", segment_type="ceremony", boundary="1", offset=2),
+        ],
+    )
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"day_id": "20250324", "split_name": "train"},
+            {"day_id": "20250325", "split_name": "test"},
+        ],
+    )
+    model_dir = tmp_path / "models" / "run-mismatch"
+    _write_model_artifacts(model_dir, split_manifest_path=split_manifest_path)
+    metadata_path = model_dir / TRAINING_METADATA_FILENAME
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["window_radius"] = 3
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+    try:
+        eval_main(
+            [
+                str(dataset_path),
+                "--model-dir",
+                str(model_dir),
+                "--output-dir",
+                str(tmp_path / "eval" / "run-mismatch"),
+            ]
+        )
+    except ValueError as exc:
+        assert "window_radius mismatch" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 def _records_from_frame(frame) -> list[dict[str, object]]:

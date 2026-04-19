@@ -10,41 +10,53 @@ from lib.photo_pre_model_annotations import (
     build_dataset_photo_pre_model_descriptor_field_registry,
     load_photo_pre_model_annotations_by_relative_path,
 )
+from lib.window_radius_contract import window_radius_to_window_size
 
 
 TRAIN_MODES = ("tabular_only", "tabular_plus_thumbnail")
-THUMBNAIL_IMAGE_COLUMNS = [
-    "frame_01_thumb_path",
-    "frame_02_thumb_path",
-    "frame_03_thumb_path",
-    "frame_04_thumb_path",
-    "frame_05_thumb_path",
-]
+DEFAULT_ML_WINDOW_RADIUS = 2
+
+
+def frame_numbers_for_window_radius(window_radius: int) -> list[int]:
+    return list(range(1, window_radius_to_window_size(window_radius) + 1))
+
+
+def thumbnail_image_columns_for_window_radius(window_radius: int) -> list[str]:
+    return [
+        f"frame_{frame_index:02d}_thumb_path"
+        for frame_index in frame_numbers_for_window_radius(window_radius)
+    ]
+
+
+def required_derived_feature_source_columns_for_window_radius(window_radius: int) -> tuple[str, ...]:
+    frame_numbers = frame_numbers_for_window_radius(window_radius)
+    return tuple(
+        [f"frame_{frame_index:02d}_timestamp" for frame_index in frame_numbers]
+        + [f"frame_{frame_index:02d}_photo_id" for frame_index in frame_numbers]
+        + [f"frame_{frame_index:02d}_relpath" for frame_index in frame_numbers]
+    )
+
+
+def heuristic_pair_join_columns_for_window_radius(
+    window_radius: int,
+) -> tuple[tuple[str, str, str], ...]:
+    frame_numbers = frame_numbers_for_window_radius(window_radius)
+    return tuple(
+        (
+            f"{left}{right}",
+            f"frame_{left:02d}_relpath",
+            f"frame_{right:02d}_relpath",
+        )
+        for left, right in zip(frame_numbers, frame_numbers[1:])
+    )
+
+
+THUMBNAIL_IMAGE_COLUMNS = thumbnail_image_columns_for_window_radius(DEFAULT_ML_WINDOW_RADIUS)
 REQUIRED_BASE_COLUMNS = ("day_id", "segment_type", "boundary")
-REQUIRED_DERIVED_FEATURE_SOURCE_COLUMNS = tuple(
-    [
-        f"frame_{frame_index:02d}_timestamp"
-        for frame_index in range(1, 6)
-    ]
-    + [
-        f"frame_{frame_index:02d}_photo_id"
-        for frame_index in range(1, 6)
-    ]
-    + [
-        f"frame_{frame_index:02d}_relpath"
-        for frame_index in range(1, 6)
-    ]
-)
-NON_MODEL_FEATURE_COLUMNS = frozenset(REQUIRED_BASE_COLUMNS + ("split_name",))
+NON_MODEL_FEATURE_COLUMNS = frozenset(REQUIRED_BASE_COLUMNS + ("split_name", "window_radius"))
 SPLIT_MANIFEST_VALUE_COLUMNS = ("split_name",)
 ALLOWED_SPLIT_NAMES = ("train", "validation", "test")
 PHOTO_BOUNDARY_SCORE_FILENAME = "photo_boundary_scores.csv"
-HEURISTIC_PAIR_JOIN_COLUMNS = (
-    ("12", "frame_01_relpath", "frame_02_relpath"),
-    ("23", "frame_02_relpath", "frame_03_relpath"),
-    ("34", "frame_03_relpath", "frame_04_relpath"),
-    ("45", "frame_04_relpath", "frame_05_relpath"),
-)
 HEURISTIC_VALUE_COLUMNS = (
     "dino_cosine_distance",
     "boundary_score",
@@ -71,6 +83,7 @@ class PredictorTrainingData:
 
 @dataclass(frozen=True)
 class TrainingDataBundle:
+    window_radius: int
     train_rows: "TrainingTable"
     validation_rows: "TrainingTable"
     test_rows: "TrainingTable"
@@ -145,11 +158,11 @@ def validate_dataset_path(dataset_path: Path) -> None:
         )
 
 
-def image_feature_columns_for_mode(mode: str) -> list[str]:
+def image_feature_columns_for_mode(mode: str, *, window_radius: int = DEFAULT_ML_WINDOW_RADIUS) -> list[str]:
     validate_mode(mode)
     if mode != "tabular_plus_thumbnail":
         return []
-    return list(THUMBNAIL_IMAGE_COLUMNS)
+    return thumbnail_image_columns_for_window_radius(window_radius)
 
 
 def load_candidate_training_frame(dataset_path: Path) -> TrainingTable:
@@ -221,12 +234,17 @@ def _detect_split_manifest_key(columns: list[str]) -> str:
     raise ValueError("split manifest must contain either day_id/split_name or candidate_id/split_name")
 
 
-def feature_columns_for_mode(dataset_columns: list[str], mode: str) -> dict[str, list[str]]:
-    image_feature_columns = image_feature_columns_for_mode(mode)
+def feature_columns_for_mode(
+    dataset_columns: list[str],
+    mode: str,
+    *,
+    window_radius: int,
+) -> dict[str, list[str]]:
+    image_feature_columns = image_feature_columns_for_mode(mode, window_radius=window_radius)
     shared_feature_columns = [
         column
         for column in dataset_columns
-        if column not in NON_MODEL_FEATURE_COLUMNS and column not in THUMBNAIL_IMAGE_COLUMNS
+        if column not in NON_MODEL_FEATURE_COLUMNS and column not in image_feature_columns
     ]
     predictor_feature_columns = shared_feature_columns + image_feature_columns
     return {
@@ -247,10 +265,20 @@ def load_training_data_bundle(
 ) -> TrainingDataBundle:
     validate_mode(mode)
     candidate_frame = load_candidate_training_frame(dataset_path)
+    _require_columns(
+        candidate_frame.columns,
+        required_columns=[*REQUIRED_BASE_COLUMNS, "window_radius"],
+        resource_name=dataset_path.name,
+    )
+    window_radius = _extract_window_radius_from_candidate_rows(
+        candidate_frame.rows,
+        resource_name=dataset_path.name,
+    )
     validate_candidate_training_columns(
         candidate_frame.columns,
         mode=mode,
         resource_name=dataset_path.name,
+        window_radius=window_radius,
     )
     split_manifest_frame = load_split_manifest_frame(split_manifest_path)
     split_manifest_scope = _detect_split_manifest_key(split_manifest_frame.columns)
@@ -295,13 +323,22 @@ def load_training_data_bundle(
 
     model_feature_source_columns = (
         list(derived_feature_columns)
-        + [column_name for column_name in THUMBNAIL_IMAGE_COLUMNS if column_name in joined_frame.columns]
+        + [
+            column_name
+            for column_name in thumbnail_image_columns_for_window_radius(window_radius)
+            if column_name in joined_frame.columns
+        ]
     )
-    columns_by_mode = feature_columns_for_mode(model_feature_source_columns, mode)
+    columns_by_mode = feature_columns_for_mode(
+        model_feature_source_columns,
+        mode,
+        window_radius=window_radius,
+    )
     segment_type_feature_columns = columns_by_mode["segment_type_feature_columns"]
     boundary_feature_columns = columns_by_mode["boundary_feature_columns"]
 
     return TrainingDataBundle(
+        window_radius=window_radius,
         train_rows=train_rows,
         validation_rows=validation_rows,
         test_rows=test_rows,
@@ -311,7 +348,8 @@ def load_training_data_bundle(
         split_counts_by_name=_split_counts(joined_frame["split_name"]),
         missing_annotation_photo_count=missing_annotation_photo_count,
         missing_annotation_candidate_count=missing_annotation_candidate_count,
-        total_heuristic_pair_count=len(joined_frame.rows) * len(HEURISTIC_PAIR_JOIN_COLUMNS),
+        total_heuristic_pair_count=len(joined_frame.rows)
+        * len(heuristic_pair_join_columns_for_window_radius(window_radius)),
         missing_heuristic_pair_count=missing_heuristic_pair_count,
         total_heuristic_candidate_count=len(joined_frame.rows),
         missing_heuristic_candidate_count=missing_heuristic_candidate_count,
@@ -350,15 +388,38 @@ def validate_candidate_training_columns(
     *,
     mode: str,
     resource_name: str,
+    window_radius: int,
 ) -> None:
-    required_columns = list(REQUIRED_BASE_COLUMNS)
-    required_columns.extend(REQUIRED_DERIVED_FEATURE_SOURCE_COLUMNS)
-    required_columns.extend(image_feature_columns_for_mode(mode))
+    required_columns = [*REQUIRED_BASE_COLUMNS, "window_radius"]
+    required_columns.extend(required_derived_feature_source_columns_for_window_radius(window_radius))
+    required_columns.extend(image_feature_columns_for_mode(mode, window_radius=window_radius))
     _require_columns(
         columns,
         required_columns=required_columns,
         resource_name=resource_name,
     )
+
+
+def _extract_window_radius_from_candidate_rows(
+    rows: list[dict[str, object]],
+    *,
+    resource_name: str,
+) -> int:
+    if not rows:
+        raise ValueError(f"{resource_name} must contain at least one candidate row")
+    window_radius_values = {
+        int(str(row.get("window_radius", "")).strip())
+        for row in rows
+        if str(row.get("window_radius", "")).strip()
+    }
+    if len(window_radius_values) != 1:
+        raise ValueError(
+            f"candidate corpus must contain exactly one window_radius, got {sorted(window_radius_values)}"
+        )
+    window_radius = next(iter(window_radius_values))
+    if window_radius < 1:
+        raise ValueError("window_radius must be at least 1")
+    return window_radius
 
 
 def _join_split_manifest(
@@ -494,10 +555,12 @@ def _derive_feature_view(
             derived_feature_columns = list(derived_features.keys())
         derived_row: dict[str, object] = {column_name: derived_features[column_name] for column_name in derived_feature_columns}
         derived_row["day_id"] = row["day_id"]
+        derived_row["window_radius"] = row["window_radius"]
         derived_row["segment_type"] = row["segment_type"]
         derived_row["boundary"] = row["boundary"]
         derived_row["split_name"] = row["split_name"]
-        for image_column in THUMBNAIL_IMAGE_COLUMNS:
+        window_radius = _extract_window_radius_from_candidate_rows([row], resource_name="candidate row")
+        for image_column in thumbnail_image_columns_for_window_radius(window_radius):
             if image_column in row:
                 derived_row[image_column] = row[image_column]
         derived_rows.append(derived_row)
@@ -505,9 +568,15 @@ def _derive_feature_view(
         TrainingTable(
             derived_rows,
             column_names=(
-                ["day_id", "segment_type", "boundary", "split_name"]
+                ["day_id", "window_radius", "segment_type", "boundary", "split_name"]
                 + derived_feature_columns
-                + [column_name for column_name in THUMBNAIL_IMAGE_COLUMNS if column_name in table.columns]
+                + [
+                    column_name
+                    for column_name in thumbnail_image_columns_for_window_radius(
+                        _extract_window_radius_from_candidate_rows(table.rows, resource_name="candidate rows")
+                    )
+                    if column_name in table.columns
+                ]
             ),
         ),
         derived_feature_columns,
@@ -580,7 +649,8 @@ def _build_candidate_descriptors(
 ) -> tuple[dict[str, dict[str, object]], int]:
     descriptors: dict[str, dict[str, object]] = {}
     missing_annotation_count = 0
-    for frame_index in range(1, 6):
+    window_radius = _extract_window_radius_from_candidate_rows([row], resource_name="candidate row")
+    for frame_index in frame_numbers_for_window_radius(window_radius):
         suffix = f"{frame_index:02d}"
         photo_id = str(row.get(f"frame_{suffix}_photo_id", "")).strip()
         relative_path = str(row.get(f"frame_{suffix}_relpath", "")).strip()
@@ -602,7 +672,8 @@ def _build_candidate_heuristic_features(
 ) -> tuple[dict[str, dict[str, str]], int]:
     heuristic_features: dict[str, dict[str, str]] = {}
     missing_pair_count = 0
-    for pair_name, left_column, right_column in HEURISTIC_PAIR_JOIN_COLUMNS:
+    window_radius = _extract_window_radius_from_candidate_rows([row], resource_name="candidate row")
+    for pair_name, left_column, right_column in heuristic_pair_join_columns_for_window_radius(window_radius):
         left_relative_path = str(row.get(left_column, "")).strip()
         right_relative_path = str(row.get(right_column, "")).strip()
         pair_row = heuristic_rows_by_pair.get((left_relative_path, right_relative_path))
@@ -616,7 +687,8 @@ def _build_candidate_heuristic_features(
 
 
 def _candidate_relative_paths(row: dict[str, object]) -> list[str]:
+    window_radius = _extract_window_radius_from_candidate_rows([row], resource_name="candidate row")
     return [
         str(row.get(f"frame_{frame_index:02d}_relpath", "")).strip()
-        for frame_index in range(1, 6)
+        for frame_index in frame_numbers_for_window_radius(window_radius)
     ]
