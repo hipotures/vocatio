@@ -30,6 +30,7 @@ console = Console(stderr=True)
 METRICS_FILENAME = "metrics.json"
 MODEL_INFERENCE_EVALUATION_MODE = "model_inference_test_split"
 DEFAULT_EVAL_ROOT_DIRNAME = "ml_boundary_eval"
+SEGMENT_PREDICTOR_NAMES = ("left_segment_type", "right_segment_type")
 
 
 def threshold_boundary_probabilities(probs: Sequence[float], threshold: float) -> list[int]:
@@ -372,11 +373,16 @@ def _extract_positive_class_probabilities(
     return probabilities
 
 
-def _normalize_segment_predictions(predictions: object, *, expected_rows: int) -> list[str]:
+def _normalize_segment_predictions(
+    predictions: object,
+    *,
+    predictor_name: str,
+    expected_rows: int,
+) -> list[str]:
     values = [str(value).strip() for value in _to_plain_list(predictions)]
     if len(values) != expected_rows:
         raise ValueError(
-            f"segment_type prediction row count mismatch: expected {expected_rows}, got {len(values)}"
+            f"{predictor_name} prediction row count mismatch: expected {expected_rows}, got {len(values)}"
         )
     return values
 
@@ -430,40 +436,64 @@ def _build_metrics_payload(
             "split manifest must assign at least one test row for evaluation"
         )
 
-    segment_predictor = _load_predictor(
-        mode=mode,
-        model_dir=model_dir,
-        predictor_name="segment_type",
-    )
+    predictor_data_by_name = {
+        "left_segment_type": training_bundle.left_segment_type,
+        "right_segment_type": training_bundle.right_segment_type,
+        "boundary": training_bundle.boundary,
+    }
+
+    metrics: dict[str, object] = {}
+    for predictor_name in SEGMENT_PREDICTOR_NAMES:
+        predictor = _load_predictor(
+            mode=mode,
+            model_dir=model_dir,
+            predictor_name=predictor_name,
+        )
+        predictor_data = predictor_data_by_name[predictor_name]
+        predictor_test_frame = _to_model_frame(predictor_data.test_data)
+        predictor_truth = [
+            str(value)
+            for value in predictor_data.test_data[predictor_name].tolist()
+        ]
+        predictor_predictions = _normalize_segment_predictions(
+            predictor.predict(predictor_test_frame),
+            predictor_name=predictor_name,
+            expected_rows=len(predictor_truth),
+        )
+        correct_count, incorrect_count = _compute_label_match_counts(
+            predictor_predictions,
+            predictor_truth,
+        )
+        confusion_matrix = _compute_multiclass_confusion_matrix(
+            predictor_predictions,
+            predictor_truth,
+            labels=sorted(VALID_SEGMENT_TYPES),
+        )
+        metrics[predictor_metric_spec(predictor_name).evaluation_metric_key] = _compute_macro_f1(
+            predictor_predictions,
+            predictor_truth,
+            labels=sorted(VALID_SEGMENT_TYPES),
+        )
+        metrics[f"{predictor_name}_accuracy"] = _compute_accuracy(
+            predictor_predictions,
+            predictor_truth,
+        )
+        metrics[f"{predictor_name}_correct_count"] = correct_count
+        metrics[f"{predictor_name}_incorrect_count"] = incorrect_count
+        metrics[f"{predictor_name}_confusion_matrix"] = confusion_matrix
+
     boundary_predictor = _load_predictor(
         mode=mode,
         model_dir=model_dir,
         predictor_name="boundary",
     )
-
-    segment_test_frame = _to_model_frame(training_bundle.segment_type.test_data)
     boundary_test_frame = _to_model_frame(training_bundle.boundary.test_data)
     boundary_truth = [int(value) for value in training_bundle.boundary.test_data["boundary"].tolist()]
-    segment_truth = [str(value) for value in training_bundle.segment_type.test_data["segment_type"].tolist()]
-
-    segment_predictions = _normalize_segment_predictions(
-        segment_predictor.predict(segment_test_frame),
-        expected_rows=len(segment_truth),
-    )
     boundary_probabilities = _extract_positive_class_probabilities(
         boundary_predictor.predict_proba(boundary_test_frame),
         expected_rows=len(boundary_truth),
     )
     boundary_predictions = threshold_boundary_probabilities(boundary_probabilities, threshold)
-    segment_type_correct_count, segment_type_incorrect_count = _compute_label_match_counts(
-        segment_predictions,
-        segment_truth,
-    )
-    segment_type_confusion_matrix = _compute_multiclass_confusion_matrix(
-        segment_predictions,
-        segment_truth,
-        labels=sorted(VALID_SEGMENT_TYPES),
-    )
     boundary_counts = _compute_binary_confusion_counts(boundary_predictions, boundary_truth)
 
     review_cost_totals = {
@@ -497,6 +527,23 @@ def _build_metrics_payload(
         for key, value in day_metrics.items():
             review_cost_totals[key] += value
 
+    metrics.update(
+        {
+            predictor_metric_spec("boundary").evaluation_metric_key: _compute_boundary_f1(
+                boundary_predictions,
+                boundary_truth,
+            ),
+            "boundary_true_positive_count": boundary_counts["true_positive_count"],
+            "boundary_false_positive_count": boundary_counts["false_positive_count"],
+            "boundary_false_negative_count": boundary_counts["false_negative_count"],
+            "boundary_true_negative_count": boundary_counts["true_negative_count"],
+            "boundary_correct_count": boundary_counts["correct_count"],
+            "boundary_incorrect_count": boundary_counts["incorrect_count"],
+            "boundary_truth_positive_count": boundary_counts["truth_positive_count"],
+            "boundary_predicted_positive_count": boundary_counts["predicted_positive_count"],
+            "review_cost_metrics": review_cost_totals,
+        }
+    )
     return {
         "evaluation_mode": MODEL_INFERENCE_EVALUATION_MODE,
         "model_mode": mode,
@@ -507,28 +554,7 @@ def _build_metrics_payload(
         "threshold_policy": threshold_policy,
         "final_boundary_threshold": threshold,
         "row_count": len(boundary_truth),
-        predictor_metric_spec("segment_type").evaluation_metric_key: _compute_macro_f1(
-            segment_predictions,
-            segment_truth,
-            labels=sorted(VALID_SEGMENT_TYPES),
-        ),
-        "segment_type_accuracy": _compute_accuracy(segment_predictions, segment_truth),
-        "segment_type_correct_count": segment_type_correct_count,
-        "segment_type_incorrect_count": segment_type_incorrect_count,
-        "segment_type_confusion_matrix": segment_type_confusion_matrix,
-        predictor_metric_spec("boundary").evaluation_metric_key: _compute_boundary_f1(
-            boundary_predictions,
-            boundary_truth,
-        ),
-        "boundary_true_positive_count": boundary_counts["true_positive_count"],
-        "boundary_false_positive_count": boundary_counts["false_positive_count"],
-        "boundary_false_negative_count": boundary_counts["false_negative_count"],
-        "boundary_true_negative_count": boundary_counts["true_negative_count"],
-        "boundary_correct_count": boundary_counts["correct_count"],
-        "boundary_incorrect_count": boundary_counts["incorrect_count"],
-        "boundary_truth_positive_count": boundary_counts["truth_positive_count"],
-        "boundary_predicted_positive_count": boundary_counts["predicted_positive_count"],
-        "review_cost_metrics": review_cost_totals,
+        **metrics,
     }
 
 

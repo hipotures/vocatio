@@ -49,7 +49,6 @@ STATIC_CANDIDATE_HEADERS = [
     "right_segment_id",
     "left_segment_type",
     "right_segment_type",
-    "segment_type",
     "boundary",
     "candidate_rule_name",
     "candidate_rule_version",
@@ -525,7 +524,6 @@ def validate_candidate_row(row: Mapping[str, object], *, row_number: int) -> Non
 
     left_segment_type = _require_non_blank_text(row, "left_segment_type", row_number=row_number)
     right_segment_type = _require_non_blank_text(row, "right_segment_type", row_number=row_number)
-    segment_type = _require_non_blank_text(row, "segment_type", row_number=row_number)
     if left_segment_type not in VALID_SEGMENT_TYPES:
         raise ValueError(
             f"row {row_number}: left_segment_type must be one of {', '.join(sorted(VALID_SEGMENT_TYPES))}"
@@ -534,8 +532,6 @@ def validate_candidate_row(row: Mapping[str, object], *, row_number: int) -> Non
         raise ValueError(
             f"row {row_number}: right_segment_type must be one of {', '.join(sorted(VALID_SEGMENT_TYPES))}"
         )
-    if segment_type != right_segment_type:
-        raise ValueError(f"row {row_number}: segment_type must equal right_segment_type")
 
     left_segment_id = _require_non_blank_text(row, "left_segment_id", row_number=row_number)
     right_segment_id = _require_non_blank_text(row, "right_segment_id", row_number=row_number)
@@ -618,8 +614,12 @@ def validate_split_manifest(
     for row_index, row in enumerate(candidate_rows, start=1):
         manifest_id = _require_non_blank_text(row, manifest_key, row_number=row_index)
         split_name = manifest_by_id[manifest_id]
-        segment_type = _require_non_blank_text(row, "segment_type", row_number=row_index)
-        classes_by_split.setdefault(split_name, set()).add(segment_type)
+        right_segment_type = _require_non_blank_text(
+            row,
+            "right_segment_type",
+            row_number=row_index,
+        )
+        classes_by_split.setdefault(split_name, set()).add(right_segment_type)
 
     for split_name in HELDOUT_SPLIT_NAMES:
         missing = sorted(set(required_classes) - classes_by_split.get(split_name, set()))
@@ -785,8 +785,12 @@ def build_validation_report(
 ) -> dict[str, object]:
     class_balance: dict[str, int] = {}
     for row_index, row in enumerate(candidate_rows, start=2):
-        segment_type = _require_non_blank_text(row, "segment_type", row_number=row_index)
-        class_balance[segment_type] = class_balance.get(segment_type, 0) + 1
+        right_segment_type = _require_non_blank_text(
+            row,
+            "right_segment_type",
+            row_number=row_index,
+        )
+        class_balance[right_segment_type] = class_balance.get(right_segment_type, 0) + 1
 
     hard_negative_field_available = all("is_hard_negative" in row for row in candidate_rows)
     if hard_negative_field_available:

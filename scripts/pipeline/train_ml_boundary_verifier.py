@@ -44,6 +44,18 @@ DEFAULT_CORPUS_DATASET_FILENAME = "ml_boundary_candidates.corpus.csv"
 DEFAULT_SPLIT_MANIFEST_FILENAME = "ml_boundary_splits.csv"
 DEFAULT_MODEL_ROOT_DIRNAME = "ml_boundary_models"
 PREDICTOR_NAMES = ("left_segment_type", "right_segment_type", "boundary")
+MODEL_DIRNAME_BY_PREDICTOR = {
+    "left_segment_type": LEFT_SEGMENT_TYPE_MODEL_DIRNAME,
+    "right_segment_type": RIGHT_SEGMENT_TYPE_MODEL_DIRNAME,
+    "boundary": BOUNDARY_MODEL_DIRNAME,
+}
+
+
+def _predictor_model_dirname(predictor_name: str) -> str:
+    try:
+        return MODEL_DIRNAME_BY_PREDICTOR[predictor_name]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported predictor name: {predictor_name}") from exc
 
 
 def build_training_plan(mode: str) -> list[dict[str, str]]:
@@ -317,9 +329,9 @@ def _artifact_paths(output_dir: Path) -> dict[str, Path]:
         "feature_columns": output_dir / FEATURE_COLUMNS_FILENAME,
         "training_report": output_dir / TRAINING_REPORT_FILENAME,
         "training_summary": output_dir / TRAINING_SUMMARY_FILENAME,
-        "left_segment_type_model_dir": output_dir / LEFT_SEGMENT_TYPE_MODEL_DIRNAME,
-        "right_segment_type_model_dir": output_dir / RIGHT_SEGMENT_TYPE_MODEL_DIRNAME,
-        "boundary_model_dir": output_dir / BOUNDARY_MODEL_DIRNAME,
+        "left_segment_type_model_dir": output_dir / _predictor_model_dirname("left_segment_type"),
+        "right_segment_type_model_dir": output_dir / _predictor_model_dirname("right_segment_type"),
+        "boundary_model_dir": output_dir / _predictor_model_dirname("boundary"),
     }
 
 
@@ -448,7 +460,7 @@ def _train_predictors(
     for predictor_plan in build_training_plan(mode):
         predictor_name = predictor_plan["name"]
         metric_spec = predictor_metric_spec(predictor_name)
-        predictor_output_dir = output_dir / f"{predictor_name}_model"
+        predictor_output_dir = output_dir / _predictor_model_dirname(predictor_name)
         console.print(
             Rule(
                 title=(
@@ -472,7 +484,7 @@ def _train_predictors(
         )
         summary[predictor_name] = {
             "model_type": predictor.__class__.__name__,
-            "path": str(summary_output_dir / f"{predictor_name}_model"),
+            "path": str(summary_output_dir / _predictor_model_dirname(predictor_name)),
             "eval_metric": metric_spec.training_eval_metric,
             "validation_score": _extract_validation_score(
                 evaluation_payload,

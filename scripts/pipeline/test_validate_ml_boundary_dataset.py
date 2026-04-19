@@ -13,6 +13,7 @@ from build_ml_boundary_candidate_dataset import candidate_row_headers
 from build_ml_boundary_candidate_dataset import build_candidate_rows
 from lib.ml_boundary_dataset import canonical_candidate_id
 from lib.ml_boundary_truth import build_final_photo_truth
+from lib.ml_boundary_truth import load_truth_row
 from validate_ml_boundary_dataset import (
     build_validation_report,
     main,
@@ -157,6 +158,31 @@ def test_validate_attrition_report_rejects_coverage_count_above_generated_or_ret
 
 def test_validate_candidate_row_accepts_valid_row() -> None:
     validate_candidate_row(_candidate_row(), row_number=2)
+
+
+def test_validator_accepts_distinct_left_and_right_segment_types() -> None:
+    row = _candidate_row(left_segment_type="performance", right_segment_type="ceremony")
+    validate_candidate_row(row, row_number=2)
+
+
+def test_validate_candidate_row_rejects_blank_left_segment_type() -> None:
+    row = _candidate_row()
+    row["left_segment_type"] = ""
+
+    with pytest.raises(ValueError, match="left_segment_type must not be blank"):
+        validate_candidate_row(row, row_number=2)
+
+
+def test_truth_loader_reads_left_and_right_segment_types() -> None:
+    truth = load_truth_row(
+        {
+            "left_segment_type": "performance",
+            "right_segment_type": "ceremony",
+            "boundary": "1",
+        }
+    )
+    assert truth.left_segment_type == "performance"
+    assert truth.right_segment_type == "ceremony"
 
 
 def test_validate_candidate_row_accepts_freshly_generated_candidate_row() -> None:

@@ -49,10 +49,15 @@ def test_compute_review_cost_metrics_counts_split_runs_per_missed_boundary() -> 
 def _candidate_row(
     *,
     day_id: str,
-    segment_type: str,
+    segment_type: str | None = None,
+    left_segment_type: str = "performance",
+    right_segment_type: str = "ceremony",
     boundary: str,
     offset: int,
 ) -> dict[str, str]:
+    effective_right_segment_type = right_segment_type
+    if segment_type is not None:
+        effective_right_segment_type = segment_type
     row = {header: "" for header in CANDIDATE_ROW_HEADERS}
     row.update(
         {
@@ -68,9 +73,9 @@ def _candidate_row(
             "center_right_photo_id": f"{day_id}-p3-{offset}",
             "left_segment_id": f"{day_id}-seg-left",
             "right_segment_id": f"{day_id}-seg-right",
-            "left_segment_type": "performance",
-            "right_segment_type": segment_type,
-            "segment_type": segment_type,
+            "left_segment_type": left_segment_type,
+            "right_segment_type": effective_right_segment_type,
+            "segment_type": effective_right_segment_type,
             "boundary": boundary,
             "candidate_rule_name": "gap_threshold",
             "candidate_rule_version": "gap-v1",
@@ -113,12 +118,14 @@ def _write_model_artifacts(
     mode: str = "tabular_only",
 ) -> None:
     model_dir.mkdir(parents=True)
-    (model_dir / "segment_type_model").mkdir()
+    (model_dir / "left_segment_type_model").mkdir()
+    (model_dir / "right_segment_type_model").mkdir()
     (model_dir / "boundary_model").mkdir()
     training_plan_payload = {
         "mode": mode,
         "predictors": [
-            {"name": "segment_type", "problem_type": "multiclass"},
+            {"name": "left_segment_type", "problem_type": "multiclass"},
+            {"name": "right_segment_type", "problem_type": "multiclass"},
             {"name": "boundary", "problem_type": "binary"},
         ],
         "boundary_threshold_policy": {
@@ -141,7 +148,7 @@ def _write_model_artifacts(
                 "output_dir": str(model_dir),
                 "mode": mode,
                 "window_radius": 2,
-                "predictor_names": ["segment_type", "boundary"],
+                "predictor_names": ["left_segment_type", "right_segment_type", "boundary"],
                 "threshold_policy": {
                     "policy": "fixed",
                     "threshold": threshold,
@@ -202,7 +209,27 @@ def _records_from_frame(frame) -> list[dict[str, object]]:
     raise ValueError("unsupported frame payload")
 
 
-def test_eval_cli_writes_metrics_artifact(tmp_path: Path, monkeypatch) -> None:
+def _predictor_name_from_model_path(path: str) -> str:
+    if "left_segment_type_model" in path:
+        return "left_segment_type"
+    if "right_segment_type_model" in path:
+        return "right_segment_type"
+    if "boundary_model" in path:
+        return "boundary"
+    raise ValueError(f"unrecognized predictor path: {path}")
+
+
+def _predict_values_for_label(label: str, rows: list[dict[str, object]]) -> list[object]:
+    if label == "left_segment_type":
+        return [str(row["left_segment_type"]) for row in rows]
+    if label == "right_segment_type":
+        return [str(row["right_segment_type"]) for row in rows]
+    if label == "boundary":
+        return [int(row["boundary"]) for row in rows]
+    raise ValueError(f"unsupported predictor label: {label}")
+
+
+def test_evaluation_metrics_include_left_and_right_predictors(tmp_path: Path, monkeypatch) -> None:
     dataset_path = tmp_path / "ml_boundary_candidates.csv"
     split_manifest_path = tmp_path / "ml_boundary_splits.csv"
     _write_candidate_csv(
@@ -231,14 +258,11 @@ def test_eval_cli_writes_metrics_artifact(tmp_path: Path, monkeypatch) -> None:
 
         @classmethod
         def load(cls, path: str):
-            label = "boundary" if "boundary_model" in path else "segment_type"
-            return cls(label)
+            return cls(_predictor_name_from_model_path(path))
 
         def predict(self, frame):
             rows = _records_from_frame(frame)
-            if self.label == "segment_type":
-                return [str(row["segment_type"]) for row in rows]
-            return [int(row["boundary"]) for row in rows]
+            return _predict_values_for_label(self.label, rows)
 
         def predict_proba(self, frame):
             rows = _records_from_frame(frame)
@@ -272,11 +296,20 @@ def test_eval_cli_writes_metrics_artifact(tmp_path: Path, monkeypatch) -> None:
         "threshold_policy": {"policy": "fixed", "threshold": 0.5},
         "final_boundary_threshold": 0.5,
         "row_count": 1,
-        "segment_type_macro_f1": 1.0,
-        "segment_type_accuracy": 1.0,
-        "segment_type_correct_count": 1,
-        "segment_type_incorrect_count": 0,
-        "segment_type_confusion_matrix": {
+        "left_segment_type_macro_f1": 1.0,
+        "left_segment_type_accuracy": 1.0,
+        "left_segment_type_correct_count": 1,
+        "left_segment_type_incorrect_count": 0,
+        "left_segment_type_confusion_matrix": {
+            "ceremony": {"ceremony": 0, "performance": 0, "warmup": 0},
+            "performance": {"ceremony": 0, "performance": 1, "warmup": 0},
+            "warmup": {"ceremony": 0, "performance": 0, "warmup": 0},
+        },
+        "right_segment_type_macro_f1": 1.0,
+        "right_segment_type_accuracy": 1.0,
+        "right_segment_type_correct_count": 1,
+        "right_segment_type_incorrect_count": 0,
+        "right_segment_type_confusion_matrix": {
             "ceremony": {"ceremony": 0, "performance": 0, "warmup": 0},
             "performance": {"ceremony": 0, "performance": 0, "warmup": 0},
             "warmup": {"ceremony": 0, "performance": 0, "warmup": 1},
@@ -296,6 +329,79 @@ def test_eval_cli_writes_metrics_artifact(tmp_path: Path, monkeypatch) -> None:
             "estimated_correction_actions": 0,
         },
     }
+    assert "segment_type_macro_f1" not in metrics_payload
+
+
+def test_eval_cli_uses_distinct_left_and_right_label_columns(tmp_path: Path, monkeypatch) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    split_manifest_path = tmp_path / "ml_boundary_splits.csv"
+    _write_candidate_csv(
+        dataset_path,
+        [
+            _candidate_row(
+                day_id="20250324",
+                left_segment_type="warmup",
+                right_segment_type="performance",
+                boundary="0",
+                offset=1,
+            ),
+            _candidate_row(
+                day_id="20250325",
+                left_segment_type="ceremony",
+                right_segment_type="performance",
+                boundary="1",
+                offset=2,
+            ),
+        ],
+    )
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"day_id": "20250324", "split_name": "train"},
+            {"day_id": "20250325", "split_name": "test"},
+        ],
+    )
+    model_dir = tmp_path / "models" / "run-left-right-wiring"
+    output_dir = tmp_path / "eval" / "run-left-right-wiring"
+    _write_model_artifacts(model_dir, split_manifest_path=split_manifest_path)
+
+    class _FakePredictor:
+        def __init__(self, label: str):
+            self.label = label
+
+        @classmethod
+        def load(cls, path: str):
+            return cls(_predictor_name_from_model_path(path))
+
+        def predict(self, frame):
+            return _predict_values_for_label(self.label, _records_from_frame(frame))
+
+        def predict_proba(self, frame):
+            rows = _records_from_frame(frame)
+            return [
+                {"0": 1.0 if int(row["boundary"]) == 0 else 0.0, "1": 1.0 if int(row["boundary"]) == 1 else 0.0}
+                for row in rows
+            ]
+
+    monkeypatch.setattr("evaluate_ml_boundary_verifier.load_tabular_predictor_class", lambda: _FakePredictor)
+    monkeypatch.setattr("evaluate_ml_boundary_verifier.load_multimodal_predictor_class", lambda: _FakePredictor)
+
+    exit_code = eval_main(
+        [
+            str(dataset_path),
+            "--model-dir",
+            str(model_dir),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    metrics_payload = json.loads((output_dir / METRICS_FILENAME).read_text(encoding="utf-8"))
+    assert metrics_payload["left_segment_type_accuracy"] == 1.0
+    assert metrics_payload["left_segment_type_confusion_matrix"]["ceremony"]["ceremony"] == 1
+    assert metrics_payload["right_segment_type_accuracy"] == 1.0
+    assert metrics_payload["right_segment_type_confusion_matrix"]["performance"]["performance"] == 1
 
 
 def test_eval_cli_records_candidate_keyed_split_manifest_scope(tmp_path: Path, monkeypatch) -> None:
@@ -325,14 +431,11 @@ def test_eval_cli_records_candidate_keyed_split_manifest_scope(tmp_path: Path, m
 
         @classmethod
         def load(cls, path: str):
-            label = "boundary" if "boundary_model" in path else "segment_type"
-            return cls(label)
+            return cls(_predictor_name_from_model_path(path))
 
         def predict(self, frame):
             rows = _records_from_frame(frame)
-            if self.label == "segment_type":
-                return [str(row["segment_type"]) for row in rows]
-            return [int(row["boundary"]) for row in rows]
+            return _predict_values_for_label(self.label, rows)
 
         def predict_proba(self, frame):
             rows = _records_from_frame(frame)
@@ -464,8 +567,7 @@ def test_train_and_eval_cli_integration_writes_metrics(tmp_path: Path, monkeypat
 
         @classmethod
         def load(cls, path: str):
-            label = "boundary" if "boundary_model" in path else "segment_type"
-            return cls(label=label, path=path)
+            return cls(label=_predictor_name_from_model_path(path), path=path)
 
         def fit(self, _train_data, tuning_data=None, **_kwargs):
             Path(self.path).mkdir(parents=True, exist_ok=True)
@@ -479,9 +581,7 @@ def test_train_and_eval_cli_integration_writes_metrics(tmp_path: Path, monkeypat
 
         def predict(self, frame):
             rows = _records_from_frame(frame)
-            if self.label == "segment_type":
-                return [str(row["segment_type"]) for row in rows]
-            return [int(row["boundary"]) for row in rows]
+            return _predict_values_for_label(self.label, rows)
 
         def predict_proba(self, frame):
             rows = _records_from_frame(frame)
@@ -539,9 +639,12 @@ def test_train_and_eval_cli_integration_writes_metrics(tmp_path: Path, monkeypat
     assert metrics_payload["final_boundary_threshold"] == 0.5
     assert metrics_payload["row_count"] == 1
     assert metrics_payload["model_mode"] == "tabular_plus_thumbnail"
-    assert metrics_payload["segment_type_correct_count"] == 1
-    assert metrics_payload["segment_type_incorrect_count"] == 0
-    assert metrics_payload["segment_type_confusion_matrix"]["warmup"]["warmup"] == 1
+    assert metrics_payload["left_segment_type_correct_count"] == 1
+    assert metrics_payload["left_segment_type_incorrect_count"] == 0
+    assert metrics_payload["left_segment_type_confusion_matrix"]["performance"]["performance"] == 1
+    assert metrics_payload["right_segment_type_correct_count"] == 1
+    assert metrics_payload["right_segment_type_incorrect_count"] == 0
+    assert metrics_payload["right_segment_type_confusion_matrix"]["warmup"]["warmup"] == 1
     assert metrics_payload["boundary_true_negative_count"] == 1
     assert metrics_payload["boundary_correct_count"] == 1
     assert metrics_payload["boundary_incorrect_count"] == 0
@@ -578,13 +681,12 @@ def test_eval_cli_computes_review_cost_per_day_id_sequence(tmp_path: Path, monke
 
         @classmethod
         def load(cls, path: str):
-            label = "boundary" if "boundary_model" in path else "segment_type"
-            return cls(label)
+            return cls(_predictor_name_from_model_path(path))
 
         def predict(self, frame):
             rows = _records_from_frame(frame)
-            if self.label == "segment_type":
-                return [str(row["segment_type"]) for row in rows]
+            if self.label != "boundary":
+                return _predict_values_for_label(self.label, rows)
             return [1 for _ in rows]
 
         def predict_proba(self, frame):
@@ -641,14 +743,11 @@ def test_eval_cli_rejects_existing_metrics_without_overwrite(tmp_path: Path, mon
 
         @classmethod
         def load(cls, path: str):
-            label = "boundary" if "boundary_model" in path else "segment_type"
-            return cls(label)
+            return cls(_predictor_name_from_model_path(path))
 
         def predict(self, frame):
             rows = _records_from_frame(frame)
-            if self.label == "segment_type":
-                return [str(row["segment_type"]) for row in rows]
-            return [int(row["boundary"]) for row in rows]
+            return _predict_values_for_label(self.label, rows)
 
         def predict_proba(self, frame):
             rows = _records_from_frame(frame)
@@ -703,14 +802,11 @@ def test_eval_cli_overwrite_replaces_existing_metrics(tmp_path: Path, monkeypatc
 
         @classmethod
         def load(cls, path: str):
-            label = "boundary" if "boundary_model" in path else "segment_type"
-            return cls(label)
+            return cls(_predictor_name_from_model_path(path))
 
         def predict(self, frame):
             rows = _records_from_frame(frame)
-            if self.label == "segment_type":
-                return [str(row["segment_type"]) for row in rows]
-            return [int(row["boundary"]) for row in rows]
+            return _predict_values_for_label(self.label, rows)
 
         def predict_proba(self, frame):
             rows = _records_from_frame(frame)
