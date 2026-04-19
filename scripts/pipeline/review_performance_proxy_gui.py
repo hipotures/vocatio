@@ -412,20 +412,47 @@ def format_manual_prediction_gap_seconds(value: object) -> str:
     return f"{numeric:.3f}".rstrip("0").rstrip(".")
 
 
+def format_boundary_prediction_label(value: object) -> str:
+    if isinstance(value, bool):
+        return "cut" if value else "no_cut"
+    text = str(value or "").strip().lower()
+    if not text:
+        return "no_cut"
+    if text in {"cut", "true", "1", "yes", "y"}:
+        return "cut"
+    if text in {"no_cut", "nocut", "false", "0", "no", "n"}:
+        return "no_cut"
+    return text
+
+
 def format_manual_ml_prediction_result_text(result: Mapping[str, Any]) -> str:
-    boundary_prediction = bool(result.get("boundary_prediction"))
+    left_anchor = str(result.get("left_anchor", "") or "").strip() or str(
+        result.get("left_relative_path", "") or ""
+    ).strip()
+    right_anchor = str(result.get("right_anchor", "") or "").strip() or str(
+        result.get("right_relative_path", "") or ""
+    ).strip()
     return join_info_section_lines(
         [
-            f"Boundary: {'cut' if boundary_prediction else 'no_cut'} ({format_manual_prediction_score(result.get('boundary_confidence'))})",
+            (
+                "Boundary: "
+                f"{format_boundary_prediction_label(result.get('boundary_prediction'))} "
+                f"({format_manual_prediction_score(result.get('boundary_confidence'))})"
+            ),
+            (
+                "Left-side segment: "
+                f"{format_value(result.get('left_segment_type_prediction'))} "
+                f"({format_manual_prediction_score(result.get('left_segment_type_confidence'))})"
+            ),
             (
                 "Right-side segment: "
-                f"{format_value(result.get('segment_type_prediction'))} "
-                f"({format_manual_prediction_score(result.get('segment_type_confidence'))})"
+                f"{format_value(result.get('right_segment_type_prediction'))} "
+                f"({format_manual_prediction_score(result.get('right_segment_type_confidence'))})"
             ),
             f"Gap seconds: {format_manual_prediction_gap_seconds(result.get('gap_seconds'))}",
             (
                 "Anchors: "
-                f"{format_value(result.get('left_relative_path'))} -> {format_value(result.get('right_relative_path'))}"
+                f"{format_value(left_anchor)} -> {format_value(right_anchor)}"
             ),
         ]
     )
@@ -524,12 +551,13 @@ def compute_manual_ml_prediction_result(
         "ml_model_run_id": effective_ml_model_run_id,
         "boundary_prediction": bool(prediction.boundary_prediction),
         "boundary_confidence": prediction.boundary_confidence,
-        "boundary_positive_probability": prediction.boundary_positive_probability,
-        "segment_type_prediction": str(prediction.segment_type_prediction),
-        "segment_type_confidence": prediction.segment_type_confidence,
+        "left_segment_type_prediction": str(prediction.left_segment_type_prediction),
+        "left_segment_type_confidence": prediction.left_segment_type_confidence,
+        "right_segment_type_prediction": str(prediction.right_segment_type_prediction),
+        "right_segment_type_confidence": prediction.right_segment_type_confidence,
         "gap_seconds": anchor_pair.get("gap_seconds"),
-        "left_relative_path": str(anchor_pair.get("left_relative_path", "") or "").strip(),
-        "right_relative_path": str(anchor_pair.get("right_relative_path", "") or "").strip(),
+        "left_anchor": str(anchor_pair.get("left_relative_path", "") or "").strip(),
+        "right_anchor": str(anchor_pair.get("right_relative_path", "") or "").strip(),
         "window_config": dict(window_config),
     }
     result["result_text"] = format_manual_ml_prediction_result_text(result)
@@ -781,13 +809,14 @@ def format_ml_hint_section(title: str, ml_hint_row: Optional[Mapping[str, Any]],
         else:
             lines.append("  missing")
         return lines
-    boundary_prediction = bool(ml_hint_row.get("boundary_prediction"))
     lines.extend(
         [
-            f"  boundary: {'cut' if boundary_prediction else 'no_cut'}",
+            f"  boundary: {format_boundary_prediction_label(ml_hint_row.get('boundary_prediction'))}",
             f"  boundary confidence: {format_value(ml_hint_row.get('boundary_confidence'))}",
-            f"  right-side segment: {format_value(ml_hint_row.get('segment_type_prediction'))}",
-            f"  segment confidence: {format_value(ml_hint_row.get('segment_type_confidence'))}",
+            f"  left-side segment: {format_value(ml_hint_row.get('left_segment_type_prediction'))}",
+            f"  left-side confidence: {format_value(ml_hint_row.get('left_segment_type_confidence'))}",
+            f"  right-side segment: {format_value(ml_hint_row.get('right_segment_type_prediction'))}",
+            f"  right-side confidence: {format_value(ml_hint_row.get('right_segment_type_confidence'))}",
             f"  model run: {format_value(ml_diagnostics.get('ml_model_run_id'))}",
         ]
     )

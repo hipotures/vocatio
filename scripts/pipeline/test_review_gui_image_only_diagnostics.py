@@ -374,8 +374,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 "status": "result",
                 "boundary_prediction": True,
                 "boundary_confidence": 0.91,
-                "segment_type_prediction": "ceremony",
-                "segment_type_confidence": 0.88,
+                "left_segment_type_prediction": "performance",
+                "left_segment_type_confidence": 0.77,
+                "right_segment_type_prediction": "ceremony",
+                "right_segment_type_confidence": 0.88,
                 "gap_seconds": 128,
                 "left_relative_path": "cam/a.jpg",
                 "right_relative_path": "cam/d.jpg",
@@ -383,9 +385,42 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
         self.assertIn("Status: result", result_section["body"])
         self.assertIn("Boundary: cut (0.91)", result_section["body"])
+        self.assertIn("Left-side segment: performance (0.77)", result_section["body"])
         self.assertIn("Right-side segment: ceremony (0.88)", result_section["body"])
         self.assertIn("Gap seconds: 128", result_section["body"])
         self.assertIn("Anchors: cam/a.jpg -> cam/d.jpg", result_section["body"])
+
+    def test_manual_ml_prediction_section_renders_left_right_and_boundary(self):
+        state = review_gui.build_manual_ml_prediction_section(
+            {
+                "status": "result",
+                "boundary_prediction": "cut",
+                "boundary_confidence": 0.84,
+                "left_segment_type_prediction": "performance",
+                "left_segment_type_confidence": 0.71,
+                "right_segment_type_prediction": "ceremony",
+                "right_segment_type_confidence": 0.93,
+            }
+        )["body"]
+
+        self.assertIn("Boundary: cut (0.84)", state)
+        self.assertIn("Left-side segment: performance (0.71)", state)
+        self.assertIn("Right-side segment: ceremony (0.93)", state)
+
+    def test_manual_ml_prediction_section_no_longer_uses_legacy_segment_type_label(self):
+        state = review_gui.build_manual_ml_prediction_section(
+            {
+                "status": "result",
+                "boundary_prediction": "no_cut",
+                "boundary_confidence": 0.52,
+                "left_segment_type_prediction": "performance",
+                "left_segment_type_confidence": 0.99,
+                "right_segment_type_prediction": "performance",
+                "right_segment_type_confidence": 0.99,
+            }
+        )["body"]
+
+        self.assertNotIn("Segment type:", state)
 
     def test_build_manual_ml_prediction_section_promotes_resolution_errors_from_idle(self):
         section = review_gui.build_manual_ml_prediction_section(
@@ -406,8 +441,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             {
                 "boundary_prediction": False,
                 "boundary_confidence": 0.0,
-                "segment_type_prediction": "ceremony",
-                "segment_type_confidence": 0.0,
+                "left_segment_type_prediction": "performance",
+                "left_segment_type_confidence": 0.0,
+                "right_segment_type_prediction": "ceremony",
+                "right_segment_type_confidence": 0.0,
                 "gap_seconds": 0.0,
                 "left_relative_path": "cam/a.jpg",
                 "right_relative_path": "cam/b.jpg",
@@ -415,6 +452,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
 
         self.assertIn("Boundary: no_cut (0.00)", result_text)
+        self.assertIn("Left-side segment: performance (0.00)", result_text)
         self.assertIn("Right-side segment: ceremony (0.00)", result_text)
         self.assertIn("Gap seconds: 0.0", result_text)
 
@@ -736,14 +774,18 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     ("cam/a.jpg", "cam/b.jpg"): {
                         "boundary_prediction": True,
                         "boundary_confidence": "0.63",
-                        "segment_type_prediction": "ceremony",
-                        "segment_type_confidence": "0.74",
+                        "left_segment_type_prediction": "performance",
+                        "left_segment_type_confidence": "0.72",
+                        "right_segment_type_prediction": "ceremony",
+                        "right_segment_type_confidence": "0.74",
                     },
                     ("cam/b.jpg", "cam/c.jpg"): {
                         "boundary_prediction": False,
                         "boundary_confidence": "0.81",
-                        "segment_type_prediction": "dance",
-                        "segment_type_confidence": "0.97",
+                        "left_segment_type_prediction": "dance",
+                        "left_segment_type_confidence": "0.96",
+                        "right_segment_type_prediction": "dance",
+                        "right_segment_type_confidence": "0.97",
                     },
                 },
                 "error": "",
@@ -903,8 +945,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             {
                 "boundary_prediction": True,
                 "boundary_confidence": 0.84,
-                "segment_type_prediction": "dance",
-                "segment_type_confidence": 0.93,
+                "left_segment_type_prediction": "performance",
+                "left_segment_type_confidence": 0.71,
+                "right_segment_type_prediction": "dance",
+                "right_segment_type_confidence": 0.93,
                 "gap_seconds": 128,
                 "left_relative_path": "cam/a.jpg",
                 "right_relative_path": "cam/d.jpg",
@@ -912,6 +956,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
 
         self.assertIn("Boundary: cut (0.84)", text)
+        self.assertIn("Left-side segment: performance (0.71)", text)
         self.assertIn("Right-side segment: dance (0.93)", text)
         self.assertIn("Gap seconds: 128", text)
         self.assertIn("Anchors: cam/a.jpg -> cam/d.jpg", text)
@@ -1082,9 +1127,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             return_value=review_gui.probe_vlm_boundary.MlHintPrediction(
                 boundary_prediction=True,
                 boundary_confidence=0.91,
-                boundary_positive_probability=0.91,
-                segment_type_prediction="ceremony",
-                segment_type_confidence=0.88,
+                left_segment_type_prediction="performance",
+                left_segment_type_confidence=0.77,
+                right_segment_type_prediction="ceremony",
+                right_segment_type_confidence=0.88,
             ),
         ), unittest.mock.patch.object(review_gui.QApplication, "processEvents", return_value=None):
             window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(
@@ -1227,9 +1273,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             return_value={
                 "boundary_prediction": True,
                 "boundary_confidence": 0.91,
-                "boundary_positive_probability": 0.91,
-                "segment_type_prediction": "ceremony",
-                "segment_type_confidence": 0.88,
+                "left_segment_type_prediction": "performance",
+                "left_segment_type_confidence": 0.77,
+                "right_segment_type_prediction": "ceremony",
+                "right_segment_type_confidence": 0.88,
                 "gap_seconds": 1.0,
                 "left_relative_path": "cam/left.jpg",
                 "right_relative_path": "cam/right.jpg",
@@ -1263,9 +1310,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             return review_gui.probe_vlm_boundary.MlHintPrediction(
                 boundary_prediction=False,
                 boundary_confidence=0.73,
-                boundary_positive_probability=0.27,
-                segment_type_prediction="ceremony",
-                segment_type_confidence=0.66,
+                left_segment_type_prediction="performance",
+                left_segment_type_confidence=0.62,
+                right_segment_type_prediction="ceremony",
+                right_segment_type_confidence=0.66,
             )
 
         with unittest.mock.patch.object(
@@ -1706,14 +1754,18 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     ("cam/b.jpg", "cam/c.jpg"): {
                         "boundary_prediction": False,
                         "boundary_confidence": "0.81",
-                        "segment_type_prediction": "dance",
-                        "segment_type_confidence": "0.97",
+                        "left_segment_type_prediction": "dance",
+                        "left_segment_type_confidence": "0.95",
+                        "right_segment_type_prediction": "dance",
+                        "right_segment_type_confidence": "0.97",
                     },
                     ("cam/a.jpg", "cam/b.jpg"): {
                         "boundary_prediction": True,
                         "boundary_confidence": "0.63",
-                        "segment_type_prediction": "ceremony",
-                        "segment_type_confidence": "0.74",
+                        "left_segment_type_prediction": "performance",
+                        "left_segment_type_confidence": "0.72",
+                        "right_segment_type_prediction": "ceremony",
+                        "right_segment_type_confidence": "0.74",
                     },
                 },
                 "error": "",
@@ -1737,6 +1789,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             self.assertIn("Type: D", text)
             self.assertIn("ML hint after photo", text)
             self.assertIn("boundary: no_cut", text)
+            self.assertIn("left-side segment: dance", text)
             self.assertIn("right-side segment: dance", text)
             self.assertIn("ML hint before photo", text)
             self.assertIn("model run: day-20260323", text)
@@ -1759,8 +1812,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     ("cam/b.jpg", "cam/c.jpg"): {
                         "boundary_prediction": False,
                         "boundary_confidence": "0.81",
-                        "segment_type_prediction": "dance",
-                        "segment_type_confidence": "0.97",
+                        "left_segment_type_prediction": "dance",
+                        "left_segment_type_confidence": "0.95",
+                        "right_segment_type_prediction": "dance",
+                        "right_segment_type_confidence": "0.97",
                     }
                 },
                 "error": "",
@@ -1769,8 +1824,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 ("cam/b.jpg", "cam/c.jpg"): {
                     "boundary_prediction": True,
                     "boundary_confidence": "0.10",
-                    "segment_type_prediction": "wrong",
-                    "segment_type_confidence": "0.20",
+                    "left_segment_type_prediction": "wrong",
+                    "left_segment_type_confidence": "0.20",
+                    "right_segment_type_prediction": "wrong",
+                    "right_segment_type_confidence": "0.20",
                 }
             },
         }
@@ -1781,6 +1838,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         body = review_gui.build_image_only_photo_ml_hints_body(photo, diagnostics)
 
         self.assertIn("boundary: no_cut", body)
+        self.assertIn("left-side segment: dance", body)
         self.assertIn("right-side segment: dance", body)
         self.assertNotIn("right-side segment: wrong", body)
 
