@@ -464,11 +464,19 @@ def _extract_window_radius_from_candidate_rows(
 ) -> int:
     if not rows:
         raise ValueError(f"{resource_name} must contain at least one candidate row")
-    window_radius_values = {
-        int(str(row.get("window_radius", "")).strip())
-        for row in rows
-        if str(row.get("window_radius", "")).strip()
-    }
+    window_radius_values: set[int] = set()
+    for row_index, row in enumerate(rows, start=1):
+        window_radius_text = str(row.get("window_radius", "")).strip()
+        if window_radius_text == "":
+            raise ValueError(
+                f"{resource_name} row {row_index} window_radius must not be blank"
+            )
+        try:
+            window_radius_values.add(int(window_radius_text))
+        except ValueError as exc:
+            raise ValueError(
+                f"{resource_name} row {row_index} window_radius must be an integer"
+            ) from exc
     if len(window_radius_values) != 1:
         raise ValueError(
             f"candidate corpus must contain exactly one window_radius, got {sorted(window_radius_values)}"

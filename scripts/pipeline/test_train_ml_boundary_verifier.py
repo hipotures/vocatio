@@ -309,6 +309,29 @@ def test_validate_dataset_contract_rejects_extra_frame_columns_for_declared_radi
         validate_dataset_contract(dataset_path, "tabular_plus_thumbnail")
 
 
+def test_validate_dataset_contract_rejects_blank_window_radius_in_any_row(
+    tmp_path: Path,
+) -> None:
+    dataset_path = tmp_path / "ml_boundary_candidates.csv"
+    dataset_path.write_text(
+        "candidate_id,day_id,window_radius,segment_type,boundary,"
+        "frame_01_timestamp,frame_02_timestamp,frame_03_timestamp,frame_04_timestamp,"
+        "frame_01_photo_id,frame_02_photo_id,frame_03_photo_id,frame_04_photo_id,"
+        "frame_01_relpath,frame_02_relpath,frame_03_relpath,frame_04_relpath,"
+        "frame_01_thumb_path,frame_02_thumb_path,frame_03_thumb_path,frame_04_thumb_path\n"
+        "abc,20250325,2,performance,0,1,2,3,4,p1,p2,p3,p4,"
+        "cam/p1.jpg,cam/p2.jpg,cam/p3.jpg,cam/p4.jpg,"
+        "thumb/p1.jpg,thumb/p2.jpg,thumb/p3.jpg,thumb/p4.jpg\n"
+        "def,20250325,,performance,1,5,6,7,8,p5,p6,p7,p8,"
+        "cam/p5.jpg,cam/p6.jpg,cam/p7.jpg,cam/p8.jpg,"
+        "thumb/p5.jpg,thumb/p6.jpg,thumb/p7.jpg,thumb/p8.jpg\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="window_radius must not be blank"):
+        validate_dataset_contract(dataset_path, "tabular_plus_thumbnail")
+
+
 def test_validate_dataset_contract_requires_thumbnail_columns_for_thumbnail_mode(
     tmp_path: Path,
 ) -> None:
