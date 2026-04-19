@@ -1661,6 +1661,88 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
 
         reload_mock.assert_called_once_with()
 
+    def test_run_manual_ml_prediction_reload_failure_sets_error_without_downstream_work(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.manual_ml_prediction_state = {
+            "status": "result",
+            "left_relative_path": "cam/a.jpg",
+            "right_relative_path": "cam/b.jpg",
+            "result_text": "old result",
+            "resolution_error": "old resolution error",
+        }
+        window.current_manual_ml_prediction_state = Mock(return_value=window.manual_ml_prediction_state)
+        window.refresh_info_panel = Mock()
+        window.workspace_dir = Path("/workspace")
+        window.payload = {"day": "20260323"}
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+
+        with unittest.mock.patch.object(
+            review_gui,
+            "reload_probe_vlm_boundary_module",
+            side_effect=RuntimeError("boom"),
+        ), unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_prediction_state",
+        ) as resolve_mock, unittest.mock.patch.object(
+            review_gui,
+            "compute_manual_ml_prediction_result",
+        ) as compute_mock:
+            window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(
+                window,
+                review_gui.MainWindow,
+            )
+            window.run_manual_ml_prediction()
+
+        self.assertEqual(window.manual_ml_prediction_state["status"], "error")
+        self.assertTrue(window.manual_ml_prediction_state["error"].startswith("module reload failed:"))
+        self.assertNotIn("result_text", window.manual_ml_prediction_state)
+        self.assertNotIn("resolution_error", window.manual_ml_prediction_state)
+        resolve_mock.assert_not_called()
+        compute_mock.assert_not_called()
+        window.refresh_info_panel.assert_called_once_with()
+
+    def test_run_manual_vlm_analyze_reload_failure_sets_error_without_downstream_work(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.manual_vlm_analyze_state = {
+            "status": "result",
+            "left_relative_path": "cam/a.jpg",
+            "right_relative_path": "cam/b.jpg",
+            "result_text": "old result",
+            "resolution_error": "old resolution error",
+            "debug_file_paths": ["/tmp/stale.txt"],
+        }
+        window.current_manual_vlm_analyze_state = Mock(return_value=window.manual_vlm_analyze_state)
+        window.refresh_info_panel = Mock()
+        window.workspace_dir = Path("/workspace")
+        window.payload = {"day": "20260323"}
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+
+        with unittest.mock.patch.object(
+            review_gui,
+            "reload_probe_vlm_boundary_module",
+            side_effect=RuntimeError("boom"),
+        ), unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_vlm_analyze_state",
+        ) as resolve_mock, unittest.mock.patch.object(
+            review_gui,
+            "compute_manual_vlm_analyze_result",
+        ) as compute_mock:
+            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(
+                window,
+                review_gui.MainWindow,
+            )
+            window.run_manual_vlm_analyze()
+
+        self.assertEqual(window.manual_vlm_analyze_state["status"], "error")
+        self.assertTrue(window.manual_vlm_analyze_state["error"].startswith("module reload failed:"))
+        self.assertNotIn("result_text", window.manual_vlm_analyze_state)
+        self.assertNotIn("resolution_error", window.manual_vlm_analyze_state)
+        self.assertNotIn("debug_file_paths", window.manual_vlm_analyze_state)
+        resolve_mock.assert_not_called()
+        compute_mock.assert_not_called()
+        window.refresh_info_panel.assert_called_once_with()
+
     def test_compute_manual_ml_prediction_result_uses_image_paths_for_manual_thumbnail_columns(self):
         joined_rows = [
             {"relative_path": "cam/pre1.jpg", "start_epoch_ms": "1000", "image_path": "/tmp/pre1.jpg"},

@@ -3275,12 +3275,13 @@ class MainWindow(QMainWindow):
         try:
             reload_probe_vlm_boundary_module()
         except Exception as exc:
-            self.manual_ml_prediction_state = {
-                **dict(current_state),
-                "status": "error",
-                "error": f"module reload failed: {exc}",
-            }
-            self.refresh_current_info_dock()
+            error_state = dict(current_state)
+            error_state.pop("result_text", None)
+            error_state.pop("resolution_error", None)
+            error_state["status"] = "error"
+            error_state["error"] = f"module reload failed: {exc}"
+            self.manual_ml_prediction_state = error_state
+            self.refresh_info_panel()
             return
         if str(current_state.get("status", "") or "").strip().lower() == "running":
             return
@@ -3334,12 +3335,14 @@ class MainWindow(QMainWindow):
         try:
             reload_probe_vlm_boundary_module()
         except Exception as exc:
-            self.manual_vlm_analyze_state = {
-                **dict(current_state),
-                "status": "error",
-                "error": f"module reload failed: {exc}",
-            }
-            self.refresh_current_info_dock()
+            error_state = dict(current_state)
+            error_state.pop("result_text", None)
+            error_state.pop("resolution_error", None)
+            error_state.pop("debug_file_paths", None)
+            error_state["status"] = "error"
+            error_state["error"] = f"module reload failed: {exc}"
+            self.manual_vlm_analyze_state = error_state
+            self.refresh_info_panel()
             return
         if str(current_state.get("status", "") or "").strip().lower() == "running":
             return
@@ -3396,6 +3399,9 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         self.render_info_sections(self.build_current_info_sections(item, self.selected_photo_entries()))
+
+    def refresh_info_panel(self) -> None:
+        self.refresh_current_info_dock()
 
     def on_selection_changed(self) -> None:
         item = self.tree.currentItem()
