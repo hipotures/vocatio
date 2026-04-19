@@ -36,7 +36,6 @@ def _candidate_row(
 ) -> dict[str, str]:
     headers = candidate_row_headers(window_radius=window_radius, include_thumbnail=True)
     row = {header: "" for header in headers}
-    row.pop("segment_type", None)
     frame_count = window_radius * 2
     frame_photo_ids = {
         f"frame_{frame_index:02d}_photo_id": f"p{frame_index}"
@@ -92,11 +91,10 @@ def _candidate_row(
 
 
 def _write_candidate_csv(path: Path, rows: list[dict[str, str]]) -> None:
-    fieldnames = list(rows[0].keys()) if rows else [
-        header
-        for header in candidate_row_headers(window_radius=2, include_thumbnail=True)
-        if header != "segment_type"
-    ]
+    fieldnames = list(rows[0].keys()) if rows else candidate_row_headers(
+        window_radius=2,
+        include_thumbnail=True,
+    )
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -216,7 +214,7 @@ def test_validate_candidate_row_accepts_freshly_generated_candidate_row() -> Non
     )
 
     serialized_row = _serialize_candidate_row(rows[0])
-    serialized_row.pop("segment_type", None)
+    assert "segment_type" not in serialized_row
     validate_candidate_row(serialized_row, row_number=2)
 
 
@@ -904,7 +902,6 @@ def test_cli_main_rejects_header_only_candidate_csv_with_extra_frame_columns(
     headers = [
         header
         for header in candidate_row_headers(window_radius=2, include_thumbnail=True)
-        if header != "segment_type"
     ] + [
         "frame_05_photo_id",
         "frame_05_relpath",

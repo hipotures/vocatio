@@ -81,8 +81,10 @@ def test_candidate_headers_for_radius_two() -> None:
 
     assert "window_radius" in headers
     assert "window_size" not in headers
+    assert "segment_type" not in headers
     assert "frame_04_photo_id" in headers
     assert "frame_05_photo_id" not in headers
+    assert "segment_type" not in CANDIDATE_ROW_HEADERS
 
 
 def test_candidate_headers_for_radius_three() -> None:
@@ -182,7 +184,7 @@ def test_build_candidate_rows_preserves_ordered_frame_fields_and_labels() -> Non
     assert row["right_segment_id"] == "s2"
     assert row["left_segment_type"] == "performance"
     assert row["right_segment_type"] == "ceremony"
-    assert row["segment_type"] == "ceremony"
+    assert "segment_type" not in row
     assert row["boundary"] is True
     assert row["day_id"] == "20250325"
     assert row["window_radius"] == 2
@@ -325,7 +327,7 @@ def test_serialize_candidate_row_requires_window_radius() -> None:
         )
 
 
-def test_build_candidate_rows_uses_right_side_segment_type_and_boundary_labels() -> None:
+def test_build_candidate_rows_uses_explicit_segment_type_fields_and_boundary_labels() -> None:
     photos = [
         {"photo_id": "p1", "order_idx": 1, "timestamp": 0.0, "relative_path": "cam/p1.jpg"},
         {"photo_id": "p2", "order_idx": 2, "timestamp": 1.0, "relative_path": "cam/p2.jpg"},
@@ -366,7 +368,9 @@ def test_build_candidate_rows_uses_right_side_segment_type_and_boundary_labels()
     assert len(rows) == 1
     assert rows[0]["center_left_photo_id"] == "p4"
     assert rows[0]["center_right_photo_id"] == "p5"
-    assert rows[0]["segment_type"] == "ceremony"
+    assert rows[0]["left_segment_type"] == "ceremony"
+    assert rows[0]["right_segment_type"] == "ceremony"
+    assert "segment_type" not in rows[0]
     assert rows[0]["boundary"] is False
 
 
@@ -555,7 +559,9 @@ def test_main_writes_candidate_csv_and_reports_from_manifest_and_truth() -> None
         assert rows[0]["day_id"] == "20250325"
         assert rows[0]["center_left_photo_id"] == "p3"
         assert rows[0]["center_right_photo_id"] == "p4"
-        assert rows[0]["segment_type"] == "ceremony"
+        assert rows[0]["left_segment_type"] == "performance"
+        assert rows[0]["right_segment_type"] == "ceremony"
+        assert "segment_type" not in rows[0]
         assert rows[0]["boundary"] == "True"
         assert rows[0]["window_radius"] == "2"
         assert json.loads(rows[0]["window_photo_ids"]) == ["p2", "p3", "p4", "p5"]
