@@ -730,6 +730,161 @@ def test_load_training_data_bundle_joins_heuristic_boundary_scores_and_counts_mi
     assert bundle.missing_heuristic_candidate_count == 1
 
 
+def test_load_training_data_bundle_loads_heuristic_scores_from_all_corpus_days(
+    tmp_path: Path,
+) -> None:
+    workspace_a = tmp_path / "20250324DWC"
+    workspace_b = tmp_path / "20250325DWC"
+    corpus_dir = workspace_a / "ml_boundary_corpus"
+    dataset_path = corpus_dir / "ml_boundary_candidates.corpus.csv"
+    split_manifest_path = corpus_dir / "ml_boundary_splits.csv"
+    boundary_scores_path_a = workspace_a / "photo_boundary_scores.csv"
+    boundary_scores_path_b = workspace_b / "photo_boundary_scores.csv"
+    corpus_dir.mkdir(parents=True)
+    workspace_b.mkdir(parents=True)
+
+    train_row = _candidate_row(day_id="20250324", right_segment_type="performance", boundary="1")
+    validation_row = _candidate_row(
+        day_id="20250325",
+        right_segment_type="ceremony",
+        boundary="0",
+        candidate_rule_version="gap-v2",
+    )
+    _write_candidate_csv(dataset_path, [train_row, validation_row])
+    _write_split_manifest(
+        split_manifest_path,
+        [
+            {"candidate_id": train_row["candidate_id"], "split_name": "train"},
+            {"candidate_id": validation_row["candidate_id"], "split_name": "validation"},
+        ],
+    )
+    _write_boundary_scores_csv(
+        boundary_scores_path_a,
+        [
+            {
+                "left_relative_path": "cam/20250324-p1.jpg",
+                "right_relative_path": "cam/20250324-p2.jpg",
+                "left_start_local": "2025-03-24T10:00:01",
+                "right_start_local": "2025-03-24T10:00:02",
+                "left_start_epoch_ms": "1000",
+                "right_start_epoch_ms": "2000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.101000",
+                "distance_zscore": "0.201000",
+                "smoothed_distance_zscore": "0.301000",
+                "time_gap_boost": "0.000000",
+                "boundary_score": "0.401000",
+                "boundary_label": "none",
+                "boundary_reason": "baseline",
+                "model_source": "bootstrap_heuristic",
+            },
+            {
+                "left_relative_path": "cam/20250324-p2.jpg",
+                "right_relative_path": "cam/20250324-p3.jpg",
+                "left_start_local": "2025-03-24T10:00:02",
+                "right_start_local": "2025-03-24T10:00:03",
+                "left_start_epoch_ms": "2000",
+                "right_start_epoch_ms": "3000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.102000",
+                "distance_zscore": "0.202000",
+                "smoothed_distance_zscore": "0.302000",
+                "time_gap_boost": "0.100000",
+                "boundary_score": "0.402000",
+                "boundary_label": "soft",
+                "boundary_reason": "center",
+                "model_source": "bootstrap_heuristic",
+            },
+            {
+                "left_relative_path": "cam/20250324-p3.jpg",
+                "right_relative_path": "cam/20250324-p4.jpg",
+                "left_start_local": "2025-03-24T10:00:03",
+                "right_start_local": "2025-03-24T10:00:04",
+                "left_start_epoch_ms": "3000",
+                "right_start_epoch_ms": "4000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.103000",
+                "distance_zscore": "0.203000",
+                "smoothed_distance_zscore": "0.303000",
+                "time_gap_boost": "0.200000",
+                "boundary_score": "0.403000",
+                "boundary_label": "hard",
+                "boundary_reason": "tail",
+                "model_source": "bootstrap_heuristic",
+            },
+        ],
+    )
+    _write_boundary_scores_csv(
+        boundary_scores_path_b,
+        [
+            {
+                "left_relative_path": "cam/20250325-p1.jpg",
+                "right_relative_path": "cam/20250325-p2.jpg",
+                "left_start_local": "2025-03-25T10:00:01",
+                "right_start_local": "2025-03-25T10:00:02",
+                "left_start_epoch_ms": "1000",
+                "right_start_epoch_ms": "2000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.111000",
+                "distance_zscore": "0.211000",
+                "smoothed_distance_zscore": "0.311000",
+                "time_gap_boost": "0.000000",
+                "boundary_score": "0.411000",
+                "boundary_label": "none",
+                "boundary_reason": "baseline",
+                "model_source": "bootstrap_heuristic",
+            },
+            {
+                "left_relative_path": "cam/20250325-p2.jpg",
+                "right_relative_path": "cam/20250325-p3.jpg",
+                "left_start_local": "2025-03-25T10:00:02",
+                "right_start_local": "2025-03-25T10:00:03",
+                "left_start_epoch_ms": "2000",
+                "right_start_epoch_ms": "3000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.112000",
+                "distance_zscore": "0.212000",
+                "smoothed_distance_zscore": "0.312000",
+                "time_gap_boost": "0.100000",
+                "boundary_score": "0.412000",
+                "boundary_label": "soft",
+                "boundary_reason": "center",
+                "model_source": "bootstrap_heuristic",
+            },
+            {
+                "left_relative_path": "cam/20250325-p3.jpg",
+                "right_relative_path": "cam/20250325-p4.jpg",
+                "left_start_local": "2025-03-25T10:00:03",
+                "right_start_local": "2025-03-25T10:00:04",
+                "left_start_epoch_ms": "3000",
+                "right_start_epoch_ms": "4000",
+                "time_gap_seconds": "1.000000",
+                "dino_cosine_distance": "0.113000",
+                "distance_zscore": "0.213000",
+                "smoothed_distance_zscore": "0.313000",
+                "time_gap_boost": "0.200000",
+                "boundary_score": "0.413000",
+                "boundary_label": "hard",
+                "boundary_reason": "tail",
+                "model_source": "bootstrap_heuristic",
+            },
+        ],
+    )
+
+    bundle = load_training_data_bundle(
+        dataset_path,
+        split_manifest_path=split_manifest_path,
+        mode="tabular_only",
+    )
+
+    assert bundle.train_rows["heuristic_dino_dist_12"].tolist() == [0.101]
+    assert bundle.validation_rows["heuristic_dino_dist_12"].tolist() == [0.111]
+    assert bundle.total_heuristic_pair_count == 6
+    assert bundle.missing_heuristic_pair_count == 0
+    assert bundle.total_heuristic_candidate_count == 2
+    assert bundle.missing_heuristic_candidate_count == 0
+
+
 def test_load_training_data_bundle_rejects_duplicate_heuristic_pair_rows(
     tmp_path: Path,
 ) -> None:

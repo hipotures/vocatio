@@ -524,6 +524,7 @@ def test_train_cli_writes_real_training_artifacts(monkeypatch, tmp_path: Path, c
         "heuristic_boundary_coverage": {
             "source_available": False,
             "source_path": None,
+            "source_paths": [],
             "total_pair_count": 9,
             "covered_pair_count": 0,
             "missing_pair_count": 9,

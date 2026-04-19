@@ -431,7 +431,7 @@ def _build_training_metadata_payload(
         "time_limit_seconds": training_options["time_limit_seconds"],
         "missing_annotation_photo_count": training_bundle.missing_annotation_photo_count,
         "missing_annotation_candidate_count": training_bundle.missing_annotation_candidate_count,
-        "heuristic_scores_source_available": training_bundle.heuristic_scores_path is not None,
+        "heuristic_scores_source_available": bool(training_bundle.heuristic_scores_paths),
         "total_heuristic_pair_count": training_bundle.total_heuristic_pair_count,
         "missing_heuristic_pair_count": training_bundle.missing_heuristic_pair_count,
         "total_heuristic_candidate_count": training_bundle.total_heuristic_candidate_count,
@@ -545,7 +545,8 @@ def _descriptor_annotation_coverage_console_line(training_bundle: TrainingDataBu
 
 
 def _heuristic_boundary_coverage_payload(training_bundle: TrainingDataBundle) -> dict[str, int | bool | None]:
-    source_available = training_bundle.heuristic_scores_path is not None
+    source_paths = _heuristic_source_paths(training_bundle)
+    source_available = bool(source_paths)
     covered_pair_count = training_bundle.total_heuristic_pair_count - training_bundle.missing_heuristic_pair_count
     complete_candidate_count = (
         training_bundle.total_heuristic_candidate_count
@@ -553,7 +554,8 @@ def _heuristic_boundary_coverage_payload(training_bundle: TrainingDataBundle) ->
     )
     return {
         "source_available": source_available,
-        "source_path": str(training_bundle.heuristic_scores_path) if source_available else None,
+        "source_path": source_paths[0] if len(source_paths) == 1 else None,
+        "source_paths": source_paths,
         "total_pair_count": training_bundle.total_heuristic_pair_count,
         "covered_pair_count": covered_pair_count,
         "missing_pair_count": training_bundle.missing_heuristic_pair_count,
@@ -561,6 +563,16 @@ def _heuristic_boundary_coverage_payload(training_bundle: TrainingDataBundle) ->
         "complete_candidate_count": complete_candidate_count,
         "missing_candidate_count": training_bundle.missing_heuristic_candidate_count,
     }
+
+
+def _heuristic_source_paths(training_bundle: TrainingDataBundle) -> list[str]:
+    raw_paths = getattr(training_bundle, "heuristic_scores_paths", None)
+    if raw_paths is not None:
+        return [str(path) for path in raw_paths]
+    raw_path = getattr(training_bundle, "heuristic_scores_path", None)
+    if raw_path is None:
+        return []
+    return [str(raw_path)]
 
 
 def _heuristic_boundary_coverage_console_line(training_bundle: TrainingDataBundle) -> str:

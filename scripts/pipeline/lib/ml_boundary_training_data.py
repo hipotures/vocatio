@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 from lib.ml_boundary_features import build_candidate_feature_row
 from lib.photo_pre_model_annotations import (
@@ -67,6 +69,7 @@ NON_MODEL_FEATURE_COLUMNS = frozenset(REQUIRED_BASE_COLUMNS + ("split_name", "wi
 SPLIT_MANIFEST_VALUE_COLUMNS = ("split_name",)
 ALLOWED_SPLIT_NAMES = ("train", "validation", "test")
 PHOTO_BOUNDARY_SCORE_FILENAME = "photo_boundary_scores.csv"
+PIPELINE_SUMMARY_FILENAME = "ml_boundary_pipeline_summary.json"
 HEURISTIC_VALUE_COLUMNS = (
     "dino_cosine_distance",
     "boundary_score",
@@ -98,6 +101,7 @@ class TrainingDataBundle:
     validation_rows: "TrainingTable"
     test_rows: "TrainingTable"
     annotation_dir: Path | None
+    heuristic_scores_paths: tuple[Path, ...]
     heuristic_scores_path: Path | None
     split_manifest_scope: str
     split_counts_by_name: dict[str, int]
@@ -304,8 +308,12 @@ def load_training_data_bundle(
         split_manifest_frame=split_manifest_frame,
     )
     resolved_annotation_dir = _resolve_annotation_dir(dataset_path, annotation_dir=annotation_dir)
-    heuristic_scores_path = _resolve_boundary_scores_path(dataset_path)
-    heuristic_rows_by_pair = _load_heuristic_records(heuristic_scores_path)
+    heuristic_scores_paths = _resolve_boundary_scores_paths(
+        dataset_path,
+        candidate_rows=candidate_frame.rows,
+    )
+    heuristic_scores_path = heuristic_scores_paths[0] if heuristic_scores_paths else None
+    heuristic_rows_by_pair = _load_heuristic_records(heuristic_scores_paths)
     (
         joined_frame,
         derived_feature_columns,
@@ -360,6 +368,7 @@ def load_training_data_bundle(
         validation_rows=validation_rows,
         test_rows=test_rows,
         annotation_dir=resolved_annotation_dir,
+        heuristic_scores_paths=heuristic_scores_paths,
         heuristic_scores_path=heuristic_scores_path,
         split_manifest_scope=split_manifest_scope,
         split_counts_by_name=_split_counts(joined_frame["split_name"]),
@@ -600,6 +609,77 @@ def _resolve_annotation_dir(dataset_path: Path, *, annotation_dir: Path | None) 
     return None
 
 
+def _resolve_boundary_scores_paths(
+    dataset_path: Path,
+    *,
+    candidate_rows: Sequence[dict[str, object]],
+) -> tuple[Path, ...]:
+    if dataset_path.parent.name != "ml_boundary_corpus":
+        candidate_path = dataset_path.parent / PHOTO_BOUNDARY_SCORE_FILENAME
+        return (candidate_path,) if candidate_path.exists() else ()
+    day_ids = sorted(
+        {
+            str(row.get("day_id", "")).strip()
+            for row in candidate_rows
+            if str(row.get("day_id", "")).strip()
+        }
+    )
+    if not day_ids:
+        return ()
+    workspace_by_day = _resolve_corpus_day_workspaces(dataset_path, day_ids=day_ids)
+    resolved_paths: list[Path] = []
+    for day_id in day_ids:
+        workspace_dir = workspace_by_day.get(day_id)
+        if workspace_dir is None:
+            continue
+        candidate_path = workspace_dir / PHOTO_BOUNDARY_SCORE_FILENAME
+        if candidate_path.exists():
+            resolved_paths.append(candidate_path.resolve())
+    return tuple(resolved_paths)
+
+
+def _resolve_corpus_day_workspaces(
+    dataset_path: Path,
+    *,
+    day_ids: Sequence[str],
+) -> dict[str, Path]:
+    workspace_by_day: dict[str, Path] = {}
+    summary_path = dataset_path.parent / PIPELINE_SUMMARY_FILENAME
+    if summary_path.is_file():
+        try:
+            summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            summary_payload = None
+        raw_workspaces = summary_payload.get("day_workspaces") if isinstance(summary_payload, dict) else None
+        if isinstance(raw_workspaces, list):
+            for raw_workspace in raw_workspaces:
+                workspace_path = Path(str(raw_workspace)).expanduser().resolve()
+                day_id = _extract_day_id_from_workspace_name(workspace_path.name)
+                if day_id in day_ids and day_id not in workspace_by_day:
+                    workspace_by_day[day_id] = workspace_path
+    primary_workspace = dataset_path.parent.parent.resolve()
+    if len(day_ids) == 1:
+        workspace_by_day.setdefault(day_ids[0], primary_workspace)
+    primary_day_id = _extract_day_id_from_workspace_name(primary_workspace.name)
+    if primary_day_id is not None:
+        workspace_suffix = primary_workspace.name[len(primary_day_id) :]
+        workspace_parent = primary_workspace.parent
+        for day_id in day_ids:
+            if day_id in workspace_by_day:
+                continue
+            candidate_workspace = (workspace_parent / f"{day_id}{workspace_suffix}").resolve()
+            if candidate_workspace.exists():
+                workspace_by_day[day_id] = candidate_workspace
+    return workspace_by_day
+
+
+def _extract_day_id_from_workspace_name(workspace_name: str) -> str | None:
+    match = re.match(r"^(\d{8})", workspace_name)
+    if match is None:
+        return None
+    return match.group(1)
+
+
 def _resolve_boundary_scores_path(dataset_path: Path) -> Path | None:
     candidate_paths = [dataset_path.parent / PHOTO_BOUNDARY_SCORE_FILENAME]
     if dataset_path.parent.name == "ml_boundary_corpus":
@@ -714,38 +794,43 @@ def _load_annotation_records(
 
 
 def _load_heuristic_records(
-    boundary_scores_path: Path | None,
+    boundary_scores_paths: Sequence[Path],
 ) -> dict[tuple[str, str], dict[str, str]]:
-    if boundary_scores_path is None:
+    if not boundary_scores_paths:
         return {}
     heuristic_rows_by_pair: dict[tuple[str, str], dict[str, str]] = {}
-    with boundary_scores_path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        _require_columns(
-            list(reader.fieldnames or []),
-            required_columns=REQUIRED_HEURISTIC_SCORE_COLUMNS,
-            resource_name=boundary_scores_path.name,
-        )
-        rows = [dict(row) for row in reader]
-    for row in rows:
-        left_relative_path = str(row.get("left_relative_path", "")).strip()
-        right_relative_path = str(row.get("right_relative_path", "")).strip()
-        if left_relative_path == "" or right_relative_path == "":
-            continue
-        pair_key = (left_relative_path, right_relative_path)
-        if pair_key in heuristic_rows_by_pair:
-            raise ValueError(
-                "photo_boundary_scores.csv contains duplicate adjacent pair rows for "
-                f"{left_relative_path} -> {right_relative_path}"
+    pair_source_by_key: dict[tuple[str, str], Path] = {}
+    for boundary_scores_path in boundary_scores_paths:
+        with boundary_scores_path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            _require_columns(
+                list(reader.fieldnames or []),
+                required_columns=REQUIRED_HEURISTIC_SCORE_COLUMNS,
+                resource_name=boundary_scores_path.name,
             )
-        heuristic_rows_by_pair[pair_key] = {
-            "left_relative_path": left_relative_path,
-            "right_relative_path": right_relative_path,
-            **{
-                column_name: str(row.get(column_name, "")).strip()
-                for column_name in HEURISTIC_VALUE_COLUMNS
-            },
-        }
+            rows = [dict(row) for row in reader]
+        for row in rows:
+            left_relative_path = str(row.get("left_relative_path", "")).strip()
+            right_relative_path = str(row.get("right_relative_path", "")).strip()
+            if left_relative_path == "" or right_relative_path == "":
+                continue
+            pair_key = (left_relative_path, right_relative_path)
+            if pair_key in heuristic_rows_by_pair:
+                source_path = pair_source_by_key[pair_key]
+                raise ValueError(
+                    "photo_boundary_scores.csv contains duplicate adjacent pair rows for "
+                    f"{left_relative_path} -> {right_relative_path} across "
+                    f"{source_path} and {boundary_scores_path}"
+                )
+            heuristic_rows_by_pair[pair_key] = {
+                "left_relative_path": left_relative_path,
+                "right_relative_path": right_relative_path,
+                **{
+                    column_name: str(row.get(column_name, "")).strip()
+                    for column_name in HEURISTIC_VALUE_COLUMNS
+                },
+            }
+            pair_source_by_key[pair_key] = boundary_scores_path
     return heuristic_rows_by_pair
 
 
