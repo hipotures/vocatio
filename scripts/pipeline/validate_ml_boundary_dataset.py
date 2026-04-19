@@ -60,7 +60,10 @@ STATIC_CANDIDATE_HEADERS = [
     "window_relative_paths",
 ]
 FRAME_SCHEMA_COLUMN_RE = re.compile(
-    r"^frame_\d{2}_(photo_id|relpath|timestamp|thumb_path|preview_path)$"
+    r"^frame_(\d{2})_(photo_id|relpath|timestamp|thumb_path|preview_path)$"
+)
+FRAME_SCHEMA_COLUMN_KINDS = frozenset(
+    ("photo_id", "relpath", "timestamp", "thumb_path", "preview_path")
 )
 
 
@@ -97,6 +100,36 @@ def _unexpected_schema_columns(
     )
 
 
+def _expected_headers_for_header_only_csv(fieldnames: Sequence[str]) -> Sequence[str] | None:
+    frame_columns_by_index: dict[int, set[str]] = {}
+    for field_name in fieldnames:
+        match = FRAME_SCHEMA_COLUMN_RE.match(field_name)
+        if match is None:
+            continue
+        frame_index = int(match.group(1))
+        frame_columns_by_index.setdefault(frame_index, set()).add(match.group(2))
+    if not frame_columns_by_index:
+        return None
+
+    contiguous_full_index_count = 0
+    next_index = 1
+    while frame_columns_by_index.get(next_index) == FRAME_SCHEMA_COLUMN_KINDS:
+        contiguous_full_index_count = next_index
+        next_index += 1
+
+    even_frame_count = (
+        contiguous_full_index_count
+        if contiguous_full_index_count % 2 == 0
+        else contiguous_full_index_count - 1
+    )
+    if even_frame_count <= 0:
+        return tuple(STATIC_CANDIDATE_HEADERS)
+    return candidate_row_headers(
+        window_radius=even_frame_count // 2,
+        include_thumbnail=True,
+    )
+
+
 def _read_csv_rows(path: Path, *, required_headers: Sequence[str]) -> list[dict[str, str]]:
     if not path.is_file():
         raise FileNotFoundError(f"CSV does not exist: {path}")
@@ -120,6 +153,18 @@ def _read_csv_rows(path: Path, *, required_headers: Sequence[str]) -> list[dict[
                 rows = [dict(first_row), *(dict(row) for row in reader)]
             else:
                 rows = []
+                expected_dynamic_headers = _expected_headers_for_header_only_csv(
+                    reader.fieldnames or ()
+                )
+                if expected_dynamic_headers is not None:
+                    unexpected_columns = _unexpected_schema_columns(
+                        reader.fieldnames or (),
+                        expected_headers=expected_dynamic_headers,
+                    )
+                    if unexpected_columns:
+                        raise ValueError(
+                            f"{path.name} unexpected columns are not allowed: {', '.join(unexpected_columns)}"
+                        )
         else:
             rows = [dict(row) for row in reader]
         if window_radius_text is not None:

@@ -757,3 +757,41 @@ def test_cli_main_treats_mistyped_non_csv_candidate_path_as_explicit_file(tmp_pa
 
     with pytest.raises(SystemExit, match="--attrition-json is required when candidate_csv is a CSV path"):
         main([str(candidate_csv)])
+
+
+def test_cli_main_rejects_header_only_candidate_csv_with_extra_frame_columns(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate_csv = tmp_path / "ml_boundary_candidates.csv"
+    attrition_json = tmp_path / "ml_boundary_attrition.json"
+    headers = candidate_row_headers(window_radius=2, include_thumbnail=True) + [
+        "frame_05_photo_id",
+        "frame_05_relpath",
+        "frame_05_timestamp",
+        "frame_05_thumb_path",
+        "frame_05_preview_path",
+    ]
+    with candidate_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers)
+        writer.writeheader()
+    attrition_json.write_text(
+        json.dumps(
+            {
+                "candidate_count_generated": 0,
+                "candidate_count_excluded_missing_window": 0,
+                "candidate_count_excluded_missing_artifacts": 0,
+                "candidate_count_retained": 0,
+                "true_boundary_coverage_before_exclusions": 0,
+                "true_boundary_coverage_after_exclusions": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = main([str(candidate_csv), "--attrition-json", str(attrition_json)])
+
+    assert result == 1
+    captured = capsys.readouterr()
+    assert "unexpected columns are not allowed" in captured.err
+    assert "frame_05_photo_id" in captured.err

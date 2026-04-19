@@ -337,6 +337,7 @@ def _serialize_candidate_row(row: Mapping[str, object]) -> dict[str, object]:
 def _build_dataset_report(
     *,
     day_id: str,
+    candidate_rule_name: str,
     gap_threshold_seconds: float,
     candidate_rule_version: str,
     window_radius: int,
@@ -346,7 +347,7 @@ def _build_dataset_report(
 ) -> dict[str, object]:
     return {
         "day_id": day_id,
-        "candidate_rule_name": DEFAULT_CANDIDATE_RULE_NAME,
+        "candidate_rule_name": candidate_rule_name,
         "candidate_rule_version": candidate_rule_version,
         "candidate_rule_params_json": candidate_rule_params_json,
         "descriptor_schema_version": descriptor_schema_version,
@@ -354,6 +355,27 @@ def _build_dataset_report(
         "gap_threshold_seconds": float(gap_threshold_seconds),
         **{key: int(attrition[key]) for key in ATTRITION_REPORT_KEYS},
     }
+
+
+def _resolve_candidate_rule_name(
+    candidate_rows: Sequence[Mapping[str, object]],
+    *,
+    default_candidate_rule_name: str,
+) -> str:
+    if not candidate_rows:
+        return default_candidate_rule_name
+    candidate_rule_names = {
+        str(row.get("candidate_rule_name", "")).strip()
+        for row in candidate_rows
+    }
+    if "" in candidate_rule_names:
+        raise ValueError("candidate_rule_name is required and must not be blank")
+    if len(candidate_rule_names) != 1:
+        raise ValueError(
+            "candidate rows must contain exactly one candidate_rule_name, got "
+            + ", ".join(sorted(candidate_rule_names))
+        )
+    return next(iter(candidate_rule_names))
 
 
 def build_candidate_rows(
@@ -543,6 +565,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         serialized_rows = [_serialize_candidate_row(row) for row in candidate_rows]
         dataset_report = _build_dataset_report(
             day_id=day_id,
+            candidate_rule_name=_resolve_candidate_rule_name(
+                candidate_rows,
+                default_candidate_rule_name=DEFAULT_CANDIDATE_RULE_NAME,
+            ),
             gap_threshold_seconds=args.gap_threshold_seconds,
             candidate_rule_version=args.candidate_rule_version,
             window_radius=args.window_radius,
