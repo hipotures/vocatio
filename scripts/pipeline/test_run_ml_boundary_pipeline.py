@@ -31,8 +31,11 @@ def _candidate_row(
     segment_type: str,
     boundary: str,
     offset: int,
+    left_segment_type: str | None = None,
     window_radius: int = 2,
 ) -> dict[str, str]:
+    if left_segment_type is None:
+        left_segment_type = segment_type
     headers = candidate_row_headers(window_radius=window_radius, include_thumbnail=True)
     row = {header: "" for header in headers}
     frame_count = window_radius * 2
@@ -50,7 +53,7 @@ def _candidate_row(
             "center_right_photo_id": f"{day_id}-p{window_radius + 1}-{offset}",
             "left_segment_id": f"{day_id}-seg-left",
             "right_segment_id": f"{day_id}-seg-right",
-            "left_segment_type": "performance",
+            "left_segment_type": left_segment_type,
             "right_segment_type": segment_type,
             "boundary": boundary,
             "candidate_rule_name": "gap_threshold",
@@ -162,6 +165,22 @@ def _segment_types_by_split(
 ) -> dict[str, set[str]]:
     segment_type_by_candidate_id = {
         row["candidate_id"]: row["right_segment_type"]
+        for row in candidate_rows
+    }
+    grouped: dict[str, set[str]] = {}
+    for row in split_rows:
+        grouped.setdefault(row["split_name"], set()).add(segment_type_by_candidate_id[row["candidate_id"]])
+    return grouped
+
+
+def _segment_types_by_split_for_column(
+    candidate_rows: list[dict[str, str]],
+    split_rows: list[dict[str, str]],
+    *,
+    column_name: str,
+) -> dict[str, set[str]]:
+    segment_type_by_candidate_id = {
+        row["candidate_id"]: row[column_name]
         for row in candidate_rows
     }
     grouped: dict[str, set[str]] = {}
@@ -1428,6 +1447,64 @@ def test_global_stratified_preserves_global_fraction_targets_across_multiple_sma
     assert {"performance", "ceremony"} <= segment_types_by_split["test"]
 
 
+def test_global_stratified_preserves_required_heldout_classes_for_left_and_right_predictors() -> None:
+    candidate_rows = []
+    for offset in range(6):
+        row = _candidate_row(
+            day_id="20250325",
+            segment_type="performance",
+            left_segment_type="ceremony",
+            boundary="0",
+            offset=offset + 1,
+        )
+        row["candidate_id"] = f"cross-lc-rp-c{offset:02d}"
+        candidate_rows.append(row)
+    for offset in range(6):
+        row = _candidate_row(
+            day_id="20250325",
+            segment_type="ceremony",
+            left_segment_type="performance",
+            boundary="1",
+            offset=offset + 101,
+        )
+        row["candidate_id"] = f"cross-lp-rc-c{offset:02d}"
+        candidate_rows.append(row)
+
+    split_rows, effective_strategy = _build_global_stratified_split_rows(
+        candidate_rows,
+        SplitConfig(
+            strategy="global_stratified",
+            train_fraction=0.70,
+            validation_fraction=0.15,
+            test_fraction=0.15,
+            seed=17,
+        ),
+        required_heldout_classes=["performance", "ceremony"],
+    )
+
+    assert effective_strategy == "global_stratified"
+    split_counts = {
+        split_name: len(candidate_ids)
+        for split_name, candidate_ids in _split_rows_by_name(split_rows).items()
+    }
+    assert split_counts == {"train": 8, "validation": 2, "test": 2}
+
+    left_segment_types_by_split = _segment_types_by_split_for_column(
+        candidate_rows,
+        split_rows,
+        column_name="left_segment_type",
+    )
+    right_segment_types_by_split = _segment_types_by_split_for_column(
+        candidate_rows,
+        split_rows,
+        column_name="right_segment_type",
+    )
+    assert {"performance", "ceremony"} <= left_segment_types_by_split["validation"]
+    assert {"performance", "ceremony"} <= left_segment_types_by_split["test"]
+    assert {"performance", "ceremony"} <= right_segment_types_by_split["validation"]
+    assert {"performance", "ceremony"} <= right_segment_types_by_split["test"]
+
+
 def test_global_stratified_preserves_boundary_classes_when_each_full_stratum_supports_all_splits() -> None:
     candidate_rows = []
     for boundary in ("0", "1"):
@@ -1565,6 +1642,59 @@ def test_global_stratified_raises_when_required_heldout_coverage_is_impossible()
         assert "ceremony" in str(exc)
     else:
         raise AssertionError("expected impossible held-out coverage to raise a ValueError")
+
+
+def test_global_stratified_raises_when_left_segment_type_heldout_coverage_is_impossible() -> None:
+    candidate_rows = []
+    for offset in range(8):
+        row = _candidate_row(
+            day_id="20250325",
+            segment_type="performance",
+            left_segment_type="performance",
+            boundary="0",
+            offset=offset + 1,
+        )
+        row["candidate_id"] = f"rp-lp-c{offset:02d}"
+        candidate_rows.append(row)
+    for offset in range(2):
+        row = _candidate_row(
+            day_id="20250325",
+            segment_type="ceremony",
+            left_segment_type="performance",
+            boundary="1",
+            offset=offset + 101,
+        )
+        row["candidate_id"] = f"rc-lp-c{offset:02d}"
+        candidate_rows.append(row)
+    rare_left_only = _candidate_row(
+        day_id="20250325",
+        segment_type="performance",
+        left_segment_type="ceremony",
+        boundary="0",
+        offset=500,
+    )
+    rare_left_only["candidate_id"] = "rp-lc-only"
+    candidate_rows.append(rare_left_only)
+
+    try:
+        _build_global_stratified_split_rows(
+            candidate_rows,
+            SplitConfig(
+                strategy="global_stratified",
+                train_fraction=0.70,
+                validation_fraction=0.15,
+                test_fraction=0.15,
+                seed=5,
+            ),
+            required_heldout_classes=["performance", "ceremony"],
+        )
+    except ValueError as exc:
+        assert "global_stratified cannot satisfy required held-out classes" in str(exc)
+        assert "coverage check failed after stratified allocation" in str(exc)
+    else:
+        raise AssertionError(
+            "expected left_segment_type held-out coverage mismatch to raise a ValueError"
+        )
 
 
 def test_global_stratified_raises_when_required_heldout_minimum_counts_exceed_available_rows() -> None:
@@ -1725,6 +1855,32 @@ def test_resolve_split_config_reads_vocatio_values(tmp_path: Path) -> None:
     assert split_config.validation_fraction == 0.20
     assert split_config.test_fraction == 0.20
     assert split_config.seed == 99
+
+
+def test_required_classes_default_discovers_union_of_left_and_right_segment_types() -> None:
+    metadata_rows = [
+        {
+            "day_id": "20250325",
+            "segment_types": json.dumps(["performance"]),
+        }
+    ]
+    candidate_rows = [
+        _candidate_row(
+            day_id="20250325",
+            segment_type="performance",
+            left_segment_type="ceremony",
+            boundary="0",
+            offset=1,
+        )
+    ]
+
+    required_classes = run_ml_boundary_pipeline._required_classes(
+        metadata_rows,
+        explicit_required=None,
+        candidate_rows=candidate_rows,
+    )
+
+    assert required_classes == ["ceremony", "performance"]
 
 
 def test_main_rejects_corpus_with_fewer_than_three_rows(tmp_path: Path, monkeypatch, capsys) -> None:

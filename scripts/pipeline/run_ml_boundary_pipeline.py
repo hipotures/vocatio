@@ -690,24 +690,27 @@ def _split_counts_for_total(
     return counts
 
 
-def _validate_candidate_row(row: dict[str, str]) -> tuple[str, str, str]:
+def _validate_candidate_row(row: dict[str, str]) -> tuple[str, str, str, str]:
     candidate_id = str(row.get("candidate_id", "")).strip()
     if candidate_id == "":
         raise ValueError("merged candidate rows must include non-blank candidate_id values")
     boundary = str(row.get("boundary", "")).strip().lower()
     if boundary == "":
         raise ValueError("merged candidate rows must include non-blank boundary values")
+    left_segment_type = str(row.get("left_segment_type", "")).strip()
+    if left_segment_type == "":
+        raise ValueError("merged candidate rows must include non-blank left_segment_type values")
     right_segment_type = str(row.get("right_segment_type", "")).strip()
     if right_segment_type == "":
         raise ValueError("merged candidate rows must include non-blank right_segment_type values")
-    return candidate_id, boundary, right_segment_type
+    return candidate_id, boundary, left_segment_type, right_segment_type
 
 
 def _validate_unique_candidate_ids(candidate_rows: Sequence[dict[str, str]]) -> None:
     seen: set[str] = set()
     duplicates: set[str] = set()
     for row in candidate_rows:
-        candidate_id, _, _ = _validate_candidate_row(row)
+        candidate_id, _, _, _ = _validate_candidate_row(row)
         if candidate_id in seen:
             duplicates.add(candidate_id)
         else:
@@ -761,17 +764,17 @@ def _shuffle_strata(
     candidate_rows: Sequence[dict[str, str]],
     *,
     split_config: SplitConfig,
-) -> tuple[dict[tuple[str, str], list[str]], dict[str, str]]:
+) -> tuple[dict[tuple[str, str], list[str]], dict[str, tuple[str, str]]]:
     random_generator = random.Random(split_config.seed)
     strata: dict[tuple[str, str], list[str]] = {}
-    right_segment_type_by_candidate_id: dict[str, str] = {}
+    segment_types_by_candidate_id: dict[str, tuple[str, str]] = {}
     for row in candidate_rows:
-        candidate_id, boundary, right_segment_type = _validate_candidate_row(row)
+        candidate_id, boundary, left_segment_type, right_segment_type = _validate_candidate_row(row)
         strata.setdefault((boundary, right_segment_type), []).append(candidate_id)
-        right_segment_type_by_candidate_id[candidate_id] = right_segment_type
+        segment_types_by_candidate_id[candidate_id] = (left_segment_type, right_segment_type)
     for stratum_key in sorted(strata):
         random_generator.shuffle(strata[stratum_key])
-    return strata, right_segment_type_by_candidate_id
+    return strata, segment_types_by_candidate_id
 
 
 def _reserve_required_heldout_assignments(
@@ -973,16 +976,22 @@ def _allocate_remaining_stratified_counts(
 def _has_required_heldout_coverage(
     assignments: dict[str, str],
     *,
-    right_segment_type_by_candidate_id: dict[str, str],
+    segment_types_by_candidate_id: dict[str, tuple[str, str]],
     required_heldout_classes: Sequence[str],
 ) -> bool:
     if not required_heldout_classes:
         return True
-    classes_by_split: dict[str, set[str]] = {}
+    required_set = set(required_heldout_classes)
+    left_classes_by_split: dict[str, set[str]] = {}
+    right_classes_by_split: dict[str, set[str]] = {}
     for candidate_id, split_name in assignments.items():
-        classes_by_split.setdefault(split_name, set()).add(right_segment_type_by_candidate_id[candidate_id])
+        left_segment_type, right_segment_type = segment_types_by_candidate_id[candidate_id]
+        left_classes_by_split.setdefault(split_name, set()).add(left_segment_type)
+        right_classes_by_split.setdefault(split_name, set()).add(right_segment_type)
     for split_name in HELDOUT_SPLIT_NAMES:
-        if not set(required_heldout_classes).issubset(classes_by_split.get(split_name, set())):
+        if not required_set.issubset(left_classes_by_split.get(split_name, set())):
+            return False
+        if not required_set.issubset(right_classes_by_split.get(split_name, set())):
             return False
     return True
 
@@ -1022,7 +1031,7 @@ def _build_global_stratified_split_rows(
 ) -> tuple[list[dict[str, str]], str]:
     _validate_corpus_size(candidate_rows)
     _validate_unique_candidate_ids(candidate_rows)
-    strata, right_segment_type_by_candidate_id = _shuffle_strata(
+    strata, segment_types_by_candidate_id = _shuffle_strata(
         candidate_rows,
         split_config=split_config,
     )
@@ -1091,7 +1100,7 @@ def _build_global_stratified_split_rows(
 
     if not _has_required_heldout_coverage(
         assignments,
-        right_segment_type_by_candidate_id=right_segment_type_by_candidate_id,
+        segment_types_by_candidate_id=segment_types_by_candidate_id,
         required_heldout_classes=required_heldout_classes,
     ):
         if required_heldout_classes:
@@ -1124,6 +1133,8 @@ def _build_corpus_split_rows(
 def _required_classes(
     metadata_rows: Sequence[dict[str, str]],
     explicit_required: Sequence[str] | None,
+    *,
+    candidate_rows: Sequence[dict[str, str]] | None = None,
 ) -> list[str]:
     if explicit_required:
         values = []
@@ -1136,6 +1147,14 @@ def _required_classes(
                 raise ValueError(f"required held-out classes must be one of: {choices}")
             values.append(normalized)
         return values
+
+    if candidate_rows is not None:
+        discovered: set[str] = set()
+        for row in candidate_rows:
+            _, _, left_segment_type, right_segment_type = _validate_candidate_row(row)
+            discovered.add(left_segment_type)
+            discovered.add(right_segment_type)
+        return sorted(discovered)
 
     discovered: set[str] = set()
     for row in metadata_rows:
@@ -1563,6 +1582,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     required_heldout_classes = _required_classes(
         day_metadata_rows,
         explicit_required=args.required_heldout_classes,
+        candidate_rows=merged_rows,
     )
     split_rows, effective_split_strategy = _build_corpus_split_rows(
         merged_rows,
