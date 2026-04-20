@@ -160,6 +160,126 @@ models:
             self.assertEqual(args.ml_model_run_id, "day-20260323-best")
             self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
 
+    def test_apply_vocatio_defaults_preserves_explicit_cli_vlm_values(self):
+        day_dir = self.make_day_dir(
+            "\n".join(
+                [
+                    "VLM_NAME=qwen3.5:9b",
+                    "VLM_TEMPERATURE=0.15",
+                ]
+            )
+        )
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - VLM_NAME: "qwen3.5:9b"
+    VLM_PROVIDER: "ollama"
+    VLM_BASE_URL: "http://127.0.0.1:11435"
+    VLM_MODEL: "preset-model"
+    VLM_CONTEXT_TOKENS: 8192
+    VLM_MAX_OUTPUT_TOKENS: 256
+    VLM_KEEP_ALIVE: "30m"
+    VLM_TIMEOUT_SECONDS: 180
+    VLM_TEMPERATURE: 0.0
+    VLM_REASONING_LEVEL: "false"
+    VLM_RESPONSE_SCHEMA_MODE: "on"
+    VLM_JSON_VALIDATION_MODE: "relaxed"
+"""
+        )
+        with mock.patch.object(probe, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = probe.parse_args(
+                [
+                    str(day_dir),
+                    "--provider",
+                    "vllm",
+                    "--model",
+                    "cli-model",
+                    "--ollama-base-url",
+                    "http://127.0.0.1:9000",
+                    "--ollama-num-ctx",
+                    "4096",
+                    "--ollama-num-predict",
+                    "128",
+                    "--ollama-keep-alive",
+                    "5m",
+                    "--timeout-seconds",
+                    "45",
+                    "--temperature",
+                    "0.6",
+                    "--ollama-think",
+                    "high",
+                    "--response-schema-mode",
+                    "on",
+                    "--json-validation-mode",
+                    "relaxed",
+                ]
+            )
+            args = probe.apply_vocatio_defaults(args, day_dir)
+            self.assertEqual(args.provider, "vllm")
+            self.assertEqual(args.model, "cli-model")
+            self.assertEqual(args.ollama_base_url, "http://127.0.0.1:9000")
+            self.assertEqual(args.ollama_num_ctx, 4096)
+            self.assertEqual(args.ollama_num_predict, 128)
+            self.assertEqual(args.ollama_keep_alive, "5m")
+            self.assertEqual(args.timeout_seconds, 45.0)
+            self.assertEqual(args.temperature, 0.6)
+            self.assertEqual(args.ollama_think, "high")
+            self.assertEqual(args.response_schema_mode, "on")
+            self.assertEqual(args.json_validation_mode, "relaxed")
+
+    def test_apply_vocatio_defaults_allows_cli_only_vlm_model_config_without_name(self):
+        day_dir = self.make_day_dir("VLM_TEMPERATURE=0.15\n")
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - VLM_NAME: "qwen3.5:9b"
+    VLM_PROVIDER: "ollama"
+    VLM_BASE_URL: "http://127.0.0.1:11435"
+    VLM_MODEL: "preset-model"
+    VLM_CONTEXT_TOKENS: 8192
+    VLM_MAX_OUTPUT_TOKENS: 256
+    VLM_KEEP_ALIVE: "30m"
+    VLM_TIMEOUT_SECONDS: 180
+    VLM_TEMPERATURE: 0.0
+    VLM_REASONING_LEVEL: "false"
+    VLM_RESPONSE_SCHEMA_MODE: "on"
+    VLM_JSON_VALIDATION_MODE: "relaxed"
+"""
+        )
+        with mock.patch.object(probe, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = probe.parse_args(
+                [
+                    str(day_dir),
+                    "--provider",
+                    "vllm",
+                    "--model",
+                    "cli-model",
+                    "--ollama-base-url",
+                    "http://127.0.0.1:9000",
+                    "--ollama-num-ctx",
+                    "4096",
+                    "--ollama-num-predict",
+                    "128",
+                    "--ollama-keep-alive",
+                    "5m",
+                    "--timeout-seconds",
+                    "45",
+                    "--temperature",
+                    "0.6",
+                    "--ollama-think",
+                    "high",
+                    "--response-schema-mode",
+                    "on",
+                    "--json-validation-mode",
+                    "relaxed",
+                ]
+            )
+            args = probe.apply_vocatio_defaults(args, day_dir)
+            self.assertEqual(args.provider, "vllm")
+            self.assertEqual(args.model, "cli-model")
+            self.assertEqual(args.ollama_base_url, "http://127.0.0.1:9000")
+            self.assertEqual(args.temperature, 0.6)
+
     def test_apply_vocatio_defaults_ignores_legacy_window_size_and_overlap_env(self):
         day_dir = self.make_day_dir(
             "\n".join(

@@ -93,6 +93,19 @@ VLM_WORKFLOW_CONFIG_KEYS = frozenset(
     }
 )
 VLM_IGNORED_LEGACY_CONFIG_KEYS = frozenset({"VLM_WINDOW_SIZE", "VLM_OVERLAP"})
+VLM_MODEL_ARG_SPECS = (
+    ("VLM_PROVIDER", "provider", DEFAULT_PROVIDER),
+    ("VLM_MODEL", "model", DEFAULT_MODEL_NAME),
+    ("VLM_BASE_URL", "ollama_base_url", DEFAULT_OLLAMA_BASE_URL),
+    ("VLM_CONTEXT_TOKENS", "ollama_num_ctx", None),
+    ("VLM_MAX_OUTPUT_TOKENS", "ollama_num_predict", None),
+    ("VLM_KEEP_ALIVE", "ollama_keep_alive", DEFAULT_OLLAMA_KEEP_ALIVE),
+    ("VLM_TIMEOUT_SECONDS", "timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
+    ("VLM_TEMPERATURE", "temperature", DEFAULT_TEMPERATURE),
+    ("VLM_REASONING_LEVEL", "ollama_think", DEFAULT_OLLAMA_THINK),
+    ("VLM_RESPONSE_SCHEMA_MODE", "response_schema_mode", DEFAULT_RESPONSE_SCHEMA_MODE),
+    ("VLM_JSON_VALIDATION_MODE", "json_validation_mode", DEFAULT_JSON_VALIDATION_MODE),
+)
 SEGMENT_TYPES = ("dance", "ceremony", "audience", "rehearsal", "other")
 ML_SEGMENT_TYPE_TO_PROMPT_LABEL = {
     "performance": "dance",
@@ -527,14 +540,31 @@ def _validate_supported_vlm_config_keys(config: Mapping[str, str]) -> None:
 
 
 def _resolve_vlm_preset_config(config: Mapping[str, str]) -> Mapping[str, Any]:
-    _validate_supported_vlm_config_keys(config)
     loaded = manual_vlm_models.load_manual_vlm_models(VLM_MODELS_CONFIG_PATH)
     return manual_vlm_models.resolve_vlm_model_config(loaded.models, config)
 
 
+def _arg_matches_default(args: argparse.Namespace, attr: str, default_value: Any) -> bool:
+    return getattr(args, attr) == default_value
+
+
+def _needs_vlm_preset_resolution(args: argparse.Namespace, config: Mapping[str, str]) -> bool:
+    preset_name = str(config.get("VLM_NAME", "") or "").strip()
+    if preset_name:
+        return any(
+            _arg_matches_default(args, attr_name, default_value)
+            for _field_name, attr_name, default_value in VLM_MODEL_ARG_SPECS
+        )
+    return any(
+        str(config.get(field_name, "") or "").strip()
+        and _arg_matches_default(args, attr_name, default_value)
+        for field_name, attr_name, default_value in VLM_MODEL_ARG_SPECS
+    )
+
+
 def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.Namespace:
     config = load_vocatio_config(day_dir)
-    preset_config = _resolve_vlm_preset_config(config)
+    _validate_supported_vlm_config_keys(config)
 
     def apply_string(attr: str, default_value: str, config_key: str) -> None:
         if getattr(args, attr) == default_value:
@@ -542,23 +572,45 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
             if configured:
                 setattr(args, attr, configured)
 
+    def apply_preset_string(attr: str, default_value: str, configured: Any) -> None:
+        if getattr(args, attr) == default_value:
+            setattr(args, attr, str(configured))
+
+    def apply_preset_optional_int(attr: str, configured: Any) -> None:
+        if getattr(args, attr) is None:
+            setattr(args, attr, int(configured))
+
+    def apply_preset_float(attr: str, default_value: float, configured: Any) -> None:
+        if getattr(args, attr) == default_value:
+            setattr(args, attr, float(configured))
+
     def apply_int(attr: str, default_value: int, config_key: str, parser) -> None:
         if getattr(args, attr) == default_value:
             configured = str(config.get(config_key, "") or "").strip()
             if configured:
                 setattr(args, attr, parser(configured))
 
-    args.provider = str(preset_config["VLM_PROVIDER"])
-    args.model = str(preset_config["VLM_MODEL"])
-    args.ollama_base_url = str(preset_config["VLM_BASE_URL"])
-    args.ollama_num_ctx = int(preset_config["VLM_CONTEXT_TOKENS"])
-    args.ollama_num_predict = int(preset_config["VLM_MAX_OUTPUT_TOKENS"])
-    args.ollama_keep_alive = str(preset_config["VLM_KEEP_ALIVE"])
-    args.timeout_seconds = float(preset_config["VLM_TIMEOUT_SECONDS"])
-    args.temperature = float(preset_config["VLM_TEMPERATURE"])
-    args.ollama_think = str(preset_config["VLM_REASONING_LEVEL"])
-    args.response_schema_mode = str(preset_config["VLM_RESPONSE_SCHEMA_MODE"])
-    args.json_validation_mode = str(preset_config["VLM_JSON_VALIDATION_MODE"])
+    if _needs_vlm_preset_resolution(args, config):
+        preset_config = _resolve_vlm_preset_config(config)
+        apply_preset_string("provider", DEFAULT_PROVIDER, preset_config["VLM_PROVIDER"])
+        apply_preset_string("model", DEFAULT_MODEL_NAME, preset_config["VLM_MODEL"])
+        apply_preset_string("ollama_base_url", DEFAULT_OLLAMA_BASE_URL, preset_config["VLM_BASE_URL"])
+        apply_preset_optional_int("ollama_num_ctx", preset_config["VLM_CONTEXT_TOKENS"])
+        apply_preset_optional_int("ollama_num_predict", preset_config["VLM_MAX_OUTPUT_TOKENS"])
+        apply_preset_string("ollama_keep_alive", DEFAULT_OLLAMA_KEEP_ALIVE, preset_config["VLM_KEEP_ALIVE"])
+        apply_preset_float("timeout_seconds", DEFAULT_TIMEOUT_SECONDS, preset_config["VLM_TIMEOUT_SECONDS"])
+        apply_preset_float("temperature", DEFAULT_TEMPERATURE, preset_config["VLM_TEMPERATURE"])
+        apply_preset_string("ollama_think", DEFAULT_OLLAMA_THINK, preset_config["VLM_REASONING_LEVEL"])
+        apply_preset_string(
+            "response_schema_mode",
+            DEFAULT_RESPONSE_SCHEMA_MODE,
+            preset_config["VLM_RESPONSE_SCHEMA_MODE"],
+        )
+        apply_preset_string(
+            "json_validation_mode",
+            DEFAULT_JSON_VALIDATION_MODE,
+            preset_config["VLM_JSON_VALIDATION_MODE"],
+        )
     apply_string("embedded_manifest_csv", PHOTO_EMBEDDED_MANIFEST_FILENAME, "VLM_EMBEDDED_MANIFEST_CSV")
     apply_string("photo_manifest_csv", PHOTO_MANIFEST_FILENAME, "VLM_PHOTO_MANIFEST_CSV")
     apply_string("image_variant", DEFAULT_IMAGE_VARIANT, "VLM_IMAGE_VARIANT")

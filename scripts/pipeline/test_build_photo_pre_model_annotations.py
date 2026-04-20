@@ -145,6 +145,91 @@ models:
             self.assertEqual(args.timeout_seconds, 90.0)
             self.assertEqual(args.workers, 3)
 
+    def test_apply_vocatio_defaults_preserves_explicit_cli_premodel_values(self):
+        day_dir = self.make_day_dir(
+            "\n".join(
+                [
+                    "PREMODEL_NAME=qwen3.5-4b-pre",
+                    "PREMODEL_TEMPERATURE=0.25",
+                ]
+            )
+        )
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - PREMODEL_NAME: "qwen3.5-4b-pre"
+    PREMODEL_PROVIDER: "llamacpp"
+    PREMODEL_BASE_URL: "http://127.0.0.1:8003"
+    PREMODEL_MODEL: "preset-model"
+    PREMODEL_MAX_OUTPUT_TOKENS: 2048
+    PREMODEL_TEMPERATURE: 0.0
+    PREMODEL_TIMEOUT_SECONDS: 90
+"""
+        )
+        with mock.patch.object(pre_model, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = pre_model.parse_args(
+                [
+                    str(day_dir),
+                    "--provider",
+                    "ollama",
+                    "--base-url",
+                    "http://127.0.0.1:11434",
+                    "--model-name",
+                    "cli-model",
+                    "--max-tokens",
+                    "512",
+                    "--temperature",
+                    "0.6",
+                    "--timeout-seconds",
+                    "45",
+                ]
+            )
+            args = pre_model.apply_vocatio_defaults(args, day_dir)
+            self.assertEqual(args.provider, "ollama")
+            self.assertEqual(args.base_url, "http://127.0.0.1:11434")
+            self.assertEqual(args.model_name, "cli-model")
+            self.assertEqual(args.max_tokens, 512)
+            self.assertEqual(args.temperature, 0.6)
+            self.assertEqual(args.timeout_seconds, 45.0)
+
+    def test_apply_vocatio_defaults_allows_cli_only_premodel_config_without_name(self):
+        day_dir = self.make_day_dir("PREMODEL_TEMPERATURE=0.25\n")
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - PREMODEL_NAME: "qwen3.5-4b-pre"
+    PREMODEL_PROVIDER: "llamacpp"
+    PREMODEL_BASE_URL: "http://127.0.0.1:8003"
+    PREMODEL_MODEL: "preset-model"
+    PREMODEL_MAX_OUTPUT_TOKENS: 2048
+    PREMODEL_TEMPERATURE: 0.0
+    PREMODEL_TIMEOUT_SECONDS: 90
+"""
+        )
+        with mock.patch.object(pre_model, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = pre_model.parse_args(
+                [
+                    str(day_dir),
+                    "--provider",
+                    "ollama",
+                    "--base-url",
+                    "http://127.0.0.1:11434",
+                    "--model-name",
+                    "cli-model",
+                    "--max-tokens",
+                    "512",
+                    "--temperature",
+                    "0.6",
+                    "--timeout-seconds",
+                    "45",
+                ]
+            )
+            args = pre_model.apply_vocatio_defaults(args, day_dir)
+            self.assertEqual(args.provider, "ollama")
+            self.assertEqual(args.base_url, "http://127.0.0.1:11434")
+            self.assertEqual(args.model_name, "cli-model")
+            self.assertEqual(args.temperature, 0.6)
+
     def test_apply_vocatio_defaults_requires_premodel_name(self):
         day_dir = self.make_day_dir("PREMODEL_TEMPERATURE=0.25\n")
         config_path = self.write_vlm_models_config(

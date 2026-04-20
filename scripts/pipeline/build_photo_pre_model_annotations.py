@@ -63,6 +63,14 @@ PREMODEL_WORKFLOW_CONFIG_KEYS = frozenset(
         "PREMODEL_WORKERS",
     }
 )
+PREMODEL_MODEL_ARG_SPECS = (
+    ("PREMODEL_PROVIDER", "provider", DEFAULT_PROVIDER),
+    ("PREMODEL_BASE_URL", "base_url", DEFAULT_BASE_URL),
+    ("PREMODEL_MODEL", "model_name", DEFAULT_MODEL_NAME),
+    ("PREMODEL_MAX_OUTPUT_TOKENS", "max_tokens", DEFAULT_MAX_TOKENS),
+    ("PREMODEL_TEMPERATURE", "temperature", DEFAULT_TEMPERATURE),
+    ("PREMODEL_TIMEOUT_SECONDS", "timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
+)
 
 
 def build_progress_columns() -> tuple[object, ...]:
@@ -126,8 +134,6 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
             "unsupported PREMODEL config key(s) in .vocatio: "
             + ", ".join(unsupported_keys)
         )
-    loaded = manual_vlm_models.load_manual_vlm_models(VLM_MODELS_CONFIG_PATH)
-    preset_config = manual_vlm_models.resolve_premodel_model_config(loaded.models, config)
 
     def apply_string(attr: str, default_value: str, config_key: str) -> None:
         if getattr(args, attr) == default_value:
@@ -135,18 +141,47 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
             if configured:
                 setattr(args, attr, configured)
 
+    def apply_preset_string(attr: str, default_value: str, configured: Any) -> None:
+        if getattr(args, attr) == default_value:
+            setattr(args, attr, str(configured))
+
+    def apply_preset_int(attr: str, default_value: int, configured: Any) -> None:
+        if getattr(args, attr) == default_value:
+            setattr(args, attr, int(configured))
+
+    def apply_preset_float(attr: str, default_value: float, configured: Any) -> None:
+        if getattr(args, attr) == default_value:
+            setattr(args, attr, float(configured))
+
     def apply_int(attr: str, default_value: int, config_key: str) -> None:
         if getattr(args, attr) == default_value:
             configured = str(config.get(config_key, "") or "").strip()
             if configured:
                 setattr(args, attr, positive_int_arg(configured))
 
-    args.provider = str(preset_config["PREMODEL_PROVIDER"])
-    args.base_url = str(preset_config["PREMODEL_BASE_URL"])
-    args.model_name = str(preset_config["PREMODEL_MODEL"])
-    args.max_tokens = int(preset_config["PREMODEL_MAX_OUTPUT_TOKENS"])
-    args.temperature = float(preset_config["PREMODEL_TEMPERATURE"])
-    args.timeout_seconds = float(preset_config["PREMODEL_TIMEOUT_SECONDS"])
+    preset_name = str(config.get("PREMODEL_NAME", "") or "").strip()
+    needs_preset_resolution = False
+    if preset_name:
+        needs_preset_resolution = any(
+            getattr(args, attr_name) == default_value
+            for _field_name, attr_name, default_value in PREMODEL_MODEL_ARG_SPECS
+        )
+    else:
+        needs_preset_resolution = any(
+            str(config.get(field_name, "") or "").strip()
+            and getattr(args, attr_name) == default_value
+            for field_name, attr_name, default_value in PREMODEL_MODEL_ARG_SPECS
+        )
+
+    if needs_preset_resolution:
+        loaded = manual_vlm_models.load_manual_vlm_models(VLM_MODELS_CONFIG_PATH)
+        preset_config = manual_vlm_models.resolve_premodel_model_config(loaded.models, config)
+        apply_preset_string("provider", DEFAULT_PROVIDER, preset_config["PREMODEL_PROVIDER"])
+        apply_preset_string("base_url", DEFAULT_BASE_URL, preset_config["PREMODEL_BASE_URL"])
+        apply_preset_string("model_name", DEFAULT_MODEL_NAME, preset_config["PREMODEL_MODEL"])
+        apply_preset_int("max_tokens", DEFAULT_MAX_TOKENS, preset_config["PREMODEL_MAX_OUTPUT_TOKENS"])
+        apply_preset_float("temperature", DEFAULT_TEMPERATURE, preset_config["PREMODEL_TEMPERATURE"])
+        apply_preset_float("timeout_seconds", DEFAULT_TIMEOUT_SECONDS, preset_config["PREMODEL_TIMEOUT_SECONDS"])
     apply_string("photo_index", DEFAULT_PHOTO_INDEX, "PREMODEL_PHOTO_INDEX")
     apply_string("image_column", DEFAULT_IMAGE_COLUMN, "PREMODEL_IMAGE_COLUMN")
     apply_string("output_dir", DEFAULT_OUTPUT_DIRNAME, "PREMODEL_OUTPUT_DIR")
