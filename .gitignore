@@ -2,4 +2,4 @@ __pycache__/
 *.pyc
 .codex
 .worktrees/
-docs/superpowers/
+conf/manual_vlm_models.yaml
