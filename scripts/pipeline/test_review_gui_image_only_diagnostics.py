@@ -1829,56 +1829,38 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "reload_probe_vlm_boundary_module",
             return_value=review_gui.probe_vlm_boundary,
         ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "resolve_ml_model_run",
-            return_value=("ml-run-001", Path("/tmp/model-run")),
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "load_ml_hint_context",
-            return_value=Mock(window_radius=2),
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "read_boundary_scores_by_pair",
-            return_value={},
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "resolve_path",
-            return_value=Path("/tmp/photo-pre"),
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "_build_ml_candidate_window_rows",
-            return_value=candidate_rows,
-        ) as build_candidate_rows, unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "_build_ml_candidate_row",
-            return_value={"candidate": "row"},
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "predict_ml_hint_for_candidate",
-            return_value=review_gui.probe_vlm_boundary.MlHintPrediction(
-                boundary_prediction=True,
-                boundary_confidence=0.91,
-                left_segment_type_prediction="performance",
-                left_segment_type_confidence=0.77,
-                right_segment_type_prediction="ceremony",
-                right_segment_type_confidence=0.88,
-            ),
-        ):
+            review_gui,
+            "compute_manual_ml_prediction_result_in_subprocess",
+            return_value={
+                "boundary_prediction": True,
+                "boundary_confidence": 0.91,
+                "left_segment_type_prediction": "performance",
+                "left_segment_type_confidence": 0.77,
+                "right_segment_type_prediction": "ceremony",
+                "right_segment_type_confidence": 0.88,
+                "gap_seconds": 8.0,
+                "left_anchor": "cam/left.jpg",
+                "right_anchor": "cam/right.jpg",
+                "result_text": "Boundary: cut (0.91)\nAnchors: cam/left.jpg -> cam/right.jpg",
+            },
+        ) as compute_mock:
             window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(window, review_gui.MainWindow)
             window.run_manual_ml_prediction()
 
-        reduced_rows = build_candidate_rows.call_args.kwargs["joined_rows"]
+        reduced_rows = compute_mock.call_args.kwargs["joined_rows"]
         self.assertEqual(
             [row["relative_path"] for row in reduced_rows],
             [
                 "cam/pre1.jpg",
                 "cam/pre2.jpg",
                 "cam/left.jpg",
+                "cam/interior.jpg",
                 "cam/right.jpg",
                 "cam/post1.jpg",
             ],
         )
-        self.assertEqual(build_candidate_rows.call_args.kwargs["cut_index"], 2)
+        self.assertEqual(compute_mock.call_args.kwargs["anchor_pair"]["left_row_index"], 2)
+        self.assertEqual(compute_mock.call_args.kwargs["anchor_pair"]["right_row_index"], 4)
         self.assertEqual(window.manual_ml_prediction_state["status"], "result")
         self.assertIn("Boundary: cut (0.91)", window.manual_ml_prediction_state["result_text"])
         self.assertIn("Anchors: cam/left.jpg -> cam/right.jpg", window.manual_ml_prediction_state["result_text"])
@@ -1949,12 +1931,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "reload_probe_vlm_boundary_module",
             return_value=review_gui.probe_vlm_boundary,
         ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "resolve_ml_model_run",
-            return_value=("ml-run-001", Path("/tmp/model-run")),
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "load_ml_hint_context",
+            review_gui,
+            "compute_manual_ml_prediction_result_in_subprocess",
             side_effect=ValueError("predictor metadata is unreadable"),
         ):
             window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(window, review_gui.MainWindow)
@@ -2022,7 +2000,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             },
         ), unittest.mock.patch.object(
             review_gui,
-            "compute_manual_ml_prediction_result",
+            "compute_manual_ml_prediction_result_in_subprocess",
             return_value={
                 "boundary_prediction": True,
                 "boundary_confidence": 0.91,
@@ -2450,7 +2428,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             },
         ), unittest.mock.patch.object(
             review_gui,
-            "compute_manual_ml_prediction_result",
+            "compute_manual_ml_prediction_result_in_subprocess",
             return_value={"status": "result", "result_text": "ok"},
         ), unittest.mock.patch.object(
             review_gui,
@@ -2538,7 +2516,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "resolve_manual_prediction_state",
         ) as resolve_mock, unittest.mock.patch.object(
             review_gui,
-            "compute_manual_ml_prediction_result",
+            "compute_manual_ml_prediction_result_in_subprocess",
         ) as compute_mock:
             window.run_manual_ml_prediction = review_gui.MainWindow.run_manual_ml_prediction.__get__(
                 window,

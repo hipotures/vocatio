@@ -4,6 +4,7 @@ import argparse
 import csv
 import importlib
 import json
+import multiprocessing
 import os
 import shutil
 import sys
@@ -12,6 +13,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
+from queue import Empty
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
@@ -717,6 +719,118 @@ def normalize_ml_candidate_rows(candidate_rows: Sequence[Mapping[str, Any]]) -> 
     ]
 
 
+def _run_manual_ml_subprocess(
+    target: Callable[..., None],
+    *args: Any,
+) -> Any:
+    start_methods = set(multiprocessing.get_all_start_methods())
+    context = (
+        multiprocessing.get_context("fork")
+        if "fork" in start_methods
+        else multiprocessing.get_context("spawn")
+    )
+    result_queue = context.Queue()
+    process = context.Process(target=target, args=(result_queue, *args))
+    process.start()
+    process.join()
+    try:
+        payload = result_queue.get_nowait()
+    except Empty:
+        payload = None
+    finally:
+        result_queue.close()
+        result_queue.join_thread()
+    if isinstance(payload, dict) and payload.get("ok") is True:
+        return payload.get("result")
+    if isinstance(payload, dict) and payload.get("ok") is False:
+        raise RuntimeError(str(payload.get("error", "manual ML helper failed")))
+    raise RuntimeError(f"manual ML helper process failed with exit code {process.exitcode}")
+
+
+def _manual_ml_prediction_subprocess_entry(
+    result_queue: Any,
+    workspace_dir_str: str,
+    payload: Mapping[str, Any],
+    joined_rows: Sequence[Mapping[str, Any]],
+    anchor_pair: Mapping[str, Any],
+    window_config: Mapping[str, Any],
+) -> None:
+    try:
+        result = compute_manual_ml_prediction_result(
+            workspace_dir=Path(workspace_dir_str),
+            payload=payload,
+            joined_rows=joined_rows,
+            anchor_pair=anchor_pair,
+            window_config=window_config,
+        )
+    except Exception as exc:
+        result_queue.put({"ok": False, "error": str(exc)})
+        return
+    result_queue.put({"ok": True, "result": result})
+
+
+def compute_manual_ml_prediction_result_in_subprocess(
+    *,
+    workspace_dir: Path,
+    payload: Mapping[str, Any],
+    joined_rows: Sequence[Mapping[str, Any]],
+    anchor_pair: Mapping[str, Any],
+    window_config: Mapping[str, Any],
+) -> Dict[str, Any]:
+    return dict(
+        _run_manual_ml_subprocess(
+            _manual_ml_prediction_subprocess_entry,
+            str(workspace_dir),
+            dict(payload),
+            [dict(row) for row in joined_rows],
+            dict(anchor_pair),
+            dict(window_config),
+        )
+    )
+
+
+def _manual_vlm_hint_lines_subprocess_entry(
+    result_queue: Any,
+    workspace_dir_str: str,
+    payload: Mapping[str, Any],
+    reduced_rows: Sequence[Mapping[str, Any]],
+    cut_index: int,
+    runtime_window_radius: int,
+    runtime_args_payload: Mapping[str, Any],
+) -> None:
+    try:
+        workspace_dir = Path(workspace_dir_str)
+        requested_ml_model_run_id = str(runtime_args_payload.get("ml_model_run_id", "") or "").strip()
+        effective_ml_model_run_id, resolved_ml_model_dir = probe_vlm_boundary.resolve_ml_model_run(
+            workspace_dir,
+            requested_ml_model_run_id,
+        )
+        ml_hint_context = probe_vlm_boundary.load_ml_hint_context(
+            ml_model_run_id=effective_ml_model_run_id,
+            ml_model_dir=resolved_ml_model_dir,
+        )
+        photo_pre_model_dir_value = str(
+            runtime_args_payload.get("photo_pre_model_dir", "") or probe_vlm_boundary.DEFAULT_PHOTO_PRE_MODEL_DIR
+        ).strip()
+        photo_pre_model_dir = probe_vlm_boundary.resolve_path(workspace_dir, photo_pre_model_dir_value)
+        day_id = str(payload.get("day", "") or "").strip() or workspace_dir.parent.name
+        result = probe_vlm_boundary.build_ml_hint_lines_for_candidate(
+            day_id=day_id,
+            joined_rows=[dict(row) for row in reduced_rows],
+            cut_index=cut_index,
+            boundary_rows_by_pair=probe_vlm_boundary.read_boundary_scores_by_pair(
+                workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME
+            ),
+            photo_pre_model_dir=photo_pre_model_dir,
+            ml_hint_context=ml_hint_context,
+            runtime_window_radius=runtime_window_radius,
+        )
+    except Exception as exc:
+        result_queue.put({"ok": False, "error": str(exc)})
+        return
+    result_queue.put({"ok": True, "result": result})
+
+
 def compute_manual_ml_prediction_result(
     *,
     workspace_dir: Path,
@@ -851,30 +965,21 @@ def load_manual_vlm_hint_lines(
     runtime_args: argparse.Namespace,
 ) -> List[str]:
     try:
-        requested_ml_model_run_id = str(getattr(runtime_args, "ml_model_run_id", "") or "").strip()
-        effective_ml_model_run_id, resolved_ml_model_dir = probe_vlm_boundary.resolve_ml_model_run(
-            workspace_dir,
-            requested_ml_model_run_id,
-        )
-        ml_hint_context = probe_vlm_boundary.load_ml_hint_context(
-            ml_model_run_id=effective_ml_model_run_id,
-            ml_model_dir=resolved_ml_model_dir,
-        )
-        photo_pre_model_dir_value = str(
-            getattr(runtime_args, "photo_pre_model_dir", "") or probe_vlm_boundary.DEFAULT_PHOTO_PRE_MODEL_DIR
-        ).strip()
-        photo_pre_model_dir = probe_vlm_boundary.resolve_path(workspace_dir, photo_pre_model_dir_value)
-        day_id = str(payload.get("day", "") or "").strip() or workspace_dir.parent.name
-        return probe_vlm_boundary.build_ml_hint_lines_for_candidate(
-            day_id=day_id,
-            joined_rows=reduced_rows,
-            cut_index=cut_index,
-            boundary_rows_by_pair=probe_vlm_boundary.read_boundary_scores_by_pair(
-                workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME
-            ),
-            photo_pre_model_dir=photo_pre_model_dir,
-            ml_hint_context=ml_hint_context,
-            runtime_window_radius=runtime_window_radius,
+        return list(
+            _run_manual_ml_subprocess(
+                _manual_vlm_hint_lines_subprocess_entry,
+                str(workspace_dir),
+                dict(payload),
+                [dict(row) for row in reduced_rows],
+                int(cut_index),
+                int(runtime_window_radius),
+                {
+                    "ml_model_run_id": str(getattr(runtime_args, "ml_model_run_id", "") or "").strip(),
+                    "photo_pre_model_dir": str(
+                        getattr(runtime_args, "photo_pre_model_dir", "") or probe_vlm_boundary.DEFAULT_PHOTO_PRE_MODEL_DIR
+                    ).strip(),
+                },
+            )
         )
     except Exception:
         return probe_vlm_boundary.build_ml_hint_lines(None)
@@ -3642,7 +3747,7 @@ class MainWindow(QMainWindow):
             resolution_error = str(resolution_state.get("resolution_error", "") or "").strip()
             if resolution_error:
                 raise ValueError(resolution_error)
-            result = compute_manual_ml_prediction_result(
+            result = compute_manual_ml_prediction_result_in_subprocess(
                 workspace_dir=workspace_dir,
                 payload=payload,
                 joined_rows=load_manual_prediction_joined_rows(workspace_dir, payload),
