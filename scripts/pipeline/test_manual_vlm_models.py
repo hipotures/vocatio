@@ -49,6 +49,17 @@ class ManualVlmModelsTest(unittest.TestCase):
             "VLM_JSON_VALIDATION_MODE": "strict",
         }
 
+    def build_premodel(self) -> dict[str, object]:
+        return {
+            "PREMODEL_NAME": "Pre Preset A",
+            "PREMODEL_PROVIDER": "llamacpp",
+            "PREMODEL_BASE_URL": "http://127.0.0.1:8002",
+            "PREMODEL_MODEL": "unsloth/Qwen3.5-4B-GGUF:UD-Q4_K_XL",
+            "PREMODEL_MAX_OUTPUT_TOKENS": 1024,
+            "PREMODEL_TEMPERATURE": 0.0,
+            "PREMODEL_TIMEOUT_SECONDS": 120,
+        }
+
     def test_checked_in_sample_config_loads(self) -> None:
         path = self.repo_example_path()
         loaded = manual_vlm_models.load_manual_vlm_models(path)
@@ -236,6 +247,18 @@ models:
         for field_name in manual_vlm_models.MODEL_FIELDS:
             with self.subTest(field_name=field_name):
                 model = self.build_model()
+                model.pop(field_name)
+                path = self.write_models([model])
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"missing {field_name} in preset at index 0",
+                ):
+                    manual_vlm_models.load_manual_vlm_models(path)
+
+    def test_load_models_rejects_missing_required_premodel_fields(self) -> None:
+        for field_name in manual_vlm_models.PREMODEL_MODEL_FIELDS:
+            with self.subTest(field_name=field_name):
+                model = self.build_premodel()
                 model.pop(field_name)
                 path = self.write_models([model])
                 with self.assertRaisesRegex(

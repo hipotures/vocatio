@@ -2,6 +2,7 @@ import argparse
 import csv
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ from lib.vlm_transport import VlmTransportError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts/pipeline"))
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 def load_module(module_name: str, relative_path: str):
@@ -136,6 +138,9 @@ def bind_manual_action_methods(window) -> None:
 
 
 class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
+    def test_qt_platform_is_configured_for_headless_runs(self) -> None:
+        self.assertTrue(str(os.environ.get("QT_QPA_PLATFORM", "") or "").strip())
+
     def test_manual_vlm_gui_uses_new_models_path(self) -> None:
         self.assertEqual(
             review_gui.MANUAL_VLM_MODELS_PATH,
