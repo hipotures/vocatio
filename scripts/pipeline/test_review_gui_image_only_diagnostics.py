@@ -1495,7 +1495,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(window.info_layout.itemAt(1).widget().text(), "section:Boundary diagnostics")
         self.assertIsNone(window.info_layout.itemAt(2).widget())
 
-    def test_copy_info_section_body_copies_body_and_status_message(self):
+    def test_copy_info_section_body_copies_full_section_and_status_message(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
         status_bar = Mock()
         window.statusBar = Mock(return_value=status_bar)
@@ -1505,11 +1505,14 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             window.copy_info_section_body(
                 {
                     "title": "ML hints",
+                    "description": "Ephemeral runtime state for manual ML boundary prediction.",
                     "body": "boundary: cut",
                 }
             )
 
-        clipboard.setText.assert_called_once_with("boundary: cut")
+        clipboard.setText.assert_called_once_with(
+            "ML hints\n\nEphemeral runtime state for manual ML boundary prediction.\n\nboundary: cut"
+        )
         status_bar.showMessage.assert_called_once_with("Copied ML hints")
 
     def test_build_info_section_widget_click_copies_section_body_via_button(self):
@@ -1533,7 +1536,9 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             QTest.mouseClick(button, Qt.LeftButton)
             TEST_QT_APP.processEvents()
 
-        clipboard.setText.assert_called_once_with("boundary: cut")
+        clipboard.setText.assert_called_once_with(
+            "Boundary diagnostics\n\nBoundary and segment diagnostics for this set.\n\nboundary: cut"
+        )
         status_bar.showMessage.assert_called_once_with("Copied Boundary diagnostics")
 
     def test_build_info_section_widget_disables_manual_prediction_button_while_running(self):
@@ -1975,7 +1980,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
         window.manual_vlm_models_md5 = "stable"
         window.manual_vlm_models_error = None
-        window.manual_vlm_status_message = None
+        window.manual_vlm_status_message = "Models reloaded from config."
         window.manual_vlm_selected_name = "Preset A"
         window.reload_manual_vlm_models = Mock()
         window.manual_prediction_day_dir = Mock(return_value=Path("/day"))
@@ -2026,6 +2031,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.reload_manual_vlm_models.assert_not_called()
         resolve_mock.assert_called_once()
         compute_mock.assert_called_once()
+        self.assertIsNone(window.manual_vlm_status_message)
 
     def test_run_manual_vlm_analyze_changed_md5_reloads_models_before_downstream_work(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)

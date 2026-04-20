@@ -1331,6 +1331,20 @@ def flatten_info_sections_to_plain_text(sections: Sequence[Mapping[str, Any]]) -
     return "\n\n".join(bodies)
 
 
+def format_info_section_for_clipboard(section: Mapping[str, Any]) -> str:
+    blocks = []
+    title = str(section.get("title", "") or "").strip()
+    description = str(section.get("description", "") or "").strip()
+    body = str(section.get("body", "") or "").strip()
+    if title:
+        blocks.append(title)
+    if description:
+        blocks.append(description)
+    if body:
+        blocks.append(body)
+    return "\n\n".join(blocks)
+
+
 def join_info_section_lines(lines: Sequence[str]) -> str:
     return "\n".join(lines).rstrip()
 
@@ -3870,6 +3884,7 @@ class MainWindow(QMainWindow):
         selected_photos = self.selected_photo_entries()
         if not should_show_manual_vlm_analyze(selected_photos):
             return
+        self.manual_vlm_status_message = None
         config_path = REPO_ROOT / MANUAL_VLM_MODELS_PATH
         try:
             latest_md5 = manual_vlm_models.compute_manual_vlm_models_md5(config_path)
@@ -4095,7 +4110,7 @@ class MainWindow(QMainWindow):
         self.info_layout.addStretch(1)
 
     def copy_info_section_body(self, section: Mapping[str, Any]) -> None:
-        QApplication.clipboard().setText(str(section.get("body", "") or ""))
+        QApplication.clipboard().setText(format_info_section_for_clipboard(section))
         self.statusBar().showMessage(build_info_section_copy_status_message(str(section.get("title", "") or "")))
 
     def toggle_info_panel(self) -> None:
