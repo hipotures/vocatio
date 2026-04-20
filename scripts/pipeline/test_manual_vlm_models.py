@@ -48,9 +48,17 @@ class ManualVlmModelsTest(unittest.TestCase):
 
     def test_checked_in_sample_config_loads(self) -> None:
         path = REPO_ROOT / "conf" / "manual_vlm_models.yaml"
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         loaded = manual_vlm_models.load_manual_vlm_models(path)
-        self.assertEqual(len(loaded.models), len(raw["models"]))
+        self.assertEqual(len(loaded.models), 4)
+        self.assertEqual(
+            [model["VLM_NAME"] for model in loaded.models],
+            [
+                "qwen3.5:9b",
+                "gemma-4-E4B-it",
+                "gemma-4-26B-A4B-it",
+                "vLLM Qwen3.5-0.8B",
+            ],
+        )
         self.assertTrue(loaded.md5_hex)
 
     def test_load_models_parses_complete_entries(self) -> None:
@@ -100,6 +108,47 @@ models:
 
         self.assertEqual(loaded.models[0]["VLM_DESCRIPTION"], "Long description")
 
+    def test_load_models_preserves_key_order_with_description(self) -> None:
+        path = self.write_yaml(
+            """
+models:
+  - VLM_NAME: "Preset A"
+    VLM_DESCRIPTION: "Long description"
+    VLM_PROVIDER: "ollama"
+    VLM_BASE_URL: "http://127.0.0.1:11434"
+    VLM_MODEL: "qwen"
+    VLM_CONTEXT_TOKENS: 4096
+    VLM_MAX_OUTPUT_TOKENS: 512
+    VLM_KEEP_ALIVE: "30m"
+    VLM_TIMEOUT_SECONDS: 180
+    VLM_TEMPERATURE: 0.0
+    VLM_REASONING_LEVEL: "low"
+    VLM_RESPONSE_SCHEMA_MODE: "on"
+    VLM_JSON_VALIDATION_MODE: "strict"
+"""
+        )
+
+        loaded = manual_vlm_models.load_manual_vlm_models(path)
+
+        self.assertEqual(
+            list(loaded.models[0].keys()),
+            [
+                "VLM_NAME",
+                "VLM_DESCRIPTION",
+                "VLM_PROVIDER",
+                "VLM_BASE_URL",
+                "VLM_MODEL",
+                "VLM_CONTEXT_TOKENS",
+                "VLM_MAX_OUTPUT_TOKENS",
+                "VLM_KEEP_ALIVE",
+                "VLM_TIMEOUT_SECONDS",
+                "VLM_TEMPERATURE",
+                "VLM_REASONING_LEVEL",
+                "VLM_RESPONSE_SCHEMA_MODE",
+                "VLM_JSON_VALIDATION_MODE",
+            ],
+        )
+
     def test_load_models_allows_missing_description(self) -> None:
         path = self.write_models([self.build_model()])
 
@@ -115,6 +164,31 @@ models:
         loaded = manual_vlm_models.load_manual_vlm_models(path)
 
         self.assertNotIn("VLM_DESCRIPTION", loaded.models[0])
+
+    def test_load_models_preserves_key_order_when_blank_description_is_omitted(self) -> None:
+        model = self.build_model()
+        model["VLM_DESCRIPTION"] = "   "
+        path = self.write_models([model])
+
+        loaded = manual_vlm_models.load_manual_vlm_models(path)
+
+        self.assertEqual(
+            list(loaded.models[0].keys()),
+            [
+                "VLM_NAME",
+                "VLM_PROVIDER",
+                "VLM_BASE_URL",
+                "VLM_MODEL",
+                "VLM_CONTEXT_TOKENS",
+                "VLM_MAX_OUTPUT_TOKENS",
+                "VLM_KEEP_ALIVE",
+                "VLM_TIMEOUT_SECONDS",
+                "VLM_TEMPERATURE",
+                "VLM_REASONING_LEVEL",
+                "VLM_RESPONSE_SCHEMA_MODE",
+                "VLM_JSON_VALIDATION_MODE",
+            ],
+        )
 
     def test_load_models_rejects_duplicate_names(self) -> None:
         path = self.write_yaml(
