@@ -216,7 +216,11 @@ def load_manual_vlm_models_for_gui(repo_root: Path) -> Tuple[List[Dict[str, Any]
         return [], None, f"Model config error: {exc}"
     except ValueError as exc:
         return [], None, f"Model config error: {exc}"
-    return loaded.models, loaded.md5_hex, None
+    return [
+        dict(model)
+        for model in loaded.models
+        if str(model.get("VLM_NAME", "") or "").strip()
+    ], loaded.md5_hex, None
 
 
 def apply_reloaded_manual_vlm_models(
@@ -1448,7 +1452,7 @@ def format_manual_vlm_metadata_value(value: object) -> str:
 def build_manual_vlm_model_config(model_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     if not isinstance(model_config, Mapping):
         return {}
-    allowed_fields = set(manual_vlm_models.MODEL_FIELDS)
+    allowed_fields = set(manual_vlm_models.VLM_MODEL_FIELDS)
     allowed_fields.add("VLM_DESCRIPTION")
     return {
         field_name: value

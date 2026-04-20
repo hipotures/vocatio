@@ -405,7 +405,7 @@ Use a dedicated `--state` file for image-only review so you do not mix it with t
 
 The VLM flow starts from the same image-only artifacts as the deterministic flow. It optionally adds a lightweight per-photo pre-model pass, then probes only candidate time gaps with a local VLM.
 
-`build_photo_pre_model_annotations.py` and `probe_vlm_photo_boundaries.py` both run through the shared VLM transport layer. You can select `ollama`, `llamacpp`, or `vllm` through CLI flags or `.vocatio`, subject to backend capability support.
+`build_photo_pre_model_annotations.py` and `probe_vlm_photo_boundaries.py` both run through the shared VLM transport layer and resolve model transport settings from shared `conf/vlm_models.yaml` presets plus exact-name `.vocatio` inheritance. You can select `ollama`, `llamacpp`, or `vllm`, subject to backend capability support. When you explicitly provide a CLI model flag, that CLI value wins over `.vocatio`; workflow-only fields remain local to the day config.
 
 #### Optional: build per-photo pre-model annotations
 
@@ -417,6 +417,7 @@ Default behavior:
 
 - exact preset selection comes from `.vocatio` `PREMODEL_NAME`, which must match a `PREMODEL_NAME` entry in `conf/vlm_models.yaml`
 - `.vocatio` may override only these preset fields locally: `PREMODEL_PROVIDER`, `PREMODEL_BASE_URL`, `PREMODEL_MODEL`, `PREMODEL_MAX_OUTPUT_TOKENS`, `PREMODEL_TEMPERATURE`, `PREMODEL_TIMEOUT_SECONDS`
+- explicitly provided CLI model flags override the inherited preset values for that run
 - input index: `photo_embedded_manifest.csv`
 - image column: `preview_path`
 - output directory: `DAY/_workspace/photo_pre_model_annotations`
@@ -442,6 +443,7 @@ Important behavior:
 
 - exact preset selection comes from `.vocatio` `VLM_NAME`, which must match a `VLM_NAME` entry in `conf/vlm_models.yaml`
 - `.vocatio` may override only these preset fields locally: `VLM_PROVIDER`, `VLM_BASE_URL`, `VLM_MODEL`, `VLM_CONTEXT_TOKENS`, `VLM_MAX_OUTPUT_TOKENS`, `VLM_KEEP_ALIVE`, `VLM_TIMEOUT_SECONDS`, `VLM_TEMPERATURE`, `VLM_REASONING_LEVEL`, `VLM_RESPONSE_SCHEMA_MODE`, `VLM_JSON_VALIDATION_MODE`
+- explicitly provided CLI model flags override the inherited preset values for that run
 - symmetric VLM context is configured only through `--window-radius` or `.vocatio` `VLM_WINDOW_RADIUS`
 - `vlm_boundary_results.csv`, VLM run metadata, and downstream GUI/review artifacts persist `window_radius` only
 - legacy probe CSVs with `window_size` / `overlap` are not resumable; start a fresh run with `--new-run`
@@ -491,9 +493,9 @@ Use a dedicated VLM review-state file so you do not mix VLM review decisions wit
 
 #### Manual VLM model presets
 
-The GUI `Manual VLM analyze` action loads model presets from `conf/vlm_models.yaml`.
+The GUI `Manual VLM analyze` action loads presets from `conf/vlm_models.yaml`, but its dropdown only includes entries that define `VLM_NAME`.
 
-This shared preset file contains one `models:` list and may mix `VLM_*` and `PREMODEL_*` entries. Day-level `.vocatio` must select an existing preset by exact `VLM_NAME` or `PREMODEL_NAME`; it does not define full models from scratch.
+This shared preset file contains one `models:` list and may mix `VLM_*` and `PREMODEL_*` entries. Day-level `.vocatio` must select an existing preset by exact `VLM_NAME` or `PREMODEL_NAME`; it does not define full models from scratch. Workflow fields such as `VLM_WINDOW_RADIUS`, `VLM_IMAGE_VARIANT`, `VLM_ML_MODEL_RUN_ID`, and `VLM_PHOTO_PRE_MODEL_DIR` remain local to `.vocatio` or explicit CLI flags rather than the shared preset file.
 
 Each VLM preset must define these fields:
 

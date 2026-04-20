@@ -18,7 +18,7 @@ from scripts.pipeline.lib import manual_vlm_models
 class ManualVlmModelsTest(unittest.TestCase):
     def write_yaml(self, text: str) -> Path:
         temp_dir = Path(tempfile.mkdtemp(prefix="manual-vlm-models-"))
-        path = temp_dir / "manual_vlm_models.yaml"
+        path = temp_dir / "vlm_models.yaml"
         path.write_text(text, encoding="utf-8")
         return path
 
