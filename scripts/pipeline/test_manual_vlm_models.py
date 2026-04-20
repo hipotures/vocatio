@@ -104,6 +104,32 @@ models:
         self.assertEqual(loaded.models[0]["VLM_NAME"], "Preset A")
         self.assertTrue(loaded.md5_hex)
 
+    def test_load_models_parses_shared_name_based_entry(self) -> None:
+        path = self.write_yaml(
+            """
+models:
+  - NAME: "gemma-4-26B-A4B-it"
+    DESCRIPTION: "llama.cpp unsloth GGUF:UD-Q4_K_XL"
+    PROVIDER: "llamacpp"
+    BASE_URL: "http://127.0.0.1:8080"
+    MODEL: "unsloth/gemma-4-E4B-it-GGUF:Q8_0"
+    MAX_OUTPUT_TOKENS: 1024
+    TIMEOUT_SECONDS: 120
+    TEMPERATURE: 0.0
+    RESPONSE_SCHEMA_MODE: "on"
+    JSON_VALIDATION_MODE: "strict"
+"""
+        )
+
+        loaded = manual_vlm_models.load_manual_vlm_models(path)
+
+        self.assertEqual(loaded.models[0]["VLM_NAME"], "gemma-4-26B-A4B-it")
+        self.assertEqual(
+            loaded.models[0]["VLM_DESCRIPTION"],
+            "llama.cpp unsloth GGUF:UD-Q4_K_XL",
+        )
+        self.assertEqual(loaded.models[0]["VLM_PROVIDER"], "llamacpp")
+
     def test_load_models_accepts_optional_description(self) -> None:
         path = self.write_yaml(
             """
@@ -562,6 +588,39 @@ models:
             "unsloth/Qwen3.5-4B-GGUF:UD-Q4_K_XL",
         )
         self.assertNotIn("UNRELATED", resolved)
+
+    def test_resolve_premodel_model_config_accepts_shared_name_based_vlm_entry(self) -> None:
+        path = self.write_yaml(
+            """
+models:
+  - NAME: "gemma-4-26B-A4B-it"
+    DESCRIPTION: "llama.cpp unsloth GGUF:UD-Q4_K_XL"
+    PROVIDER: "llamacpp"
+    BASE_URL: "http://127.0.0.1:8080"
+    MODEL: "unsloth/gemma-4-E4B-it-GGUF:Q8_0"
+    MAX_OUTPUT_TOKENS: 1024
+    TIMEOUT_SECONDS: 120
+    TEMPERATURE: 0.0
+    RESPONSE_SCHEMA_MODE: "on"
+    JSON_VALIDATION_MODE: "strict"
+"""
+        )
+        loaded = manual_vlm_models.load_manual_vlm_models(path)
+
+        resolved = manual_vlm_models.resolve_premodel_model_config(
+            loaded.models,
+            {
+                "PREMODEL_NAME": "gemma-4-26B-A4B-it",
+            },
+        )
+
+        self.assertEqual(resolved["PREMODEL_NAME"], "gemma-4-26B-A4B-it")
+        self.assertEqual(resolved["PREMODEL_PROVIDER"], "llamacpp")
+        self.assertEqual(resolved["PREMODEL_BASE_URL"], "http://127.0.0.1:8080")
+        self.assertEqual(resolved["PREMODEL_MODEL"], "unsloth/gemma-4-E4B-it-GGUF:Q8_0")
+        self.assertEqual(resolved["PREMODEL_MAX_OUTPUT_TOKENS"], 1024)
+        self.assertEqual(resolved["PREMODEL_TIMEOUT_SECONDS"], 120.0)
+        self.assertEqual(resolved["PREMODEL_TEMPERATURE"], 0.0)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,22 @@ MODEL_FIELDS = REQUIRED_VLM_MODEL_FIELDS
 
 SUPPORTED_PROVIDERS = {"ollama", "llamacpp", "vllm"}
 
+SHARED_MODEL_FIELD_ALIASES = {
+    "NAME": "VLM_NAME",
+    "DESCRIPTION": "VLM_DESCRIPTION",
+    "PROVIDER": "VLM_PROVIDER",
+    "BASE_URL": "VLM_BASE_URL",
+    "MODEL": "VLM_MODEL",
+    "CONTEXT_TOKENS": "VLM_CONTEXT_TOKENS",
+    "MAX_OUTPUT_TOKENS": "VLM_MAX_OUTPUT_TOKENS",
+    "KEEP_ALIVE": "VLM_KEEP_ALIVE",
+    "TIMEOUT_SECONDS": "VLM_TIMEOUT_SECONDS",
+    "TEMPERATURE": "VLM_TEMPERATURE",
+    "REASONING_LEVEL": "VLM_REASONING_LEVEL",
+    "RESPONSE_SCHEMA_MODE": "VLM_RESPONSE_SCHEMA_MODE",
+    "JSON_VALIDATION_MODE": "VLM_JSON_VALIDATION_MODE",
+}
+
 
 @dataclass(frozen=True)
 class ManualVlmModelsConfig:
@@ -152,6 +168,19 @@ def _validate_provider(value: Any, field_name: str, preset_name: str) -> str:
 def _validate_model_entry(model: Any, index: int) -> dict[str, Any]:
     if not isinstance(model, dict):
         raise ValueError(f"models[{index}] must be a mapping")
+    if "NAME" in model:
+        if any(
+            str(key).startswith("VLM_") or str(key).startswith("PREMODEL_")
+            for key in model
+        ):
+            raise ValueError(
+                f"models[{index}] cannot mix NAME-based fields with VLM_/PREMODEL_ fields"
+            )
+        normalized_shared = {
+            SHARED_MODEL_FIELD_ALIASES.get(str(key), str(key)): value
+            for key, value in model.items()
+        }
+        return _validate_vlm_model_entry(normalized_shared, index)
     has_vlm_name = "VLM_NAME" in model
     has_premodel_name = "PREMODEL_NAME" in model
     if has_vlm_name and has_premodel_name:
@@ -312,6 +341,29 @@ def _find_preset_by_exact_name(
     raise ValueError(f'unknown {name_field} "{preset_name}"')
 
 
+def _resolve_premodel_preset(
+    models: Sequence[Mapping[str, Any]],
+    preset_name: str,
+) -> dict[str, Any]:
+    try:
+        return _find_preset_by_exact_name(models, "PREMODEL_NAME", preset_name)
+    except ValueError:
+        pass
+    try:
+        shared_vlm_preset = _find_preset_by_exact_name(models, "VLM_NAME", preset_name)
+    except ValueError as exc:
+        raise ValueError(f'unknown PREMODEL_NAME "{preset_name}"') from exc
+    return {
+        "PREMODEL_NAME": preset_name,
+        "PREMODEL_PROVIDER": shared_vlm_preset["VLM_PROVIDER"],
+        "PREMODEL_BASE_URL": shared_vlm_preset["VLM_BASE_URL"],
+        "PREMODEL_MODEL": shared_vlm_preset["VLM_MODEL"],
+        "PREMODEL_MAX_OUTPUT_TOKENS": shared_vlm_preset["VLM_MAX_OUTPUT_TOKENS"],
+        "PREMODEL_TEMPERATURE": shared_vlm_preset["VLM_TEMPERATURE"],
+        "PREMODEL_TIMEOUT_SECONDS": shared_vlm_preset["VLM_TIMEOUT_SECONDS"],
+    }
+
+
 def _normalize_resolved_vlm_config(config: Mapping[str, Any]) -> dict[str, Any]:
     normalized = _validate_vlm_model_entry(dict(config), 0)
     validate_resolved_vlm_provider_config(normalized)
@@ -387,7 +439,7 @@ def resolve_premodel_model_config(
     preset_name = str(vocatio_config.get("PREMODEL_NAME", "") or "").strip()
     if not preset_name:
         raise ValueError("missing PREMODEL_NAME in .vocatio")
-    resolved = _find_preset_by_exact_name(models, "PREMODEL_NAME", preset_name)
+    resolved = _resolve_premodel_preset(models, preset_name)
     for field_name in PREMODEL_MODEL_FIELDS:
         if field_name == "PREMODEL_NAME":
             continue
