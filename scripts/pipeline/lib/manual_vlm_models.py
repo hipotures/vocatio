@@ -14,20 +14,25 @@ except ModuleNotFoundError:
     from scripts.pipeline.lib.vlm_transport import VlmRequest, VlmTransportError, validate_vlm_request
 
 
-VLM_MODEL_FIELDS = (
+REQUIRED_VLM_MODEL_FIELDS = (
     "VLM_NAME",
     "VLM_PROVIDER",
     "VLM_BASE_URL",
     "VLM_MODEL",
-    "VLM_CONTEXT_TOKENS",
     "VLM_MAX_OUTPUT_TOKENS",
-    "VLM_KEEP_ALIVE",
     "VLM_TIMEOUT_SECONDS",
     "VLM_TEMPERATURE",
-    "VLM_REASONING_LEVEL",
     "VLM_RESPONSE_SCHEMA_MODE",
     "VLM_JSON_VALIDATION_MODE",
 )
+
+OPTIONAL_VLM_MODEL_FIELDS = (
+    "VLM_CONTEXT_TOKENS",
+    "VLM_KEEP_ALIVE",
+    "VLM_REASONING_LEVEL",
+)
+
+VLM_MODEL_FIELDS = REQUIRED_VLM_MODEL_FIELDS + OPTIONAL_VLM_MODEL_FIELDS
 
 PREMODEL_MODEL_FIELDS = (
     "PREMODEL_NAME",
@@ -39,7 +44,7 @@ PREMODEL_MODEL_FIELDS = (
     "PREMODEL_TIMEOUT_SECONDS",
 )
 
-MODEL_FIELDS = VLM_MODEL_FIELDS
+MODEL_FIELDS = REQUIRED_VLM_MODEL_FIELDS
 
 SUPPORTED_PROVIDERS = {"ollama", "llamacpp", "vllm"}
 
@@ -90,6 +95,21 @@ def _validate_positive_int(value: Any, field_name: str, preset_name: str) -> int
     if normalized <= 0:
         raise ValueError(f'{field_name} must be > 0 in preset "{preset_name}"')
     return normalized
+
+
+def _validate_optional_positive_int(value: Any, field_name: str, preset_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return _validate_positive_int(value, field_name, preset_name)
+
+
+def _validate_optional_non_empty_string(value: Any, field_name: str, preset_name: str) -> str | None:
+    normalized = _normalize_optional_scalar(value)
+    if normalized is None:
+        return None
+    return _validate_non_empty_string(normalized, field_name, preset_name)
 
 
 def _validate_finite_float(value: Any, field_name: str, preset_name: str) -> float:
@@ -149,7 +169,7 @@ def _validate_vlm_model_entry(normalized: dict[str, Any], index: int) -> dict[st
         normalized.pop("VLM_DESCRIPTION", None)
     else:
         normalized["VLM_DESCRIPTION"] = description
-    for field in VLM_MODEL_FIELDS:
+    for field in REQUIRED_VLM_MODEL_FIELDS:
         if field not in normalized:
             raise ValueError(f"missing {field} in preset at index {index}")
     name = str(normalized.get("VLM_NAME", "") or "").strip()
@@ -172,11 +192,6 @@ def _validate_vlm_model_entry(normalized: dict[str, Any], index: int) -> dict[st
         "VLM_MODEL",
         name,
     )
-    normalized["VLM_CONTEXT_TOKENS"] = _validate_positive_int(
-        normalized["VLM_CONTEXT_TOKENS"],
-        "VLM_CONTEXT_TOKENS",
-        name,
-    )
     normalized["VLM_MAX_OUTPUT_TOKENS"] = _validate_positive_int(
         normalized["VLM_MAX_OUTPUT_TOKENS"],
         "VLM_MAX_OUTPUT_TOKENS",
@@ -192,13 +207,6 @@ def _validate_vlm_model_entry(normalized: dict[str, Any], index: int) -> dict[st
         "VLM_TEMPERATURE",
         name,
     )
-    keep_alive = _normalize_optional_scalar(normalized["VLM_KEEP_ALIVE"])
-    normalized["VLM_KEEP_ALIVE"] = keep_alive or "0"
-    normalized["VLM_REASONING_LEVEL"] = _validate_non_empty_string(
-        normalized["VLM_REASONING_LEVEL"],
-        "VLM_REASONING_LEVEL",
-        name,
-    )
     normalized["VLM_RESPONSE_SCHEMA_MODE"] = _validate_non_empty_string(
         normalized["VLM_RESPONSE_SCHEMA_MODE"],
         "VLM_RESPONSE_SCHEMA_MODE",
@@ -209,6 +217,44 @@ def _validate_vlm_model_entry(normalized: dict[str, Any], index: int) -> dict[st
         "VLM_JSON_VALIDATION_MODE",
         name,
     )
+    context_tokens = _validate_optional_positive_int(
+        normalized.get("VLM_CONTEXT_TOKENS"),
+        "VLM_CONTEXT_TOKENS",
+        name,
+    )
+    keep_alive = _validate_optional_non_empty_string(
+        normalized.get("VLM_KEEP_ALIVE"),
+        "VLM_KEEP_ALIVE",
+        name,
+    )
+    reasoning_level = _validate_optional_non_empty_string(
+        normalized.get("VLM_REASONING_LEVEL"),
+        "VLM_REASONING_LEVEL",
+        name,
+    )
+    if normalized["VLM_PROVIDER"] == "ollama":
+        if context_tokens is not None:
+            normalized["VLM_CONTEXT_TOKENS"] = context_tokens
+        else:
+            normalized.pop("VLM_CONTEXT_TOKENS", None)
+        if keep_alive is not None:
+            normalized["VLM_KEEP_ALIVE"] = keep_alive
+        else:
+            normalized.pop("VLM_KEEP_ALIVE", None)
+        if reasoning_level is not None:
+            normalized["VLM_REASONING_LEVEL"] = reasoning_level
+        else:
+            normalized.pop("VLM_REASONING_LEVEL", None)
+        return normalized
+    if context_tokens is not None:
+        raise ValueError(f"Provider does not support context_tokens: {normalized['VLM_PROVIDER']}")
+    if keep_alive is not None:
+        raise ValueError(f"Provider does not support keep_alive: {normalized['VLM_PROVIDER']}")
+    if reasoning_level is not None:
+        raise ValueError(f"Provider does not support reasoning_level: {normalized['VLM_PROVIDER']}")
+    normalized.pop("VLM_CONTEXT_TOKENS", None)
+    normalized.pop("VLM_KEEP_ALIVE", None)
+    normalized.pop("VLM_REASONING_LEVEL", None)
     return normalized
 
 
@@ -302,7 +348,11 @@ def validate_resolved_vlm_provider_config(config: Mapping[str, Any]) -> None:
         image_paths=[],
         timeout_seconds=float(config["VLM_TIMEOUT_SECONDS"]),
         temperature=float(config["VLM_TEMPERATURE"]),
-        context_tokens=int(config["VLM_CONTEXT_TOKENS"]),
+        context_tokens=(
+            int(config["VLM_CONTEXT_TOKENS"])
+            if config.get("VLM_CONTEXT_TOKENS") is not None
+            else None
+        ),
         max_output_tokens=int(config["VLM_MAX_OUTPUT_TOKENS"]),
         reasoning_level=_normalize_optional_scalar(config.get("VLM_REASONING_LEVEL")),
         keep_alive=_normalize_optional_scalar(config.get("VLM_KEEP_ALIVE")),

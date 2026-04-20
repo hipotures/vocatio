@@ -14,30 +14,24 @@ models:
     VLM_JSON_VALIDATION_MODE: "strict"
 
   - VLM_NAME: "llama.cpp localhost gemma-4-E4B-it-GGUF:Q8_0"
-    VLM_DESCRIPTION: "llama.cpp serving unsloth/gemma-4-E4B-it-GGUF:Q8_0 on localhost:8002, temp 0, strict JSON, 16k context"
+    VLM_DESCRIPTION: "llama.cpp serving unsloth/gemma-4-E4B-it-GGUF:Q8_0 on localhost:8002, temp 0, strict JSON"
     VLM_PROVIDER: "llamacpp"
     VLM_BASE_URL: "http://127.0.0.1:8002"
     VLM_MODEL: "unsloth/gemma-4-E4B-it-GGUF:Q8_0"
-    VLM_CONTEXT_TOKENS: 16384
     VLM_MAX_OUTPUT_TOKENS: 512
-    VLM_KEEP_ALIVE: "0"
     VLM_TIMEOUT_SECONDS: 300
     VLM_TEMPERATURE: 0.0
-    VLM_REASONING_LEVEL: "inherit"
     VLM_RESPONSE_SCHEMA_MODE: "off"
     VLM_JSON_VALIDATION_MODE: "strict"
 
   - VLM_NAME: "vLLM localhost Qwen3.5-0.8B"
-    VLM_DESCRIPTION: "vLLM serving Qwen/Qwen3.5-0.8B on localhost:8000, temp 0, strict JSON, 16k context"
+    VLM_DESCRIPTION: "vLLM serving Qwen/Qwen3.5-0.8B on localhost:8000, temp 0, strict JSON"
     VLM_PROVIDER: "vllm"
     VLM_BASE_URL: "http://127.0.0.1:8000"
     VLM_MODEL: "Qwen/Qwen3.5-0.8B"
-    VLM_CONTEXT_TOKENS: 16384
     VLM_MAX_OUTPUT_TOKENS: 512
-    VLM_KEEP_ALIVE: "0"
     VLM_TIMEOUT_SECONDS: 300
     VLM_TEMPERATURE: 0.0
-    VLM_REASONING_LEVEL: "inherit"
     VLM_RESPONSE_SCHEMA_MODE: "off"
     VLM_JSON_VALIDATION_MODE: "strict"
 

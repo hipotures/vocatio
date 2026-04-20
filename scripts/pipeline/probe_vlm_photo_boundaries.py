@@ -602,6 +602,8 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
             setattr(args, attr, str(configured))
 
     def apply_preset_optional_int(attr: str, configured: Any) -> None:
+        if configured is None:
+            return
         if attr not in cli_provided and getattr(args, attr) is None:
             setattr(args, attr, int(configured))
 
@@ -620,12 +622,14 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
         apply_preset_string("provider", DEFAULT_PROVIDER, preset_config["VLM_PROVIDER"])
         apply_preset_string("model", DEFAULT_MODEL_NAME, preset_config["VLM_MODEL"])
         apply_preset_string("ollama_base_url", DEFAULT_OLLAMA_BASE_URL, preset_config["VLM_BASE_URL"])
-        apply_preset_optional_int("ollama_num_ctx", preset_config["VLM_CONTEXT_TOKENS"])
+        apply_preset_optional_int("ollama_num_ctx", preset_config.get("VLM_CONTEXT_TOKENS"))
         apply_preset_optional_int("ollama_num_predict", preset_config["VLM_MAX_OUTPUT_TOKENS"])
-        apply_preset_string("ollama_keep_alive", DEFAULT_OLLAMA_KEEP_ALIVE, preset_config["VLM_KEEP_ALIVE"])
+        if "VLM_KEEP_ALIVE" in preset_config:
+            apply_preset_string("ollama_keep_alive", DEFAULT_OLLAMA_KEEP_ALIVE, preset_config["VLM_KEEP_ALIVE"])
         apply_preset_float("timeout_seconds", DEFAULT_TIMEOUT_SECONDS, preset_config["VLM_TIMEOUT_SECONDS"])
         apply_preset_float("temperature", DEFAULT_TEMPERATURE, preset_config["VLM_TEMPERATURE"])
-        apply_preset_string("ollama_think", DEFAULT_OLLAMA_THINK, preset_config["VLM_REASONING_LEVEL"])
+        if "VLM_REASONING_LEVEL" in preset_config:
+            apply_preset_string("ollama_think", DEFAULT_OLLAMA_THINK, preset_config["VLM_REASONING_LEVEL"])
         apply_preset_string(
             "response_schema_mode",
             DEFAULT_RESPONSE_SCHEMA_MODE,
@@ -1517,9 +1521,11 @@ def build_vlm_request(
     reasoning_level: str,
     response_schema: Optional[Mapping[str, Any]],
 ) -> VlmRequest:
+    request_context_tokens: Optional[int] = None
     request_keep_alive: Optional[str] = None
     request_reasoning_level: Optional[str] = None
     if provider == "ollama":
+        request_context_tokens = context_tokens
         request_keep_alive = keep_alive
         request_reasoning_level = None if reasoning_level == "inherit" else reasoning_level
     return VlmRequest(
@@ -1538,7 +1544,7 @@ def build_vlm_request(
             response_schema=response_schema,
         ),
         temperature=temperature,
-        context_tokens=context_tokens,
+        context_tokens=request_context_tokens,
         max_output_tokens=max_output_tokens,
         reasoning_level=request_reasoning_level,
         keep_alive=request_keep_alive,

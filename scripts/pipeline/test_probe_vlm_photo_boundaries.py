@@ -474,8 +474,35 @@ models:
         )
         with mock.patch.object(probe, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
             args = probe.parse_args([str(day_dir)])
-            with self.assertRaisesRegex(ValueError, "Provider does not support keep_alive: llamacpp"):
+            with self.assertRaisesRegex(ValueError, "Provider does not support context_tokens: llamacpp"):
                 probe.apply_vocatio_defaults(args, day_dir)
+
+    def test_apply_vocatio_defaults_accepts_non_ollama_preset_without_ollama_only_fields(self):
+        day_dir = self.make_day_dir("VLM_NAME=vllm-qwen\n")
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - VLM_NAME: "vllm-qwen"
+    VLM_PROVIDER: "vllm"
+    VLM_BASE_URL: "http://127.0.0.1:8000"
+    VLM_MODEL: "Qwen/Qwen3.5-0.8B"
+    VLM_MAX_OUTPUT_TOKENS: 512
+    VLM_TIMEOUT_SECONDS: 300
+    VLM_TEMPERATURE: 0.0
+    VLM_RESPONSE_SCHEMA_MODE: "off"
+    VLM_JSON_VALIDATION_MODE: "strict"
+"""
+        )
+        with mock.patch.object(probe, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = probe.parse_args([str(day_dir)])
+            args = probe.apply_vocatio_defaults(args, day_dir)
+            self.assertEqual(args.provider, "vllm")
+            self.assertEqual(args.model, "Qwen/Qwen3.5-0.8B")
+            self.assertEqual(args.ollama_base_url, "http://127.0.0.1:8000")
+            self.assertIsNone(args.ollama_num_ctx)
+            self.assertEqual(args.ollama_num_predict, 512)
+            self.assertEqual(args.ollama_keep_alive, probe.DEFAULT_OLLAMA_KEEP_ALIVE)
+            self.assertEqual(args.ollama_think, probe.DEFAULT_OLLAMA_THINK)
 
     def test_window_radius_contract_derives_even_window_size_and_centered_bounds(self):
         contract = load_module(
@@ -1552,7 +1579,7 @@ models:
         self.assertEqual(request.base_url, "http://127.0.0.1:8000/v1")
         self.assertEqual(request.keep_alive, None)
         self.assertEqual(request.reasoning_level, None)
-        self.assertEqual(request.context_tokens, 8192)
+        self.assertIsNone(request.context_tokens)
         self.assertEqual(request.max_output_tokens, 256)
         self.assertEqual(request.temperature, 0.1)
         self.assertIsNone(request.response_format)
@@ -2998,7 +3025,7 @@ models:
             self.assertEqual(request.base_url, "http://127.0.0.1:8000/v1")
             self.assertEqual(request.keep_alive, None)
             self.assertEqual(request.reasoning_level, None)
-            self.assertEqual(request.context_tokens, 8192)
+            self.assertIsNone(request.context_tokens)
             self.assertEqual(request.max_output_tokens, 256)
             self.assertEqual(
                 request.response_format,

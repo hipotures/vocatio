@@ -233,6 +233,14 @@ class VlmTransportContractTests(unittest.TestCase):
 
         self.assertEqual(error.exception.category, "unsupported_configuration")
 
+    def test_validate_vlm_request_rejects_unsupported_context_tokens(self) -> None:
+        request = self.make_request(provider="llamacpp", context_tokens=4096)
+
+        with self.assertRaises(vlm_transport.VlmTransportError) as error:
+            vlm_transport.validate_vlm_request(request)
+
+        self.assertEqual(error.exception.category, "unsupported_configuration")
+
 
 class VlmTransportPayloadTests(unittest.TestCase):
     def test_build_ollama_request_payload_maps_neutral_fields(self) -> None:

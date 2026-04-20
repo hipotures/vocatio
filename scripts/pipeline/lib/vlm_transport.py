@@ -115,6 +115,11 @@ def validate_vlm_request(request: VlmRequest) -> None:
         raise VlmTransportError("invalid_request", "VLM request temperature must be finite")
     if request.context_tokens is not None and request.context_tokens <= 0:
         raise VlmTransportError("invalid_request", "VLM request context_tokens must be greater than zero")
+    if request.context_tokens is not None and request.provider != "ollama":
+        raise VlmTransportError(
+            "unsupported_configuration",
+            f"Provider does not support context_tokens: {request.provider}",
+        )
     if request.max_output_tokens is not None and request.max_output_tokens <= 0:
         raise VlmTransportError("invalid_request", "VLM request max_output_tokens must be greater than zero")
     if request.response_format is not None:

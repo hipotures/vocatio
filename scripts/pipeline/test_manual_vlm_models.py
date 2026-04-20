@@ -227,15 +227,15 @@ models:
     VLM_RESPONSE_SCHEMA_MODE: "on"
     VLM_JSON_VALIDATION_MODE: "strict"
   - VLM_NAME: "Preset A"
-    VLM_PROVIDER: "vllm"
+    VLM_PROVIDER: "ollama"
     VLM_BASE_URL: "http://127.0.0.1:8000"
     VLM_MODEL: "b"
     VLM_CONTEXT_TOKENS: 4096
     VLM_MAX_OUTPUT_TOKENS: 512
-    VLM_KEEP_ALIVE: "0"
+    VLM_KEEP_ALIVE: "15m"
     VLM_TIMEOUT_SECONDS: 180
     VLM_TEMPERATURE: 0.2
-    VLM_REASONING_LEVEL: "inherit"
+    VLM_REASONING_LEVEL: "low"
     VLM_RESPONSE_SCHEMA_MODE: "on"
     VLM_JSON_VALIDATION_MODE: "strict"
 """
@@ -277,6 +277,30 @@ models:
             'unsupported VLM_PROVIDER "unsupported-provider" in preset "Preset A"',
         ):
             manual_vlm_models.load_manual_vlm_models(path)
+
+    def test_load_models_rejects_non_ollama_only_transport_fields(self) -> None:
+        cases = (
+            ("VLM_CONTEXT_TOKENS", 4096, "Provider does not support context_tokens: llamacpp"),
+            ("VLM_KEEP_ALIVE", "15m", "Provider does not support keep_alive: llamacpp"),
+            ("VLM_REASONING_LEVEL", "low", "Provider does not support reasoning_level: llamacpp"),
+        )
+        for field_name, value, message in cases:
+            with self.subTest(field_name=field_name):
+                model = {
+                    "VLM_NAME": "Preset A",
+                    "VLM_PROVIDER": "llamacpp",
+                    "VLM_BASE_URL": "http://127.0.0.1:8002",
+                    "VLM_MODEL": "demo",
+                    "VLM_MAX_OUTPUT_TOKENS": 512,
+                    "VLM_TIMEOUT_SECONDS": 180,
+                    "VLM_TEMPERATURE": 0.0,
+                    "VLM_RESPONSE_SCHEMA_MODE": "on",
+                    "VLM_JSON_VALIDATION_MODE": "strict",
+                }
+                model[field_name] = value
+                path = self.write_models([model])
+                with self.assertRaisesRegex(ValueError, message):
+                    manual_vlm_models.load_manual_vlm_models(path)
 
     def test_load_models_rejects_blank_required_strings(self) -> None:
         cases = (
@@ -403,7 +427,57 @@ models:
         self.assertEqual(resolved["VLM_MODEL"], "qwen3.5:9b")
         self.assertNotIn("IGNORED_FIELD", resolved)
 
+    def test_resolve_checked_in_llamacpp_example_preset(self) -> None:
+        loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
+
+        resolved = manual_vlm_models.resolve_vlm_model_config(
+            loaded.models,
+            {
+                "VLM_NAME": "llama.cpp localhost gemma-4-E4B-it-GGUF:Q8_0",
+            },
+        )
+
+        self.assertEqual(
+            resolved["VLM_NAME"],
+            "llama.cpp localhost gemma-4-E4B-it-GGUF:Q8_0",
+        )
+        self.assertEqual(resolved["VLM_PROVIDER"], "llamacpp")
+        self.assertNotIn("VLM_CONTEXT_TOKENS", resolved)
+        self.assertNotIn("VLM_KEEP_ALIVE", resolved)
+        self.assertNotIn("VLM_REASONING_LEVEL", resolved)
+
+    def test_resolve_checked_in_vllm_example_preset(self) -> None:
+        loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
+
+        resolved = manual_vlm_models.resolve_vlm_model_config(
+            loaded.models,
+            {
+                "VLM_NAME": "vLLM localhost Qwen3.5-0.8B",
+            },
+        )
+
+        self.assertEqual(resolved["VLM_NAME"], "vLLM localhost Qwen3.5-0.8B")
+        self.assertEqual(resolved["VLM_PROVIDER"], "vllm")
+        self.assertNotIn("VLM_CONTEXT_TOKENS", resolved)
+        self.assertNotIn("VLM_KEEP_ALIVE", resolved)
+        self.assertNotIn("VLM_REASONING_LEVEL", resolved)
+
     def test_resolve_vlm_model_config_rejects_provider_mismatch(self) -> None:
+        loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Provider does not support context_tokens: llamacpp",
+        ):
+            manual_vlm_models.resolve_vlm_model_config(
+                loaded.models,
+                {
+                    "VLM_NAME": "Ollama localhost qwen3.5:9b",
+                    "VLM_PROVIDER": "llamacpp",
+                },
+            )
+
+    def test_resolve_vlm_model_config_rejects_non_ollama_keep_alive_override(self) -> None:
         loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
 
         with self.assertRaisesRegex(
@@ -413,8 +487,38 @@ models:
             manual_vlm_models.resolve_vlm_model_config(
                 loaded.models,
                 {
-                    "VLM_NAME": "Ollama localhost qwen3.5:9b",
-                    "VLM_PROVIDER": "llamacpp",
+                    "VLM_NAME": "llama.cpp localhost gemma-4-E4B-it-GGUF:Q8_0",
+                    "VLM_KEEP_ALIVE": "15m",
+                },
+            )
+
+    def test_resolve_vlm_model_config_rejects_non_ollama_reasoning_override(self) -> None:
+        loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Provider does not support reasoning_level: vllm",
+        ):
+            manual_vlm_models.resolve_vlm_model_config(
+                loaded.models,
+                {
+                    "VLM_NAME": "vLLM localhost Qwen3.5-0.8B",
+                    "VLM_REASONING_LEVEL": "low",
+                },
+            )
+
+    def test_resolve_vlm_model_config_rejects_non_ollama_context_override(self) -> None:
+        loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Provider does not support context_tokens: llamacpp",
+        ):
+            manual_vlm_models.resolve_vlm_model_config(
+                loaded.models,
+                {
+                    "VLM_NAME": "llama.cpp localhost gemma-4-E4B-it-GGUF:Q8_0",
+                    "VLM_CONTEXT_TOKENS": "4096",
                 },
             )
 
