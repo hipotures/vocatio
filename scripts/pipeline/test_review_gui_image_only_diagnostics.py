@@ -480,6 +480,22 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             {
                 "status": "error",
                 "error": "provider request timed out",
+                "preset_name": "Preset A",
+                "model_config": {
+                    "VLM_NAME": "Preset A",
+                    "VLM_PROVIDER": "ollama",
+                    "VLM_BASE_URL": "http://127.0.0.1:11434",
+                    "VLM_MODEL": "qwen3.5:9b",
+                    "VLM_CONTEXT_TOKENS": 4096,
+                    "VLM_MAX_OUTPUT_TOKENS": 512,
+                    "VLM_KEEP_ALIVE": "15m",
+                    "VLM_TIMEOUT_SECONDS": 30,
+                    "VLM_TEMPERATURE": 0,
+                    "VLM_REASONING_LEVEL": "low",
+                    "VLM_RESPONSE_SCHEMA_MODE": "off",
+                    "VLM_JSON_VALIDATION_MODE": "strict",
+                },
+                "attempt_count": 3,
                 "debug_file_paths": [
                     "/tmp/manual-vlm/request.json",
                     "/tmp/manual-vlm/error.txt",
@@ -488,6 +504,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
         self.assertIn("Status: error", error_section["body"])
         self.assertIn("Error: provider request timed out", error_section["body"])
+        self.assertIn("Model: Preset A", error_section["body"])
+        self.assertIn("Model config:", error_section["body"])
+        self.assertIn("Attempts: 3", error_section["body"])
+        self.assertIn("Attempts: 3\n\nDebug files:", error_section["body"])
         self.assertIn("Debug files:", error_section["body"])
         self.assertIn("/tmp/manual-vlm/request.json", error_section["body"])
         self.assertIn("/tmp/manual-vlm/error.txt", error_section["body"])
@@ -499,7 +519,47 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 "left_segment_type": "performance",
                 "right_segment_type": "ceremony",
                 "summary": "Strong costume and performer change across the gap.",
-                "result_text": "Decision: cut_after_2\nSummary: Strong costume and performer change across the gap.",
+                "left_anchor": "cam/left.jpg",
+                "right_anchor": "cam/right.jpg",
+                "preset_name": "Preset A",
+                "model_config": {
+                    "VLM_NAME": "Preset A",
+                    "VLM_PROVIDER": "ollama",
+                    "VLM_BASE_URL": "http://127.0.0.1:11434",
+                    "VLM_MODEL": "qwen3.5:9b",
+                    "VLM_CONTEXT_TOKENS": 4096,
+                    "VLM_MAX_OUTPUT_TOKENS": 512,
+                    "VLM_KEEP_ALIVE": "15m",
+                    "VLM_TIMEOUT_SECONDS": 30,
+                    "VLM_TEMPERATURE": 0,
+                    "VLM_REASONING_LEVEL": "low",
+                    "VLM_RESPONSE_SCHEMA_MODE": "off",
+                    "VLM_JSON_VALIDATION_MODE": "strict",
+                },
+                "attempt_count": 3,
+                "succeeded_on_attempt": 3,
+                "result_text": (
+                    "Decision: cut_after_2\n"
+                    "Summary: Strong costume and performer change across the gap.\n\n"
+                    "Anchors:\n"
+                    "  cam/left.jpg -> cam/right.jpg\n\n"
+                    "Model: Preset A\n"
+                    "Model config:\n"
+                    "  VLM_NAME: Preset A\n"
+                    "  VLM_PROVIDER: ollama\n"
+                    "  VLM_BASE_URL: http://127.0.0.1:11434\n"
+                    "  VLM_MODEL: qwen3.5:9b\n"
+                    "  VLM_CONTEXT_TOKENS: 4096\n"
+                    "  VLM_MAX_OUTPUT_TOKENS: 512\n"
+                    "  VLM_KEEP_ALIVE: 15m\n"
+                    "  VLM_TIMEOUT_SECONDS: 30\n"
+                    "  VLM_TEMPERATURE: 0\n"
+                    "  VLM_REASONING_LEVEL: low\n"
+                    "  VLM_RESPONSE_SCHEMA_MODE: off\n"
+                    "  VLM_JSON_VALIDATION_MODE: strict\n"
+                    "Attempts: 3\n"
+                    "Succeeded on attempt: 3"
+                ),
                 "debug_file_paths": [
                     "/tmp/manual-vlm/prompt.txt",
                     "/tmp/manual-vlm/response.json",
@@ -509,6 +569,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Status: result", result_section["body"])
         self.assertIn("Decision: cut_after_2", result_section["body"])
         self.assertIn("Summary: Strong costume and performer change across the gap.", result_section["body"])
+        self.assertIn("\n\nAnchors:\n  cam/left.jpg -> cam/right.jpg\n\nModel: Preset A", result_section["body"])
+        self.assertIn("Attempts: 3", result_section["body"])
+        self.assertIn("Succeeded on attempt: 3", result_section["body"])
+        self.assertIn("Succeeded on attempt: 3\n\nDebug files:", result_section["body"])
         self.assertIn("Debug files:", result_section["body"])
         self.assertIn("/tmp/manual-vlm/prompt.txt", result_section["body"])
         self.assertIn("/tmp/manual-vlm/response.json", result_section["body"])
@@ -704,6 +768,25 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     "Floor split indicates rehearsal. | "
                     "Summary: Boundary after frame_03 marks transition from standing performance pose to floor split rehearsal."
                 ),
+                "left_anchor": "cam/left.jpg",
+                "right_anchor": "cam/right.jpg",
+                "preset_name": "Preset A",
+                "model_config": {
+                    "VLM_NAME": "Preset A",
+                    "VLM_PROVIDER": "ollama",
+                    "VLM_BASE_URL": "http://127.0.0.1:11434",
+                    "VLM_MODEL": "qwen3.5:9b",
+                    "VLM_CONTEXT_TOKENS": 4096,
+                    "VLM_MAX_OUTPUT_TOKENS": 512,
+                    "VLM_KEEP_ALIVE": "15m",
+                    "VLM_TIMEOUT_SECONDS": 30,
+                    "VLM_TEMPERATURE": 0,
+                    "VLM_REASONING_LEVEL": "low",
+                    "VLM_RESPONSE_SCHEMA_MODE": "off",
+                    "VLM_JSON_VALIDATION_MODE": "strict",
+                },
+                "attempt_count": 3,
+                "succeeded_on_attempt": 3,
             }
         )
 
@@ -717,13 +800,12 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Primary evidence:", body)
         self.assertIn("  Transition occurs between frame_03 and frame_04.", body)
         self.assertNotIn("Reason: Left segment type: dance | Right segment type: rehearsal", body)
-        self.assertIn("Anchors:", review_gui.format_manual_vlm_analyze_result_text(
-            {
-                "decision": "cut_after_3",
-                "left_anchor": "cam/left.jpg",
-                "right_anchor": "cam/right.jpg",
-            }
-        ))
+        self.assertIn("\n\nAnchors:\n  cam/left.jpg -> cam/right.jpg\n\nModel: Preset A", body)
+        self.assertIn("Model config:", body)
+        self.assertIn("  VLM_NAME: Preset A", body)
+        self.assertIn("  VLM_TEMPERATURE: 0", body)
+        self.assertIn("Attempts: 3", body)
+        self.assertIn("Succeeded on attempt: 3", body)
 
     def test_manual_ml_prediction_section_renders_left_right_and_boundary(self):
         state = review_gui.build_manual_ml_prediction_section(
@@ -2467,6 +2549,9 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
 
             error = raised.exception
             self.assertEqual(str(error), "VLM request model must be non-empty")
+            self.assertEqual(error.preset_name, "Preset A")
+            self.assertEqual(error.model_config["VLM_NAME"], "Preset A")
+            self.assertEqual(error.attempt_count, 1)
             self.assertEqual(
                 error.debug_file_paths,
                 [
@@ -2477,6 +2562,167 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             )
             for debug_file_path in error.debug_file_paths:
                 self.assertTrue(Path(debug_file_path).exists(), debug_file_path)
+
+    def test_compute_manual_vlm_analyze_result_records_retry_metadata_on_success(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            image_paths = []
+            for name in ("left.jpg", "right.jpg", "tail.jpg"):
+                image_path = temp_path / name
+                image_path.write_bytes(b"jpeg")
+                image_paths.append(image_path)
+
+            joined_rows = [
+                {
+                    "photo_id": "left",
+                    "relative_path": "cam/left.jpg",
+                    "start_epoch_ms": "1000",
+                    "image_path": str(image_paths[0]),
+                },
+                {
+                    "photo_id": "right",
+                    "relative_path": "cam/right.jpg",
+                    "start_epoch_ms": "2000",
+                    "image_path": str(image_paths[1]),
+                },
+                {
+                    "photo_id": "tail",
+                    "relative_path": "cam/tail.jpg",
+                    "start_epoch_ms": "3000",
+                    "image_path": str(image_paths[2]),
+                },
+            ]
+
+            manual_vlm_model = {
+                "VLM_NAME": "Preset A",
+                "VLM_PROVIDER": "ollama",
+                "VLM_BASE_URL": "http://127.0.0.1:11434",
+                "VLM_MODEL": "qwen3.5:9b",
+                "VLM_CONTEXT_TOKENS": 4096,
+                "VLM_MAX_OUTPUT_TOKENS": 512,
+                "VLM_KEEP_ALIVE": "15m",
+                "VLM_TIMEOUT_SECONDS": 30,
+                "VLM_TEMPERATURE": 0,
+                "VLM_REASONING_LEVEL": "low",
+                "VLM_RESPONSE_SCHEMA_MODE": "off",
+                "VLM_JSON_VALIDATION_MODE": "strict",
+            }
+            runtime_args = argparse.Namespace(
+                provider="ollama",
+                model="qwen3.5:9b",
+                image_variant="source",
+                ollama_base_url="http://127.0.0.1:11434",
+                timeout_seconds=30.0,
+                ollama_keep_alive="15m",
+                temperature=0.0,
+                ollama_num_ctx=4096,
+                ollama_num_predict=512,
+                ollama_think="low",
+                response_schema_mode="off",
+                json_validation_mode="strict",
+                window_radius=1,
+            )
+            request_attempts = {"count": 0}
+
+            def fake_run_vlm_request(_request):
+                request_attempts["count"] += 1
+                if request_attempts["count"] < 3:
+                    raise VlmTransportError("timeout", "provider request timed out")
+                return Mock(
+                    text="response text",
+                    raw_response={"response": "ok"},
+                )
+
+            with unittest.mock.patch.object(
+                review_gui,
+                "resolve_manual_vlm_runtime_args",
+                return_value=runtime_args,
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "_build_ml_candidate_window_rows",
+                return_value=[
+                    {"image_path": str(image_paths[0])},
+                    {"image_path": str(image_paths[1])},
+                ],
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "load_extra_instructions",
+                return_value="",
+            ), unittest.mock.patch.object(
+                review_gui,
+                "load_manual_vlm_hint_lines",
+                return_value=["ML hints unavailable."],
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "build_user_prompt",
+                return_value="prompt",
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "build_vlm_request",
+                return_value=object(),
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "build_provider_request_payload",
+                return_value={"request": "payload"},
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "build_run_id",
+                return_value="manual-retry",
+            ), unittest.mock.patch.object(
+                review_gui.tempfile,
+                "gettempdir",
+                return_value=temp_dir,
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "run_vlm_request",
+                side_effect=fake_run_vlm_request,
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "parse_model_response",
+                return_value={
+                    "response_status": "ok",
+                    "decision": "cut_after_2",
+                    "reason": "Strong costume and performer change across the gap.",
+                },
+            ), unittest.mock.patch.object(
+                review_gui,
+                "extract_manual_vlm_response_payload",
+                return_value={
+                    "summary": "Strong costume and performer change across the gap.",
+                    "left_segment_type": "performance",
+                    "right_segment_type": "ceremony",
+                },
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "dump_debug_artifacts",
+            ), unittest.mock.patch.object(
+                review_gui.time,
+                "sleep",
+            ):
+                result = review_gui.compute_manual_vlm_analyze_result(
+                    day_dir=Path("/tmp/20260323"),
+                    workspace_dir=temp_path,
+                    payload={"day": "20260323", "window_radius": 1},
+                    joined_rows=joined_rows,
+                    anchor_pair={
+                        "left_row_index": 0,
+                        "right_row_index": 1,
+                        "left_relative_path": "cam/left.jpg",
+                        "right_relative_path": "cam/right.jpg",
+                    },
+                    window_config={"window_radius": 1},
+                    manual_vlm_model=manual_vlm_model,
+                )
+
+        self.assertEqual(request_attempts["count"], 3)
+        self.assertEqual(result["preset_name"], "Preset A")
+        self.assertEqual(result["model_config"]["VLM_NAME"], "Preset A")
+        self.assertEqual(result["attempt_count"], 3)
+        self.assertEqual(result["succeeded_on_attempt"], 3)
+        self.assertIn("Model: Preset A", result["result_text"])
+        self.assertIn("Model config:", result["result_text"])
+        self.assertIn("Attempts: 3", result["result_text"])
+        self.assertIn("Succeeded on attempt: 3", result["result_text"])
 
     def test_compute_manual_ml_prediction_result_uses_image_paths_for_manual_thumbnail_columns(self):
         joined_rows = [

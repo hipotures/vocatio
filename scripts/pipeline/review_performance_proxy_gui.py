@@ -878,6 +878,9 @@ def compute_manual_vlm_analyze_result(
 ) -> Dict[str, Any]:
     if not window_config:
         raise ValueError("manual VLM window config is unavailable")
+    preset_name = str(manual_vlm_model.get("VLM_NAME", "") or "").strip()
+    model_config = build_manual_vlm_model_config(manual_vlm_model)
+    attempt_count = 0
     runtime_args = resolve_manual_vlm_runtime_args(
         day_dir=day_dir,
         workspace_dir=workspace_dir,
@@ -939,6 +942,8 @@ def compute_manual_vlm_analyze_result(
     debug_dir = resolve_manual_vlm_debug_dir(workspace_dir, runtime_args, run_id)
 
     def execute_request() -> tuple[str, Optional[Mapping[str, Any]], Dict[str, str]]:
+        nonlocal attempt_count
+        attempt_count += 1
         try:
             response = probe_vlm_boundary.run_vlm_request(request)
         except Exception as exc:
@@ -1003,11 +1008,23 @@ def compute_manual_vlm_analyze_result(
         )
         return raw_response, response_payload, parsed_response
 
-    raw_response, response_payload, parsed_response = run_manual_vlm_request_with_retries(execute_request)
+    try:
+        raw_response, response_payload, parsed_response = run_manual_vlm_request_with_retries(execute_request)
+    except Exception as exc:
+        if preset_name:
+            setattr(exc, "preset_name", preset_name)
+        if model_config:
+            setattr(exc, "model_config", dict(model_config))
+        if attempt_count > 0:
+            setattr(exc, "attempt_count", attempt_count)
+        raise
     response_json = extract_manual_vlm_response_payload(raw_response)
     result = {
         "provider": str(runtime_args.provider),
         "model": str(runtime_args.model),
+        "preset_name": preset_name,
+        "model_config": dict(model_config),
+        "attempt_count": attempt_count,
         "run_id": run_id,
         "decision": str(parsed_response.get("decision", "") or "").strip(),
         "reason": str(parsed_response.get("reason", "") or "").strip(),
@@ -1024,6 +1041,8 @@ def compute_manual_vlm_analyze_result(
             include_response=response_payload is not None,
         ),
     }
+    if attempt_count > 1:
+        result["succeeded_on_attempt"] = attempt_count
     result["result_text"] = format_manual_vlm_analyze_result_text(result)
     return result
 
@@ -1405,6 +1424,61 @@ def build_manual_vlm_debug_lines(debug_file_paths: Sequence[object]) -> List[str
     return lines
 
 
+def format_manual_vlm_metadata_value(value: object) -> str:
+    if value is None:
+        return "-"
+    text = str(value).strip()
+    return text if text else "-"
+
+
+def build_manual_vlm_model_config(model_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(model_config, Mapping):
+        return {}
+    return {
+        field_name: model_config.get(field_name)
+        for field_name in manual_vlm_models.MODEL_FIELDS
+        if field_name in model_config
+    }
+
+
+def parse_manual_vlm_attempt_count(value: object) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        normalized = int(text)
+    except (TypeError, ValueError):
+        return None
+    return normalized if normalized > 0 else None
+
+
+def build_manual_vlm_model_lines(result: Mapping[str, Any]) -> List[str]:
+    model_config = build_manual_vlm_model_config(result.get("model_config"))
+    preset_name = str(result.get("preset_name", "") or model_config.get("VLM_NAME", "") or "").strip()
+    lines: List[str] = []
+    if preset_name:
+        lines.append(f"Model: {preset_name}")
+    if model_config:
+        lines.append("Model config:")
+        for field_name in manual_vlm_models.MODEL_FIELDS:
+            if field_name in model_config:
+                lines.append(f"  {field_name}: {format_manual_vlm_metadata_value(model_config.get(field_name))}")
+    return lines
+
+
+def build_manual_vlm_retry_lines(result: Mapping[str, Any]) -> List[str]:
+    attempt_count = parse_manual_vlm_attempt_count(result.get("attempt_count"))
+    succeeded_on_attempt = parse_manual_vlm_attempt_count(result.get("succeeded_on_attempt"))
+    lines: List[str] = []
+    if attempt_count is not None:
+        lines.append(f"Attempts: {attempt_count}")
+    if succeeded_on_attempt is not None and succeeded_on_attempt > 1:
+        lines.append(f"Succeeded on attempt: {succeeded_on_attempt}")
+    return lines
+
+
 def format_manual_vlm_reason_lines(reason: str, summary: str) -> List[str]:
     normalized_reason = str(reason or "").strip()
     if not normalized_reason:
@@ -1440,27 +1514,34 @@ def format_manual_vlm_reason_lines(reason: str, summary: str) -> List[str]:
 
 
 def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
-    lines = [
+    semantic_lines = [
         f"Decision: {format_value(result.get('decision'))}",
     ]
     left_segment_type = str(result.get("left_segment_type", "") or "").strip()
     right_segment_type = str(result.get("right_segment_type", "") or "").strip()
     if left_segment_type or right_segment_type:
-        lines.append(
+        semantic_lines.append(
             "Segments: "
             f"{format_value(left_segment_type)} -> {format_value(right_segment_type)}"
         )
     summary = str(result.get("summary", "") or "").strip()
     if summary:
-        lines.append(f"Summary: {summary}")
+        semantic_lines.append(f"Summary: {summary}")
     reason = str(result.get("reason", "") or "").strip()
     if reason:
-        lines.extend(format_manual_vlm_reason_lines(reason, summary))
+        semantic_lines.extend(format_manual_vlm_reason_lines(reason, summary))
     left_anchor = str(result.get("left_anchor", "") or "").strip()
     right_anchor = str(result.get("right_anchor", "") or "").strip()
+    anchor_lines: List[str] = []
     if left_anchor or right_anchor:
-        lines.append("Anchors:")
-        lines.append(f"  {format_value(left_anchor)} -> {format_value(right_anchor)}")
+        anchor_lines.append("Anchors:")
+        anchor_lines.append(f"  {format_value(left_anchor)} -> {format_value(right_anchor)}")
+    metadata_lines: List[str] = []
+    metadata_lines.extend(build_manual_vlm_model_lines(result))
+    metadata_lines.extend(build_manual_vlm_retry_lines(result))
+    lines = list(semantic_lines)
+    append_info_block(lines, anchor_lines)
+    append_info_block(lines, metadata_lines)
     return join_info_section_lines(lines)
 
 
@@ -1512,6 +1593,8 @@ def build_manual_vlm_analyze_section(
         lines.append(f"Started: {format_value(state.get('started_at'))}")
     elif status == "error":
         lines.append(f"Error: {format_value(error_text or resolution_error)}")
+        lines.extend(build_manual_vlm_model_lines(state))
+        lines.extend(build_manual_vlm_retry_lines(state))
     elif status == "result":
         result_text = str(state.get("result_text", "") or "").strip()
         lines.extend(result_text.splitlines() if result_text else format_manual_vlm_analyze_result_text(state).splitlines())
@@ -3594,6 +3677,22 @@ class MainWindow(QMainWindow):
                 current_state["debug_file_paths"] = [str(value) for value in debug_file_paths]
             else:
                 current_state.pop("debug_file_paths", None)
+            preset_name = str(getattr(error, "preset_name", "") or "").strip()
+            if preset_name:
+                current_state["preset_name"] = preset_name
+            model_config = build_manual_vlm_model_config(getattr(error, "model_config", None))
+            if model_config:
+                current_state["model_config"] = model_config
+            attempt_count = parse_manual_vlm_attempt_count(getattr(error, "attempt_count", None))
+            if attempt_count is not None:
+                current_state["attempt_count"] = attempt_count
+            else:
+                current_state.pop("attempt_count", None)
+            succeeded_on_attempt = parse_manual_vlm_attempt_count(getattr(error, "succeeded_on_attempt", None))
+            if succeeded_on_attempt is not None and succeeded_on_attempt > 1:
+                current_state["succeeded_on_attempt"] = succeeded_on_attempt
+            else:
+                current_state.pop("succeeded_on_attempt", None)
         self.set_manual_action_state(action_key, current_state)
         self.clear_manual_action_runtime(action_key)
         self.refresh_current_info_dock()
@@ -3798,9 +3897,17 @@ class MainWindow(QMainWindow):
         next_state = build_idle_manual_vlm_analyze_state(selected_photos)
         next_state["status"] = "running"
         next_state["started_at"] = datetime.now(timezone.utc).astimezone().replace(microsecond=0).isoformat()
+        preset_name = str(selected_manual_vlm_model.get("VLM_NAME", "") or "").strip()
+        if preset_name:
+            next_state["preset_name"] = preset_name
+        model_config = build_manual_vlm_model_config(selected_manual_vlm_model)
+        if model_config:
+            next_state["model_config"] = model_config
         next_state.pop("error", None)
         next_state.pop("result_text", None)
         next_state.pop("resolution_error", None)
+        next_state.pop("attempt_count", None)
+        next_state.pop("succeeded_on_attempt", None)
         next_state.pop("debug_file_paths", None)
         self.manual_vlm_analyze_state = next_state
         self.manual_action_running_key = "run_manual_vlm_analyze"
