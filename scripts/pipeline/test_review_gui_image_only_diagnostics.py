@@ -231,6 +231,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.manual_vlm_models = []
         window.manual_vlm_models_md5 = None
         window.manual_vlm_models_error = None
+        window.manual_vlm_status_message = None
         window.manual_vlm_selected_name = None
         window.selected_photo_entries = Mock(
             return_value=[
@@ -640,6 +641,53 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIsNotNone(window.manual_vlm_models_md5)
         self.assertIsNone(window.manual_vlm_models_error)
         self.assertEqual(window.manual_vlm_selected_name, "Preset B")
+
+    def test_manual_vlm_analyze_reloads_models_when_md5_changes(self) -> None:
+        window = self.build_test_window_with_two_selected_rows()
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        window.manual_vlm_models_md5 = "old"
+        reloaded = {"called": False}
+
+        def fake_reload(startup: bool = False) -> None:
+            reloaded["called"] = True
+            window.manual_vlm_models = [{"VLM_NAME": "Preset B"}]
+            window.manual_vlm_models_md5 = "new"
+            window.manual_vlm_selected_name = "Preset B"
+            window.manual_vlm_models_error = None
+
+        window.reload_manual_vlm_models = fake_reload
+
+        review_gui.refresh_manual_vlm_models_if_needed(window, latest_md5="new")
+
+        self.assertTrue(reloaded["called"])
+        self.assertEqual(window.manual_vlm_selected_name, "Preset B")
+
+    def test_manual_vlm_analyze_keeps_selection_when_name_survives_reload(self) -> None:
+        window = self.build_test_window_with_two_selected_rows()
+        window.manual_vlm_selected_name = "Preset B"
+
+        review_gui.apply_reloaded_manual_vlm_models(
+            window,
+            models=[{"VLM_NAME": "Preset A"}, {"VLM_NAME": "Preset B"}],
+            md5_hex="next",
+            message="Models reloaded from config.",
+        )
+
+        self.assertEqual(window.manual_vlm_selected_name, "Preset B")
+        self.assertEqual(window.manual_vlm_status_message, "Models reloaded from config.")
+
+    def test_manual_vlm_analyze_falls_back_to_first_model_when_selection_disappears(self) -> None:
+        window = self.build_test_window_with_two_selected_rows()
+        window.manual_vlm_selected_name = "Missing Preset"
+
+        review_gui.apply_reloaded_manual_vlm_models(
+            window,
+            models=[{"VLM_NAME": "Preset A"}, {"VLM_NAME": "Preset B"}],
+            md5_hex="next",
+            message="Models reloaded from config.",
+        )
+
+        self.assertEqual(window.manual_vlm_selected_name, "Preset A")
 
     def test_format_manual_vlm_analyze_result_text_splits_reason_into_blocks(self):
         body = review_gui.format_manual_vlm_analyze_result_text(
@@ -1721,6 +1769,11 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "status": "idle",
             "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
         }
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        window.manual_vlm_models_md5 = "stable"
+        window.manual_vlm_models_error = None
+        window.manual_vlm_status_message = None
+        window.manual_vlm_selected_name = "Preset A"
         window.current_manual_vlm_analyze_state = Mock(return_value=window.manual_vlm_analyze_state)
         window.manual_prediction_day_dir = Mock(return_value=Path("/tmp/20260323"))
         window.workspace_dir = Path("/tmp/workspace")
@@ -1736,6 +1789,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
         with unittest.mock.patch.object(
+            review_gui.manual_vlm_models,
+            "compute_manual_vlm_models_md5",
+            return_value="stable",
+        ), unittest.mock.patch.object(
             review_gui,
             "resolve_manual_vlm_analyze_state",
             return_value={
@@ -1779,6 +1836,11 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "status": "idle",
             "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
         }
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        window.manual_vlm_models_md5 = "stable"
+        window.manual_vlm_models_error = None
+        window.manual_vlm_status_message = None
+        window.manual_vlm_selected_name = "Preset A"
         window.current_manual_vlm_analyze_state = Mock(return_value=window.manual_vlm_analyze_state)
         window.manual_prediction_day_dir = Mock(return_value=Path("/tmp/20260323"))
         window.workspace_dir = Path("/tmp/workspace")
@@ -1794,6 +1856,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
         with unittest.mock.patch.object(
+            review_gui.manual_vlm_models,
+            "compute_manual_vlm_models_md5",
+            return_value="stable",
+        ), unittest.mock.patch.object(
             review_gui,
             "resolve_manual_vlm_analyze_state",
             return_value={
@@ -1873,6 +1939,11 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "left_relative_path": "cam/a.jpg",
             "right_relative_path": "cam/b.jpg",
         }
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        window.manual_vlm_models_md5 = "stable"
+        window.manual_vlm_models_error = None
+        window.manual_vlm_status_message = None
+        window.manual_vlm_selected_name = "Preset A"
         window.manual_prediction_day_dir = Mock(return_value=Path("/day"))
         window.selected_photo_entries = Mock(return_value=[{"relative_path": "cam/a.jpg"}, {"relative_path": "cam/b.jpg"}])
         window.refresh_current_info_dock = Mock()
@@ -1882,7 +1953,11 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         bind_manual_action_methods(window)
         window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
-        with unittest.mock.patch.object(review_gui, "reload_probe_vlm_boundary_module") as reload_mock, unittest.mock.patch.object(
+        with unittest.mock.patch.object(
+            review_gui.manual_vlm_models,
+            "compute_manual_vlm_models_md5",
+            return_value="stable",
+        ), unittest.mock.patch.object(review_gui, "reload_probe_vlm_boundary_module") as reload_mock, unittest.mock.patch.object(
             review_gui,
             "resolve_manual_vlm_analyze_state",
             return_value={
@@ -1959,6 +2034,11 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "resolution_error": "old resolution error",
             "debug_file_paths": ["/tmp/stale.txt"],
         }
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        window.manual_vlm_models_md5 = "stable"
+        window.manual_vlm_models_error = None
+        window.manual_vlm_status_message = None
+        window.manual_vlm_selected_name = "Preset A"
         window.selected_photo_entries = Mock(return_value=[{"relative_path": "cam/a.jpg"}, {"relative_path": "cam/b.jpg"}])
         window.refresh_current_info_dock = Mock()
         window.workspace_dir = Path("/workspace")
@@ -1968,6 +2048,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
         with unittest.mock.patch.object(
+            review_gui.manual_vlm_models,
+            "compute_manual_vlm_models_md5",
+            return_value="stable",
+        ), unittest.mock.patch.object(
             review_gui,
             "reload_probe_vlm_boundary_module",
             side_effect=RuntimeError("boom"),

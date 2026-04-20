@@ -216,6 +216,61 @@ def load_manual_vlm_models_for_gui(repo_root: Path) -> Tuple[List[Dict[str, Any]
     return loaded.models, loaded.md5_hex, None
 
 
+def apply_reloaded_manual_vlm_models(
+    window: "MainWindow",
+    models: List[Dict[str, Any]],
+    md5_hex: Optional[str],
+    message: Optional[str],
+) -> None:
+    previous_name = str(getattr(window, "manual_vlm_selected_name", "") or "").strip() or None
+    normalized_models = [dict(model) for model in models]
+    names = [
+        str(model.get("VLM_NAME", "") or "").strip()
+        for model in normalized_models
+        if str(model.get("VLM_NAME", "") or "").strip()
+    ]
+    window.manual_vlm_models = normalized_models
+    window.manual_vlm_models_md5 = md5_hex
+    window.manual_vlm_models_error = None
+    window.manual_vlm_status_message = message
+    if previous_name in names:
+        window.manual_vlm_selected_name = previous_name
+    else:
+        window.manual_vlm_selected_name = names[0] if names else None
+
+
+def apply_manual_vlm_models_reload_error(
+    window: "MainWindow",
+    md5_hex: Optional[str],
+    error_text: str,
+) -> None:
+    window.manual_vlm_models = []
+    window.manual_vlm_models_md5 = md5_hex
+    window.manual_vlm_models_error = error_text
+    window.manual_vlm_status_message = None
+    window.manual_vlm_selected_name = None
+
+
+def refresh_manual_vlm_models_if_needed(window: "MainWindow", latest_md5: str) -> None:
+    current_md5 = getattr(window, "manual_vlm_models_md5", None)
+    if current_md5 == latest_md5:
+        return
+    reload_models = getattr(window, "reload_manual_vlm_models", None)
+    if callable(reload_models):
+        reload_models(startup=False)
+        return
+    models, md5_hex, error_text = load_manual_vlm_models_for_gui(REPO_ROOT)
+    if error_text is not None:
+        apply_manual_vlm_models_reload_error(window, md5_hex, error_text)
+        return
+    apply_reloaded_manual_vlm_models(
+        window,
+        models=models,
+        md5_hex=md5_hex,
+        message="Models reloaded from config.",
+    )
+
+
 def resolve_selection_output_path(workspace_dir: Path, value: str) -> Path:
     candidate = Path(value.strip())
     if not candidate.is_absolute():
@@ -1343,6 +1398,7 @@ def build_manual_vlm_analyze_section_config(window: object) -> Dict[str, Any]:
     selected_name = configured_name if configured_name in preset_names else (preset_names[0] if preset_names else None)
     description = (
         str(getattr(window, "manual_vlm_models_error", "") or "").strip()
+        or str(getattr(window, "manual_vlm_status_message", "") or "").strip()
         or "Ephemeral runtime state for manual VLM boundary analysis."
     )
     return {
@@ -2212,8 +2268,9 @@ class MainWindow(QMainWindow):
         self.manual_vlm_models: List[Dict[str, Any]] = []
         self.manual_vlm_models_md5: Optional[str] = None
         self.manual_vlm_models_error: Optional[str] = None
+        self.manual_vlm_status_message: Optional[str] = None
         self.manual_vlm_selected_name: Optional[str] = None
-        self.reload_manual_vlm_models()
+        self.reload_manual_vlm_models(startup=True)
         self.thread_pool = QThreadPool.globalInstance()
         self.manual_action_running_key: Optional[str] = None
         self.manual_action_workers: Dict[str, QRunnable] = {}
@@ -3627,6 +3684,25 @@ class MainWindow(QMainWindow):
         selected_photos = self.selected_photo_entries()
         if not should_show_manual_vlm_analyze(selected_photos):
             return
+        config_path = REPO_ROOT / MANUAL_VLM_MODELS_PATH
+        try:
+            latest_md5 = manual_vlm_models.compute_manual_vlm_models_md5(config_path)
+        except OSError as exc:
+            apply_manual_vlm_models_reload_error(self, None, f"Model config error: {exc}")
+            self.set_manual_action_state(
+                "run_manual_vlm_analyze",
+                {"status": "error", "error": self.manual_vlm_models_error},
+            )
+            self.refresh_current_info_dock()
+            return
+        refresh_manual_vlm_models_if_needed(self, latest_md5)
+        if getattr(self, "manual_vlm_models_error", None):
+            self.set_manual_action_state(
+                "run_manual_vlm_analyze",
+                {"status": "error", "error": self.manual_vlm_models_error},
+            )
+            self.refresh_current_info_dock()
+            return
         next_state = build_idle_manual_vlm_analyze_state(selected_photos)
         next_state["status"] = "running"
         next_state["started_at"] = datetime.now(timezone.utc).astimezone().replace(microsecond=0).isoformat()
@@ -3696,17 +3772,17 @@ class MainWindow(QMainWindow):
         )
         self.show_single_preview(photo["proxy_path"], "Selected")
 
-    def reload_manual_vlm_models(self) -> None:
+    def reload_manual_vlm_models(self, startup: bool = False) -> None:
         models, md5_hex, error_text = load_manual_vlm_models_for_gui(REPO_ROOT)
-        self.manual_vlm_models = models
-        self.manual_vlm_models_md5 = md5_hex
-        self.manual_vlm_models_error = error_text
-        if models:
-            available_names = [str(model["VLM_NAME"]) for model in models]
-            if self.manual_vlm_selected_name not in available_names:
-                self.manual_vlm_selected_name = available_names[0]
-        else:
-            self.manual_vlm_selected_name = None
+        if error_text is not None:
+            apply_manual_vlm_models_reload_error(self, md5_hex, error_text)
+            return
+        apply_reloaded_manual_vlm_models(
+            self,
+            models=models,
+            md5_hex=md5_hex,
+            message=None if startup else "Models reloaded from config.",
+        )
 
     def set_view_mode(self, mode: int) -> None:
         if self.view_mode == mode:
