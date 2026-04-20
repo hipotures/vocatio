@@ -548,12 +548,22 @@ def resolve_manual_vlm_runtime_args(
     args.provider = str(manual_vlm_model.get("VLM_PROVIDER", "") or "").strip()
     args.model = str(manual_vlm_model.get("VLM_MODEL", "") or "").strip()
     args.ollama_base_url = str(manual_vlm_model.get("VLM_BASE_URL", "") or "").strip()
-    args.ollama_num_ctx = int(manual_vlm_model.get("VLM_CONTEXT_TOKENS"))
     args.ollama_num_predict = int(manual_vlm_model.get("VLM_MAX_OUTPUT_TOKENS"))
-    args.ollama_keep_alive = str(manual_vlm_model.get("VLM_KEEP_ALIVE", "") or "").strip()
     args.timeout_seconds = float(manual_vlm_model.get("VLM_TIMEOUT_SECONDS"))
     args.temperature = float(manual_vlm_model.get("VLM_TEMPERATURE"))
-    args.ollama_think = str(manual_vlm_model.get("VLM_REASONING_LEVEL", "") or "").strip()
+    if args.provider == "ollama":
+        context_tokens = manual_vlm_model.get("VLM_CONTEXT_TOKENS")
+        args.ollama_num_ctx = int(context_tokens) if context_tokens is not None else None
+        args.ollama_keep_alive = str(
+            manual_vlm_model.get("VLM_KEEP_ALIVE", probe_vlm_boundary.DEFAULT_OLLAMA_KEEP_ALIVE) or ""
+        ).strip()
+        args.ollama_think = str(
+            manual_vlm_model.get("VLM_REASONING_LEVEL", probe_vlm_boundary.DEFAULT_OLLAMA_THINK) or ""
+        ).strip()
+    else:
+        args.ollama_num_ctx = None
+        args.ollama_keep_alive = ""
+        args.ollama_think = ""
     args.response_schema_mode = str(manual_vlm_model.get("VLM_RESPONSE_SCHEMA_MODE", "") or "").strip()
     args.json_validation_mode = str(manual_vlm_model.get("VLM_JSON_VALIDATION_MODE", "") or "").strip()
     args.window_radius = resolve_manual_prediction_window_config(payload)["window_radius"]

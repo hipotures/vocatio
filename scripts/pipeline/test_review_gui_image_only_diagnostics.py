@@ -2692,6 +2692,69 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(runtime_args.ml_model_run_id, "payload-ml")
         self.assertEqual(runtime_args.photo_pre_model_dir, "payload-pre")
 
+    def test_resolve_manual_vlm_runtime_args_clears_inherited_ollama_only_fields_for_vllm_presets(self):
+        parsed_args = argparse.Namespace(
+            provider="ollama",
+            model="config-model",
+            ollama_base_url="http://config",
+            ollama_num_ctx=111,
+            ollama_num_predict=222,
+            ollama_keep_alive="15m",
+            timeout_seconds=33.0,
+            temperature=0.9,
+            ollama_think="high",
+            response_schema_mode="off",
+            json_validation_mode="relaxed",
+            image_variant="preview",
+            ml_model_run_id="config-ml",
+            photo_pre_model_dir="config-pre",
+            window_radius=2,
+        )
+        manual_vlm_model = {
+            "VLM_NAME": "Preset C",
+            "VLM_PROVIDER": "vllm",
+            "VLM_BASE_URL": "http://preset-vllm",
+            "VLM_MODEL": "Qwen3.5-0.8B",
+            "VLM_MAX_OUTPUT_TOKENS": 384,
+            "VLM_TIMEOUT_SECONDS": 22.5,
+            "VLM_TEMPERATURE": 0.1,
+            "VLM_RESPONSE_SCHEMA_MODE": "on",
+            "VLM_JSON_VALIDATION_MODE": "strict",
+        }
+
+        with unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "parse_args",
+            return_value=parsed_args,
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "apply_vocatio_defaults",
+            return_value=parsed_args,
+        ):
+            runtime_args = review_gui.resolve_manual_vlm_runtime_args(
+                day_dir=Path("/day"),
+                workspace_dir=Path("/workspace"),
+                payload={
+                    "window_radius": 3,
+                    "vlm_image_variant": "thumb",
+                },
+                manual_vlm_model=manual_vlm_model,
+            )
+
+        self.assertEqual(runtime_args.provider, "vllm")
+        self.assertEqual(runtime_args.model, "Qwen3.5-0.8B")
+        self.assertEqual(runtime_args.ollama_base_url, "http://preset-vllm")
+        self.assertIsNone(runtime_args.ollama_num_ctx)
+        self.assertEqual(runtime_args.ollama_num_predict, 384)
+        self.assertEqual(runtime_args.ollama_keep_alive, "")
+        self.assertEqual(runtime_args.timeout_seconds, 22.5)
+        self.assertEqual(runtime_args.temperature, 0.1)
+        self.assertEqual(runtime_args.ollama_think, "")
+        self.assertEqual(runtime_args.response_schema_mode, "on")
+        self.assertEqual(runtime_args.json_validation_mode, "strict")
+        self.assertEqual(runtime_args.window_radius, 3)
+        self.assertEqual(runtime_args.image_variant, "thumb")
+
     def test_run_manual_vlm_request_with_retries_retries_manual_vlm_failures_three_times(self):
         attempts = {"count": 0}
         sleep_mock = Mock()

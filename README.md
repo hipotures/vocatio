@@ -442,7 +442,8 @@ python3 scripts/pipeline/probe_vlm_photo_boundaries.py DAY \
 Important behavior:
 
 - exact preset selection comes from `.vocatio` `VLM_NAME`, which must match a `VLM_NAME` entry in `conf/vlm_models.yaml`
-- `.vocatio` may override only these preset fields locally: `VLM_PROVIDER`, `VLM_BASE_URL`, `VLM_MODEL`, `VLM_CONTEXT_TOKENS`, `VLM_MAX_OUTPUT_TOKENS`, `VLM_KEEP_ALIVE`, `VLM_TIMEOUT_SECONDS`, `VLM_TEMPERATURE`, `VLM_REASONING_LEVEL`, `VLM_RESPONSE_SCHEMA_MODE`, `VLM_JSON_VALIDATION_MODE`
+- `.vocatio` may override these shared preset fields locally: `VLM_PROVIDER`, `VLM_BASE_URL`, `VLM_MODEL`, `VLM_MAX_OUTPUT_TOKENS`, `VLM_TIMEOUT_SECONDS`, `VLM_TEMPERATURE`, `VLM_RESPONSE_SCHEMA_MODE`, `VLM_JSON_VALIDATION_MODE`
+- `.vocatio` may override `VLM_CONTEXT_TOKENS`, `VLM_KEEP_ALIVE`, and `VLM_REASONING_LEVEL` only when the resolved VLM provider is `ollama`; `llamacpp` and `vllm` presets must omit those fields
 - explicitly provided CLI model flags override the inherited preset values for that run
 - symmetric VLM context is configured only through `--window-radius` or `.vocatio` `VLM_WINDOW_RADIUS`
 - `vlm_boundary_results.csv`, VLM run metadata, and downstream GUI/review artifacts persist `window_radius` only
@@ -497,20 +498,25 @@ The GUI `Manual VLM analyze` action loads presets from `conf/vlm_models.yaml`, b
 
 This shared preset file contains one `models:` list and may mix `VLM_*` and `PREMODEL_*` entries. Day-level `.vocatio` must select an existing preset by exact `VLM_NAME` or `PREMODEL_NAME`; it does not define full models from scratch. Workflow fields such as `VLM_WINDOW_RADIUS`, `VLM_IMAGE_VARIANT`, `VLM_ML_MODEL_RUN_ID`, and `VLM_PHOTO_PRE_MODEL_DIR` remain local to `.vocatio` or explicit CLI flags rather than the shared preset file.
 
-Each VLM preset must define these fields:
+Each VLM preset must define these shared fields:
 
 - `VLM_NAME`
 - `VLM_PROVIDER`
 - `VLM_BASE_URL`
 - `VLM_MODEL`
-- `VLM_CONTEXT_TOKENS`
 - `VLM_MAX_OUTPUT_TOKENS`
-- `VLM_KEEP_ALIVE`
 - `VLM_TIMEOUT_SECONDS`
 - `VLM_TEMPERATURE`
-- `VLM_REASONING_LEVEL`
 - `VLM_RESPONSE_SCHEMA_MODE`
 - `VLM_JSON_VALIDATION_MODE`
+
+Ollama presets may additionally define these optional fields:
+
+- `VLM_CONTEXT_TOKENS`
+- `VLM_KEEP_ALIVE`
+- `VLM_REASONING_LEVEL`
+
+`llamacpp` and `vllm` presets must omit those Ollama-only fields.
 
 GUI behavior:
 
