@@ -258,24 +258,25 @@ def apply_manual_vlm_models_reload_error(
     window.manual_vlm_selected_name = None
 
 
-def refresh_manual_vlm_models_if_needed(window: "MainWindow", latest_md5: str) -> None:
+def refresh_manual_vlm_models_if_needed(window: "MainWindow", latest_md5: str) -> bool:
     current_md5 = getattr(window, "manual_vlm_models_md5", None)
     if current_md5 == latest_md5:
-        return
+        return False
     reload_models = getattr(window, "reload_manual_vlm_models", None)
     if callable(reload_models):
         reload_models(startup=False)
-        return
+        return True
     models, md5_hex, error_text = load_manual_vlm_models_for_gui(REPO_ROOT)
     if error_text is not None:
         apply_manual_vlm_models_reload_error(window, md5_hex, error_text)
-        return
+        return True
     apply_reloaded_manual_vlm_models(
         window,
         models=models,
         md5_hex=md5_hex,
         message="Models reloaded from config.",
     )
+    return True
 
 
 def resolve_selection_output_path(workspace_dir: Path, value: str) -> Path:
@@ -3918,12 +3919,15 @@ class MainWindow(QMainWindow):
             )
             self.refresh_current_info_dock()
             return
-        refresh_manual_vlm_models_if_needed(self, latest_md5)
+        reloaded = refresh_manual_vlm_models_if_needed(self, latest_md5)
         if getattr(self, "manual_vlm_models_error", None):
             self.set_manual_action_state(
                 "run_manual_vlm_analyze",
                 {"status": "error", "error": self.manual_vlm_models_error},
             )
+            self.refresh_current_info_dock()
+            return
+        if reloaded:
             self.refresh_current_info_dock()
             return
         try:

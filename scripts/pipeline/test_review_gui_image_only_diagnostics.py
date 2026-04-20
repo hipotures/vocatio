@@ -2173,7 +2173,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         compute_mock.assert_called_once()
         self.assertIsNone(window.manual_vlm_status_message)
 
-    def test_run_manual_vlm_analyze_changed_md5_reloads_models_before_downstream_work(self):
+    def test_run_manual_vlm_analyze_changed_md5_reloads_models_without_starting_analysis(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
         window.manual_vlm_analyze_state = {
             "status": "idle",
@@ -2199,6 +2199,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             ]
             window.manual_vlm_models_md5 = "new"
             window.manual_vlm_models_error = None
+            window.manual_vlm_status_message = "Models reloaded from config."
             window.manual_vlm_selected_name = "Preset B"
 
         window.reload_manual_vlm_models = fake_reload
@@ -2216,23 +2217,6 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         bind_manual_action_methods(window)
         window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
 
-        def fake_resolve_manual_vlm_analyze_state(**kwargs):
-            call_order.append("resolve")
-            self.assertEqual(kwargs["manual_vlm_model"]["VLM_NAME"], "Preset B")
-            return {
-                "status": "idle",
-                "window_config": {"window_radius": 2},
-                "anchor_pair": {
-                    "left_relative_path": "cam/a.jpg",
-                    "right_relative_path": "cam/b.jpg",
-                },
-            }
-
-        def fake_compute_manual_vlm_analyze_result(**kwargs):
-            call_order.append("compute")
-            self.assertEqual(kwargs["manual_vlm_model"]["VLM_NAME"], "Preset B")
-            return {"status": "result", "result_text": "ok"}
-
         with unittest.mock.patch.object(
             review_gui.manual_vlm_models,
             "compute_manual_vlm_models_md5",
@@ -2244,11 +2228,9 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         ), unittest.mock.patch.object(
             review_gui,
             "resolve_manual_vlm_analyze_state",
-            side_effect=fake_resolve_manual_vlm_analyze_state,
         ), unittest.mock.patch.object(
             review_gui,
             "compute_manual_vlm_analyze_result",
-            side_effect=fake_compute_manual_vlm_analyze_result,
         ), unittest.mock.patch.object(
             review_gui,
             "load_manual_prediction_joined_rows",
@@ -2257,7 +2239,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(window, review_gui.MainWindow)
             window.run_manual_vlm_analyze()
 
-        self.assertEqual(call_order, ["reload", "resolve", "compute"])
+        self.assertEqual(call_order, ["reload"])
+        self.assertEqual(window.manual_vlm_selected_name, "Preset B")
+        self.assertEqual(window.manual_vlm_status_message, "Models reloaded from config.")
+        self.assertEqual(window.manual_vlm_analyze_state["status"], "idle")
 
     def test_run_manual_vlm_analyze_reload_error_stops_before_downstream_work(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
