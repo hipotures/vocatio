@@ -1565,11 +1565,15 @@ def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
 
 
 def build_manual_vlm_analyze_section_config(window: object) -> Dict[str, Any]:
-    preset_names = [
-        str(model.get("VLM_NAME", "") or "").strip()
-        for model in getattr(window, "manual_vlm_models", [])
-        if str(model.get("VLM_NAME", "") or "").strip()
-    ]
+    preset_names = []
+    choice_tooltips: Dict[str, str] = {}
+    for model in getattr(window, "manual_vlm_models", []):
+        preset_name = str(model.get("VLM_NAME", "") or "").strip()
+        if not preset_name:
+            continue
+        preset_names.append(preset_name)
+        preset_description = str(model.get("VLM_DESCRIPTION", "") or "").strip()
+        choice_tooltips[preset_name] = preset_description or preset_name
     configured_name = str(getattr(window, "manual_vlm_selected_name", "") or "").strip()
     selected_name = configured_name if configured_name in preset_names else (preset_names[0] if preset_names else None)
     description = (
@@ -1580,6 +1584,7 @@ def build_manual_vlm_analyze_section_config(window: object) -> Dict[str, Any]:
     return {
         "preset_names": preset_names,
         "selected_name": selected_name,
+        "choice_tooltips": choice_tooltips,
         "description": description,
         "on_choice_changed": lambda value: setattr(window, "manual_vlm_selected_name", str(value).strip() or None),
     }
@@ -1590,6 +1595,7 @@ def build_manual_vlm_analyze_section(
     *,
     preset_names: Optional[Sequence[str]] = None,
     selected_name: Optional[str] = None,
+    preset_descriptions: Optional[Mapping[str, Any]] = None,
     description: str = "Ephemeral runtime state for manual VLM boundary analysis.",
     on_choice_changed: Optional[Callable[[str], None]] = None,
     action_locked: bool = False,
@@ -1626,6 +1632,10 @@ def build_manual_vlm_analyze_section(
     normalized_selected_name = str(selected_name or "").strip() or None
     if normalized_selected_name not in normalized_preset_names:
         normalized_selected_name = normalized_preset_names[0] if normalized_preset_names else None
+    normalized_choice_tooltips = {
+        preset_name: str((preset_descriptions or {}).get(preset_name, "") or "").strip() or preset_name
+        for preset_name in normalized_preset_names
+    }
     active_action_locked = status == "running" or action_locked
     section = build_info_section(
         "Manual VLM analyze",
@@ -1635,6 +1645,7 @@ def build_manual_vlm_analyze_section(
     )
     section["choice_items"] = normalized_preset_names
     section["choice_value"] = normalized_selected_name
+    section["choice_tooltips"] = normalized_choice_tooltips
     section["choice_enabled"] = bool(normalized_preset_names) and not active_action_locked
     section["on_choice_changed"] = on_choice_changed
     section["action_key"] = "run_manual_vlm_analyze"
@@ -1870,6 +1881,7 @@ def append_manual_runtime_sections(
                 manual_vlm_analyze_state,
                 preset_names=manual_vlm_section_config.get("preset_names"),
                 selected_name=manual_vlm_section_config.get("selected_name"),
+                preset_descriptions=manual_vlm_section_config.get("choice_tooltips"),
                 description=str(manual_vlm_section_config.get("description", "") or "")
                 or "Ephemeral runtime state for manual VLM boundary analysis.",
                 on_choice_changed=manual_vlm_section_config.get("on_choice_changed"),
@@ -4057,9 +4069,23 @@ class MainWindow(QMainWindow):
             combo = QComboBox(controls_widget)
             combo.setObjectName("infoSectionChoiceCombo")
             combo.addItems(normalized_choice_items)
+            choice_tooltips = section.get("choice_tooltips")
+            normalized_choice_tooltips = (
+                {str(key): str(value) for key, value in choice_tooltips.items()}
+                if isinstance(choice_tooltips, Mapping)
+                else {}
+            )
+            for index, item_text in enumerate(normalized_choice_items):
+                combo.setItemData(index, normalized_choice_tooltips.get(item_text, item_text), Qt.ToolTipRole)
             choice_value = str(section.get("choice_value", "") or "").strip()
             if choice_value in normalized_choice_items:
                 combo.setCurrentText(choice_value)
+            combo.setToolTip(combo.currentData(Qt.ToolTipRole) or combo.currentText())
+            combo.currentTextChanged.connect(
+                lambda _value, current_combo=combo: current_combo.setToolTip(
+                    current_combo.currentData(Qt.ToolTipRole) or current_combo.currentText()
+                )
+            )
             combo.setEnabled(bool(section.get("choice_enabled", True)))
             on_choice_changed = section.get("on_choice_changed")
             if callable(on_choice_changed):

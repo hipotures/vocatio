@@ -1616,6 +1616,64 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         TEST_QT_APP.processEvents()
         self.assertEqual(window.manual_vlm_selected_name, "Preset B")
 
+    def test_manual_vlm_choice_uses_description_as_combobox_tooltip(self):
+        window = self.build_test_window_with_two_selected_rows()
+        section = review_gui.build_manual_vlm_analyze_section(
+            {"status": "idle"},
+            preset_names=["Short A"],
+            selected_name="Short A",
+            preset_descriptions={"Short A": "Long description"},
+        )
+
+        widget = window.build_info_section_widget(section)
+        self.addCleanup(widget.deleteLater)
+        widget.show()
+        TEST_QT_APP.processEvents()
+
+        combo = widget.findChild(QComboBox, "infoSectionChoiceCombo")
+        self.assertIsNotNone(combo)
+        self.assertEqual(combo.toolTip(), "Long description")
+
+    def test_manual_vlm_choice_falls_back_to_name_when_description_missing(self):
+        window = self.build_test_window_with_two_selected_rows()
+        section = review_gui.build_manual_vlm_analyze_section(
+            {"status": "idle"},
+            preset_names=["Short A"],
+            selected_name="Short A",
+            preset_descriptions={},
+        )
+
+        widget = window.build_info_section_widget(section)
+        self.addCleanup(widget.deleteLater)
+        widget.show()
+        TEST_QT_APP.processEvents()
+
+        combo = widget.findChild(QComboBox, "infoSectionChoiceCombo")
+        self.assertIsNotNone(combo)
+        self.assertEqual(combo.toolTip(), "Short A")
+
+    def test_manual_vlm_choice_items_expose_popup_tooltips(self):
+        window = self.build_test_window_with_two_selected_rows()
+        section = review_gui.build_manual_vlm_analyze_section(
+            {"status": "idle"},
+            preset_names=["Short A", "Short B"],
+            selected_name="Short A",
+            preset_descriptions={
+                "Short A": "Long description A",
+                "Short B": "",
+            },
+        )
+
+        widget = window.build_info_section_widget(section)
+        self.addCleanup(widget.deleteLater)
+        widget.show()
+        TEST_QT_APP.processEvents()
+
+        combo = widget.findChild(QComboBox, "infoSectionChoiceCombo")
+        self.assertIsNotNone(combo)
+        self.assertEqual(combo.itemData(0, Qt.ToolTipRole), "Long description A")
+        self.assertEqual(combo.itemData(1, Qt.ToolTipRole), "Short B")
+
     def test_run_manual_ml_prediction_success_path_updates_result_state(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
         window.workspace_dir = Path("/tmp/workspace")
