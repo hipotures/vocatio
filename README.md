@@ -487,6 +487,34 @@ python3 scripts/pipeline/review_performance_proxy_gui.py DAY \
 
 Use a dedicated VLM review-state file so you do not mix VLM review decisions with the heuristic image-only or audio-assisted states.
 
+#### Manual VLM model presets
+
+The GUI `Manual VLM analyze` action loads manual model presets from `conf/manual_vlm_models.yaml`.
+
+This preset file applies only to the GUI `Manual VLM analyze` workflow. It does not replace day-level `.vocatio` settings used by the CLI or downstream artifacts, including settings such as `VLM_WINDOW_RADIUS`.
+
+Each preset must define these fields:
+
+- `VLM_NAME`
+- `VLM_PROVIDER`
+- `VLM_BASE_URL`
+- `VLM_MODEL`
+- `VLM_CONTEXT_TOKENS`
+- `VLM_MAX_OUTPUT_TOKENS`
+- `VLM_KEEP_ALIVE`
+- `VLM_TIMEOUT_SECONDS`
+- `VLM_TEMPERATURE`
+- `VLM_REASONING_LEVEL`
+- `VLM_RESPONSE_SCHEMA_MODE`
+- `VLM_JSON_VALIDATION_MODE`
+
+GUI behavior:
+
+- the GUI loads `conf/manual_vlm_models.yaml` at startup
+- if the current selection is not preserved, the first preset becomes the default selection
+- when you click `Analyze` in `Manual VLM analyze`, the GUI recomputes the preset file MD5
+- if the MD5 changed, the GUI reloads the preset file and refreshes the dropdown before running the analyze action
+
 ### ML Boundary Verifier
 
 The ML verifier flow starts from reviewed image-only segmentation truth and trains two independent predictors (`segment_type`, `boundary`) on fixed 5-photo candidate windows.
