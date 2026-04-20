@@ -44,6 +44,13 @@ def _validate_non_empty_string(value: Any, field_name: str, preset_name: str) ->
     return normalized
 
 
+def _normalize_optional_scalar(value: Any) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    return normalized
+
+
 def _validate_positive_int(value: Any, field_name: str, preset_name: str) -> int:
     if isinstance(value, bool):
         raise ValueError(
@@ -83,6 +90,11 @@ def _validate_model_entry(model: Any, index: int) -> dict[str, Any]:
     if not isinstance(model, dict):
         raise ValueError(f"models[{index}] must be a mapping")
     normalized = dict(model)
+    description = _normalize_optional_scalar(normalized.get("VLM_DESCRIPTION"))
+    if description is None:
+        normalized.pop("VLM_DESCRIPTION", None)
+    else:
+        normalized["VLM_DESCRIPTION"] = description
     for field in MODEL_FIELDS:
         if field not in normalized:
             raise ValueError(f"missing {field} in preset at index {index}")
