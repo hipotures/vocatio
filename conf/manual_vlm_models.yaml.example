@@ -1,5 +1,6 @@
 models:
   - VLM_NAME: "Ollama localhost qwen3.5:9b"
+    VLM_DESCRIPTION: "Ollama qwen3.5:9b on localhost:11434, temp 0, strict JSON, 16k context"
     VLM_PROVIDER: "ollama"
     VLM_BASE_URL: "http://127.0.0.1:11434"
     VLM_MODEL: "qwen3.5:9b"
@@ -13,6 +14,7 @@ models:
     VLM_JSON_VALIDATION_MODE: "strict"
 
   - VLM_NAME: "llama.cpp localhost gemma-4-E4B-it-GGUF:Q8_0"
+    VLM_DESCRIPTION: "llama.cpp serving unsloth/gemma-4-E4B-it-GGUF:Q8_0 on localhost:8002, temp 0, strict JSON, 16k context"
     VLM_PROVIDER: "llamacpp"
     VLM_BASE_URL: "http://127.0.0.1:8002"
     VLM_MODEL: "unsloth/gemma-4-E4B-it-GGUF:Q8_0"
@@ -26,6 +28,7 @@ models:
     VLM_JSON_VALIDATION_MODE: "strict"
 
   - VLM_NAME: "vLLM localhost Qwen3.5-0.8B"
+    VLM_DESCRIPTION: "vLLM serving Qwen/Qwen3.5-0.8B on localhost:8000, temp 0, strict JSON, 16k context"
     VLM_PROVIDER: "vllm"
     VLM_BASE_URL: "http://127.0.0.1:8000"
     VLM_MODEL: "Qwen/Qwen3.5-0.8B"
