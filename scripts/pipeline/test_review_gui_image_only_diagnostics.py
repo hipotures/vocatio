@@ -1830,6 +1830,206 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(window.manual_vlm_analyze_state["debug_file_paths"], ["/tmp/manual-vlm/prompt.txt"])
         self.assertEqual(window.refresh_current_info_dock.call_count, 2)
 
+    def test_run_manual_vlm_analyze_unchanged_md5_uses_current_models_without_reload(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.manual_vlm_analyze_state = {
+            "status": "idle",
+            "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+        }
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        window.manual_vlm_models_md5 = "stable"
+        window.manual_vlm_models_error = None
+        window.manual_vlm_status_message = None
+        window.manual_vlm_selected_name = "Preset A"
+        window.reload_manual_vlm_models = Mock()
+        window.manual_prediction_day_dir = Mock(return_value=Path("/day"))
+        window.selected_photo_entries = Mock(
+            return_value=[
+                {"relative_path": "cam/a.jpg", "source_path": "/src/a.jpg"},
+                {"relative_path": "cam/b.jpg", "source_path": "/src/b.jpg"},
+            ]
+        )
+        window.refresh_current_info_dock = Mock()
+        window.workspace_dir = Path("/workspace")
+        window.payload = {"day": "20260323"}
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        bind_manual_action_methods(window)
+        window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
+
+        with unittest.mock.patch.object(
+            review_gui.manual_vlm_models,
+            "compute_manual_vlm_models_md5",
+            return_value="stable",
+        ), unittest.mock.patch.object(
+            review_gui,
+            "reload_probe_vlm_boundary_module",
+            return_value=review_gui.probe_vlm_boundary,
+        ), unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_vlm_analyze_state",
+            return_value={
+                "status": "idle",
+                "window_config": {"window_radius": 2},
+                "anchor_pair": {
+                    "left_relative_path": "cam/a.jpg",
+                    "right_relative_path": "cam/b.jpg",
+                },
+            },
+        ) as resolve_mock, unittest.mock.patch.object(
+            review_gui,
+            "compute_manual_vlm_analyze_result",
+            return_value={"status": "result", "result_text": "ok"},
+        ) as compute_mock, unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_joined_rows",
+            return_value=[],
+        ):
+            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(window, review_gui.MainWindow)
+            window.run_manual_vlm_analyze()
+
+        window.reload_manual_vlm_models.assert_not_called()
+        resolve_mock.assert_called_once()
+        compute_mock.assert_called_once()
+
+    def test_run_manual_vlm_analyze_changed_md5_reloads_models_before_downstream_work(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.manual_vlm_analyze_state = {
+            "status": "idle",
+            "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+        }
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        window.manual_vlm_models_md5 = "old"
+        window.manual_vlm_models_error = None
+        window.manual_vlm_status_message = None
+        window.manual_vlm_selected_name = "Preset A"
+        call_order: list[str] = []
+
+        def fake_reload(startup: bool = False) -> None:
+            self.assertFalse(startup)
+            call_order.append("reload")
+            window.manual_vlm_models = [
+                {
+                    "VLM_NAME": "Preset B",
+                    "VLM_PROVIDER": "ollama",
+                    "VLM_BASE_URL": "http://reload",
+                    "VLM_MODEL": "reloaded-model",
+                }
+            ]
+            window.manual_vlm_models_md5 = "new"
+            window.manual_vlm_models_error = None
+            window.manual_vlm_selected_name = "Preset B"
+
+        window.reload_manual_vlm_models = fake_reload
+        window.manual_prediction_day_dir = Mock(return_value=Path("/day"))
+        window.selected_photo_entries = Mock(
+            return_value=[
+                {"relative_path": "cam/a.jpg", "source_path": "/src/a.jpg"},
+                {"relative_path": "cam/b.jpg", "source_path": "/src/b.jpg"},
+            ]
+        )
+        window.refresh_current_info_dock = Mock()
+        window.workspace_dir = Path("/workspace")
+        window.payload = {"day": "20260323"}
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        bind_manual_action_methods(window)
+        window.start_manual_action_worker = lambda action_key, work_fn: run_manual_action_inline(window, action_key, work_fn)
+
+        def fake_resolve_manual_vlm_analyze_state(**kwargs):
+            call_order.append("resolve")
+            self.assertEqual(kwargs["manual_vlm_model"]["VLM_NAME"], "Preset B")
+            return {
+                "status": "idle",
+                "window_config": {"window_radius": 2},
+                "anchor_pair": {
+                    "left_relative_path": "cam/a.jpg",
+                    "right_relative_path": "cam/b.jpg",
+                },
+            }
+
+        def fake_compute_manual_vlm_analyze_result(**kwargs):
+            call_order.append("compute")
+            self.assertEqual(kwargs["manual_vlm_model"]["VLM_NAME"], "Preset B")
+            return {"status": "result", "result_text": "ok"}
+
+        with unittest.mock.patch.object(
+            review_gui.manual_vlm_models,
+            "compute_manual_vlm_models_md5",
+            return_value="new",
+        ), unittest.mock.patch.object(
+            review_gui,
+            "reload_probe_vlm_boundary_module",
+            return_value=review_gui.probe_vlm_boundary,
+        ), unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_vlm_analyze_state",
+            side_effect=fake_resolve_manual_vlm_analyze_state,
+        ), unittest.mock.patch.object(
+            review_gui,
+            "compute_manual_vlm_analyze_result",
+            side_effect=fake_compute_manual_vlm_analyze_result,
+        ), unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_joined_rows",
+            return_value=[],
+        ):
+            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(window, review_gui.MainWindow)
+            window.run_manual_vlm_analyze()
+
+        self.assertEqual(call_order, ["reload", "resolve", "compute"])
+
+    def test_run_manual_vlm_analyze_reload_error_stops_before_downstream_work(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.manual_vlm_analyze_state = {
+            "status": "idle",
+            "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+        }
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        window.manual_vlm_models_md5 = "old"
+        window.manual_vlm_models_error = None
+        window.manual_vlm_status_message = None
+        window.manual_vlm_selected_name = "Preset A"
+
+        def fake_reload(startup: bool = False) -> None:
+            self.assertFalse(startup)
+            window.manual_vlm_models = []
+            window.manual_vlm_models_md5 = "new"
+            window.manual_vlm_models_error = "Model config error: bad yaml"
+            window.manual_vlm_selected_name = None
+
+        window.reload_manual_vlm_models = fake_reload
+        window.selected_photo_entries = Mock(
+            return_value=[
+                {"relative_path": "cam/a.jpg", "source_path": "/src/a.jpg"},
+                {"relative_path": "cam/b.jpg", "source_path": "/src/b.jpg"},
+            ]
+        )
+        window.refresh_current_info_dock = Mock()
+        window.workspace_dir = Path("/workspace")
+        window.payload = {"day": "20260323"}
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        window.start_manual_action_worker = Mock()
+        bind_manual_action_methods(window)
+
+        with unittest.mock.patch.object(
+            review_gui.manual_vlm_models,
+            "compute_manual_vlm_models_md5",
+            return_value="new",
+        ), unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_vlm_analyze_state",
+        ) as resolve_mock, unittest.mock.patch.object(
+            review_gui,
+            "compute_manual_vlm_analyze_result",
+        ) as compute_mock:
+            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(window, review_gui.MainWindow)
+            window.run_manual_vlm_analyze()
+
+        self.assertEqual(window.manual_vlm_analyze_state["status"], "error")
+        self.assertEqual(window.manual_vlm_analyze_state["error"], "Model config error: bad yaml")
+        window.start_manual_action_worker.assert_not_called()
+        resolve_mock.assert_not_called()
+        compute_mock.assert_not_called()
+
     def test_run_manual_vlm_analyze_error_path_updates_error_state(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
         window.manual_vlm_analyze_state = {
@@ -2076,6 +2276,112 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         resolve_mock.assert_not_called()
         compute_mock.assert_not_called()
         self.assertEqual(window.refresh_current_info_dock.call_count, 2)
+
+    def test_resolve_manual_vlm_runtime_args_prefers_selected_manual_vlm_preset_over_vocatio_defaults(self):
+        parsed_args = argparse.Namespace(
+            provider="config-provider",
+            model="config-model",
+            ollama_base_url="http://config",
+            ollama_num_ctx=111,
+            ollama_num_predict=222,
+            ollama_keep_alive="15m",
+            timeout_seconds=33.0,
+            temperature=0.9,
+            ollama_think="high",
+            response_schema_mode="off",
+            json_validation_mode="relaxed",
+            image_variant="preview",
+            ml_model_run_id="config-ml",
+            photo_pre_model_dir="config-pre",
+            window_radius=2,
+        )
+        manual_vlm_model = {
+            "VLM_NAME": "Preset B",
+            "VLM_PROVIDER": "ollama",
+            "VLM_BASE_URL": "http://preset",
+            "VLM_MODEL": "preset-model",
+            "VLM_CONTEXT_TOKENS": 4096,
+            "VLM_MAX_OUTPUT_TOKENS": 768,
+            "VLM_KEEP_ALIVE": "45m",
+            "VLM_TIMEOUT_SECONDS": 12.5,
+            "VLM_TEMPERATURE": 0.2,
+            "VLM_REASONING_LEVEL": "medium",
+            "VLM_RESPONSE_SCHEMA_MODE": "on",
+            "VLM_JSON_VALIDATION_MODE": "strict",
+        }
+
+        with unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "parse_args",
+            return_value=parsed_args,
+        ), unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "apply_vocatio_defaults",
+            return_value=parsed_args,
+        ):
+            runtime_args = review_gui.resolve_manual_vlm_runtime_args(
+                day_dir=Path("/day"),
+                workspace_dir=Path("/workspace"),
+                payload={
+                    "window_radius": 4,
+                    "vlm_image_variant": "thumb",
+                    "ml_model_run_id": "payload-ml",
+                    "photo_pre_model_dir": "payload-pre",
+                },
+                manual_vlm_model=manual_vlm_model,
+            )
+
+        self.assertEqual(runtime_args.provider, "ollama")
+        self.assertEqual(runtime_args.model, "preset-model")
+        self.assertEqual(runtime_args.ollama_base_url, "http://preset")
+        self.assertEqual(runtime_args.ollama_num_ctx, 4096)
+        self.assertEqual(runtime_args.ollama_num_predict, 768)
+        self.assertEqual(runtime_args.ollama_keep_alive, "45m")
+        self.assertEqual(runtime_args.timeout_seconds, 12.5)
+        self.assertEqual(runtime_args.temperature, 0.2)
+        self.assertEqual(runtime_args.ollama_think, "medium")
+        self.assertEqual(runtime_args.response_schema_mode, "on")
+        self.assertEqual(runtime_args.json_validation_mode, "strict")
+        self.assertEqual(runtime_args.window_radius, 4)
+        self.assertEqual(runtime_args.image_variant, "thumb")
+        self.assertEqual(runtime_args.ml_model_run_id, "payload-ml")
+        self.assertEqual(runtime_args.photo_pre_model_dir, "payload-pre")
+
+    def test_run_manual_vlm_request_with_retries_retries_manual_vlm_failures_three_times(self):
+        attempts = {"count": 0}
+        sleep_mock = Mock()
+
+        def fake_request():
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                raise review_gui.ManualVlmAnalyzeError("provider request timed out")
+            return "ok"
+
+        result = review_gui.run_manual_vlm_request_with_retries(
+            fake_request,
+            sleep_fn=sleep_mock,
+        )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(attempts["count"], 3)
+        self.assertEqual(sleep_mock.call_args_list, [unittest.mock.call(5.0), unittest.mock.call(5.0)])
+
+    def test_run_manual_vlm_request_with_retries_does_not_retry_local_preflight_errors(self):
+        attempts = {"count": 0}
+        sleep_mock = Mock()
+
+        def fake_request():
+            attempts["count"] += 1
+            raise ValueError("manual VLM window config is unavailable")
+
+        with self.assertRaisesRegex(ValueError, "manual VLM window config is unavailable"):
+            review_gui.run_manual_vlm_request_with_retries(
+                fake_request,
+                sleep_fn=sleep_mock,
+            )
+
+        self.assertEqual(attempts["count"], 1)
+        sleep_mock.assert_not_called()
 
     def test_compute_manual_ml_prediction_result_uses_image_paths_for_manual_thumbnail_columns(self):
         joined_rows = [

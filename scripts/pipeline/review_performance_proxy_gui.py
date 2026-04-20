@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -137,6 +138,8 @@ LEGACY_INDEX_FILENAMES = (
 )
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MANUAL_VLM_MODELS_PATH = Path("conf/manual_vlm_models.yaml")
+MANUAL_VLM_REQUEST_MAX_ATTEMPTS = 3
+MANUAL_VLM_REQUEST_RETRY_DELAY_SECONDS = 5.0
 
 BOUNDARY_DIAGNOSTIC_REQUIRED_COLUMNS = frozenset(
     {
@@ -500,14 +503,55 @@ def build_idle_manual_vlm_analyze_state(
     }
 
 
+def resolve_selected_manual_vlm_model(
+    models: Sequence[Mapping[str, Any]],
+    selected_name: Optional[str],
+) -> Dict[str, Any]:
+    normalized_models = [dict(model) for model in models if isinstance(model, Mapping)]
+    if not normalized_models:
+        raise ValueError("Manual VLM preset is unavailable")
+    normalized_selected_name = str(selected_name or "").strip()
+    if normalized_selected_name:
+        for model in normalized_models:
+            if str(model.get("VLM_NAME", "") or "").strip() == normalized_selected_name:
+                return model
+    return normalized_models[0]
+
+
+def run_manual_vlm_request_with_retries(
+    request_fn: Callable[[], Any],
+    *,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> Any:
+    for attempt_index in range(MANUAL_VLM_REQUEST_MAX_ATTEMPTS):
+        try:
+            return request_fn()
+        except ManualVlmAnalyzeError:
+            if attempt_index + 1 >= MANUAL_VLM_REQUEST_MAX_ATTEMPTS:
+                raise
+            sleep_fn(MANUAL_VLM_REQUEST_RETRY_DELAY_SECONDS)
+
+
 def resolve_manual_vlm_runtime_args(
     *,
     day_dir: Path,
     workspace_dir: Path,
     payload: Mapping[str, Any],
+    manual_vlm_model: Mapping[str, Any],
 ) -> argparse.Namespace:
     args = probe_vlm_boundary.parse_args([str(day_dir), "--workspace-dir", str(workspace_dir)])
     args = probe_vlm_boundary.apply_vocatio_defaults(args, day_dir)
+    args.provider = str(manual_vlm_model.get("VLM_PROVIDER", "") or "").strip()
+    args.model = str(manual_vlm_model.get("VLM_MODEL", "") or "").strip()
+    args.ollama_base_url = str(manual_vlm_model.get("VLM_BASE_URL", "") or "").strip()
+    args.ollama_num_ctx = int(manual_vlm_model.get("VLM_CONTEXT_TOKENS"))
+    args.ollama_num_predict = int(manual_vlm_model.get("VLM_MAX_OUTPUT_TOKENS"))
+    args.ollama_keep_alive = str(manual_vlm_model.get("VLM_KEEP_ALIVE", "") or "").strip()
+    args.timeout_seconds = float(manual_vlm_model.get("VLM_TIMEOUT_SECONDS"))
+    args.temperature = float(manual_vlm_model.get("VLM_TEMPERATURE"))
+    args.ollama_think = str(manual_vlm_model.get("VLM_REASONING_LEVEL", "") or "").strip()
+    args.response_schema_mode = str(manual_vlm_model.get("VLM_RESPONSE_SCHEMA_MODE", "") or "").strip()
+    args.json_validation_mode = str(manual_vlm_model.get("VLM_JSON_VALIDATION_MODE", "") or "").strip()
     args.window_radius = resolve_manual_prediction_window_config(payload)["window_radius"]
     image_variant = str(payload.get("vlm_image_variant", "") or "").strip()
     if image_variant:
@@ -527,6 +571,7 @@ def resolve_manual_vlm_analyze_state(
     workspace_dir: Path,
     payload: Mapping[str, Any],
     selected_photos: Sequence[Mapping[str, Any]],
+    manual_vlm_model: Mapping[str, Any],
 ) -> Dict[str, Any]:
     next_state = build_idle_manual_vlm_analyze_state(selected_photos)
     try:
@@ -535,7 +580,12 @@ def resolve_manual_vlm_analyze_state(
             selected_photos,
             load_manual_prediction_joined_rows(workspace_dir, payload),
         )
-        runtime_args = resolve_manual_vlm_runtime_args(day_dir=day_dir, workspace_dir=workspace_dir, payload=payload)
+        runtime_args = resolve_manual_vlm_runtime_args(
+            day_dir=day_dir,
+            workspace_dir=workspace_dir,
+            payload=payload,
+            manual_vlm_model=manual_vlm_model,
+        )
         next_state["runtime_config"] = {
             "provider": str(runtime_args.provider),
             "model": str(runtime_args.model),
@@ -817,10 +867,16 @@ def compute_manual_vlm_analyze_result(
     joined_rows: Sequence[Mapping[str, Any]],
     anchor_pair: Mapping[str, Any],
     window_config: Mapping[str, Any],
+    manual_vlm_model: Mapping[str, Any],
 ) -> Dict[str, Any]:
     if not window_config:
         raise ValueError("manual VLM window config is unavailable")
-    runtime_args = resolve_manual_vlm_runtime_args(day_dir=day_dir, workspace_dir=workspace_dir, payload=payload)
+    runtime_args = resolve_manual_vlm_runtime_args(
+        day_dir=day_dir,
+        workspace_dir=workspace_dir,
+        payload=payload,
+        manual_vlm_model=manual_vlm_model,
+    )
     runtime_window_radius = probe_vlm_boundary.positive_window_radius_arg(
         str(window_config.get("window_radius", "") or "").strip()
     )
@@ -874,38 +930,55 @@ def compute_manual_vlm_analyze_result(
     request_payload = probe_vlm_boundary.build_provider_request_payload(request)
     run_id = probe_vlm_boundary.build_run_id()
     debug_dir = resolve_manual_vlm_debug_dir(workspace_dir, runtime_args, run_id)
-    try:
-        response = probe_vlm_boundary.run_vlm_request(request)
-    except Exception as exc:
-        debug_file_paths = build_manual_vlm_debug_file_paths(
-            debug_dir,
-            run_id,
-            include_error=True,
+    def execute_request() -> tuple[str, Optional[Mapping[str, Any]], Dict[str, str]]:
+        try:
+            response = probe_vlm_boundary.run_vlm_request(request)
+        except Exception as exc:
+            retryable_categories = {"connection", "http", "timeout", "invalid_response"}
+            if getattr(exc, "category", None) not in retryable_categories:
+                raise
+            debug_file_paths = build_manual_vlm_debug_file_paths(
+                debug_dir,
+                run_id,
+                include_error=True,
+            )
+            probe_vlm_boundary.dump_debug_artifacts(
+                debug_dir=debug_dir,
+                run_id=run_id,
+                batch_index=1,
+                prompt=prompt,
+                request_payload=request_payload,
+                response_payload=None,
+                error_text=str(exc),
+            )
+            raise ManualVlmAnalyzeError(str(exc), debug_file_paths=debug_file_paths) from exc
+        raw_response = str(response.text)
+        response_payload = response.raw_response if isinstance(response.raw_response, Mapping) else None
+        parsed_response = probe_vlm_boundary.parse_model_response(
+            raw_response,
+            window_size=len(candidate_rows),
+            json_validation_mode=str(getattr(runtime_args, "json_validation_mode", "strict")),
         )
-        probe_vlm_boundary.dump_debug_artifacts(
-            debug_dir=debug_dir,
-            run_id=run_id,
-            batch_index=1,
-            prompt=prompt,
-            request_payload=request_payload,
-            response_payload=None,
-            error_text=str(exc),
-        )
-        raise ManualVlmAnalyzeError(str(exc), debug_file_paths=debug_file_paths) from exc
-    raw_response = str(response.text)
-    response_payload = response.raw_response if isinstance(response.raw_response, Mapping) else None
-    parsed_response = probe_vlm_boundary.parse_model_response(
-        raw_response,
-        window_size=len(candidate_rows),
-        json_validation_mode=str(getattr(runtime_args, "json_validation_mode", "strict")),
-    )
-    if str(parsed_response.get("response_status", "") or "") != "ok":
-        debug_file_paths = build_manual_vlm_debug_file_paths(
-            debug_dir,
-            run_id,
-            include_response=response_payload is not None,
-            include_error=True,
-        )
+        if str(parsed_response.get("response_status", "") or "") != "ok":
+            debug_file_paths = build_manual_vlm_debug_file_paths(
+                debug_dir,
+                run_id,
+                include_response=response_payload is not None,
+                include_error=True,
+            )
+            probe_vlm_boundary.dump_debug_artifacts(
+                debug_dir=debug_dir,
+                run_id=run_id,
+                batch_index=1,
+                prompt=prompt,
+                request_payload=request_payload,
+                response_payload=response_payload,
+                error_text=str(parsed_response.get("reason", "") or "invalid VLM response"),
+            )
+            raise ManualVlmAnalyzeError(
+                str(parsed_response.get("reason", "") or "invalid VLM response"),
+                debug_file_paths=debug_file_paths,
+            )
         probe_vlm_boundary.dump_debug_artifacts(
             debug_dir=debug_dir,
             run_id=run_id,
@@ -913,21 +986,11 @@ def compute_manual_vlm_analyze_result(
             prompt=prompt,
             request_payload=request_payload,
             response_payload=response_payload,
-            error_text=str(parsed_response.get("reason", "") or "invalid VLM response"),
+            error_text=None,
         )
-        raise ManualVlmAnalyzeError(
-            str(parsed_response.get("reason", "") or "invalid VLM response"),
-            debug_file_paths=debug_file_paths,
-        )
-    probe_vlm_boundary.dump_debug_artifacts(
-        debug_dir=debug_dir,
-        run_id=run_id,
-        batch_index=1,
-        prompt=prompt,
-        request_payload=request_payload,
-        response_payload=response_payload,
-        error_text=None,
-    )
+        return raw_response, response_payload, parsed_response
+
+    raw_response, response_payload, parsed_response = run_manual_vlm_request_with_retries(execute_request)
     response_json = extract_manual_vlm_response_payload(raw_response)
     result = {
         "provider": str(runtime_args.provider),
@@ -3459,11 +3522,13 @@ class MainWindow(QMainWindow):
     def build_manual_vlm_analyze_work_fn(
         self,
         selected_photos: Sequence[Mapping[str, Any]],
+        manual_vlm_model: Mapping[str, Any],
     ) -> Callable[[], Mapping[str, Any]]:
         day_dir = self.manual_prediction_day_dir()
         workspace_dir = self.workspace_dir
         payload = dict(self.payload)
         selected_snapshot = [dict(photo) for photo in selected_photos]
+        selected_manual_vlm_model = dict(manual_vlm_model)
 
         def work_fn() -> Mapping[str, Any]:
             try:
@@ -3475,6 +3540,7 @@ class MainWindow(QMainWindow):
                 workspace_dir=workspace_dir,
                 payload=payload,
                 selected_photos=selected_snapshot,
+                manual_vlm_model=selected_manual_vlm_model,
             )
             resolution_error = str(resolution_state.get("resolution_error", "") or "").strip()
             if resolution_error:
@@ -3486,6 +3552,7 @@ class MainWindow(QMainWindow):
                 joined_rows=load_manual_prediction_joined_rows(workspace_dir, payload),
                 anchor_pair=dict(resolution_state.get("anchor_pair", {}) or {}),
                 window_config=dict(resolution_state.get("window_config", {}) or {}),
+                manual_vlm_model=selected_manual_vlm_model,
             )
             result_state = dict(resolution_state)
             result_state["status"] = "result"
@@ -3703,6 +3770,18 @@ class MainWindow(QMainWindow):
             )
             self.refresh_current_info_dock()
             return
+        try:
+            selected_manual_vlm_model = resolve_selected_manual_vlm_model(
+                getattr(self, "manual_vlm_models", []),
+                getattr(self, "manual_vlm_selected_name", None),
+            )
+        except Exception as exc:
+            self.set_manual_action_state(
+                "run_manual_vlm_analyze",
+                {"status": "error", "error": str(exc)},
+            )
+            self.refresh_current_info_dock()
+            return
         next_state = build_idle_manual_vlm_analyze_state(selected_photos)
         next_state["status"] = "running"
         next_state["started_at"] = datetime.now(timezone.utc).astimezone().replace(microsecond=0).isoformat()
@@ -3715,7 +3794,10 @@ class MainWindow(QMainWindow):
         self.refresh_current_info_dock()
         self.start_manual_action_worker(
             "run_manual_vlm_analyze",
-            self.build_manual_vlm_analyze_work_fn(selected_photos),
+            self.build_manual_vlm_analyze_work_fn(
+                selected_photos,
+                selected_manual_vlm_model,
+            ),
         )
 
     def refresh_current_info_dock(self) -> None:
