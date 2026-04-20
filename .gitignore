@@ -2,4 +2,4 @@ __pycache__/
 *.pyc
 .codex
 .worktrees/
-conf/manual_vlm_models.yaml
+conf/vlm_models.yaml

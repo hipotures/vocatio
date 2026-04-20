@@ -415,7 +415,8 @@ python3 scripts/pipeline/build_photo_pre_model_annotations.py DAY --limit 1000 -
 
 Default behavior:
 
-- provider selection comes from `--provider` or `.vocatio` (`PREMODEL_PROVIDER`, `PREMODEL_BASE_URL`, `PREMODEL_MODEL`)
+- exact preset selection comes from `.vocatio` `PREMODEL_NAME`, which must match a `PREMODEL_NAME` entry in `conf/vlm_models.yaml`
+- `.vocatio` may override only these preset fields locally: `PREMODEL_PROVIDER`, `PREMODEL_BASE_URL`, `PREMODEL_MODEL`, `PREMODEL_MAX_OUTPUT_TOKENS`, `PREMODEL_TEMPERATURE`, `PREMODEL_TIMEOUT_SECONDS`
 - input index: `photo_embedded_manifest.csv`
 - image column: `preview_path`
 - output directory: `DAY/_workspace/photo_pre_model_annotations`
@@ -439,7 +440,8 @@ python3 scripts/pipeline/probe_vlm_photo_boundaries.py DAY \
 
 Important behavior:
 
-- provider selection comes from `--provider` or `.vocatio` (`VLM_PROVIDER`, `VLM_BASE_URL`, `VLM_MODEL`)
+- exact preset selection comes from `.vocatio` `VLM_NAME`, which must match a `VLM_NAME` entry in `conf/vlm_models.yaml`
+- `.vocatio` may override only these preset fields locally: `VLM_PROVIDER`, `VLM_BASE_URL`, `VLM_MODEL`, `VLM_CONTEXT_TOKENS`, `VLM_MAX_OUTPUT_TOKENS`, `VLM_KEEP_ALIVE`, `VLM_TIMEOUT_SECONDS`, `VLM_TEMPERATURE`, `VLM_REASONING_LEVEL`, `VLM_RESPONSE_SCHEMA_MODE`, `VLM_JSON_VALIDATION_MODE`
 - symmetric VLM context is configured only through `--window-radius` or `.vocatio` `VLM_WINDOW_RADIUS`
 - `vlm_boundary_results.csv`, VLM run metadata, and downstream GUI/review artifacts persist `window_radius` only
 - legacy probe CSVs with `window_size` / `overlap` are not resumable; start a fresh run with `--new-run`
@@ -489,11 +491,11 @@ Use a dedicated VLM review-state file so you do not mix VLM review decisions wit
 
 #### Manual VLM model presets
 
-The GUI `Manual VLM analyze` action loads manual model presets from `conf/manual_vlm_models.yaml`.
+The GUI `Manual VLM analyze` action loads model presets from `conf/vlm_models.yaml`.
 
-This preset file applies only to the GUI `Manual VLM analyze` workflow. It does not replace day-level `.vocatio` settings used by the CLI or downstream artifacts, including settings such as `VLM_WINDOW_RADIUS`.
+This shared preset file contains one `models:` list and may mix `VLM_*` and `PREMODEL_*` entries. Day-level `.vocatio` must select an existing preset by exact `VLM_NAME` or `PREMODEL_NAME`; it does not define full models from scratch.
 
-Each preset must define these fields:
+Each VLM preset must define these fields:
 
 - `VLM_NAME`
 - `VLM_PROVIDER`
@@ -510,7 +512,7 @@ Each preset must define these fields:
 
 GUI behavior:
 
-- the GUI loads `conf/manual_vlm_models.yaml` at startup
+- the GUI loads `conf/vlm_models.yaml` at startup
 - if the current selection is not preserved, the first preset becomes the default selection
 - when you click `Analyze` in `Manual VLM analyze`, the GUI recomputes the preset file MD5
 - if the MD5 changed, the GUI reloads the preset file and refreshes the dropdown before running the analyze action

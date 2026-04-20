@@ -22,6 +22,9 @@ class ManualVlmModelsTest(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
+    def repo_example_path(self) -> Path:
+        return REPO_ROOT / "conf" / "vlm_models.yaml.example"
+
     def write_models(self, models: list[dict[str, object]]) -> Path:
         return self.write_yaml(
             yaml.safe_dump(
@@ -47,11 +50,11 @@ class ManualVlmModelsTest(unittest.TestCase):
         }
 
     def test_checked_in_sample_config_loads(self) -> None:
-        path = REPO_ROOT / "conf" / "manual_vlm_models.yaml.example"
+        path = self.repo_example_path()
         loaded = manual_vlm_models.load_manual_vlm_models(path)
-        self.assertEqual(len(loaded.models), 3)
+        self.assertEqual(len(loaded.models), 4)
         self.assertEqual(
-            [model["VLM_NAME"] for model in loaded.models],
+            [model["VLM_NAME"] for model in loaded.models if "VLM_NAME" in model],
             [
                 "Ollama localhost qwen3.5:9b",
                 "llama.cpp localhost gemma-4-E4B-it-GGUF:Q8_0",
@@ -59,6 +62,13 @@ class ManualVlmModelsTest(unittest.TestCase):
             ],
         )
         self.assertTrue(loaded.md5_hex)
+
+    def test_checked_in_sample_config_includes_premodel_entry(self) -> None:
+        loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
+        self.assertEqual(
+            [model["PREMODEL_NAME"] for model in loaded.models if "PREMODEL_NAME" in model],
+            ["llama.cpp localhost qwen3.5-4b-pre"],
+        )
 
     def test_load_models_parses_complete_entries(self) -> None:
         path = self.write_yaml(
@@ -337,6 +347,94 @@ models:
         loaded = manual_vlm_models.load_manual_vlm_models(path)
 
         self.assertEqual(loaded.md5_hex, expected)
+
+    def test_resolve_vlm_model_config_requires_exact_name(self) -> None:
+        loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
+
+        with self.assertRaisesRegex(ValueError, 'unknown VLM_NAME "qwen3.5:19b"'):
+            manual_vlm_models.resolve_vlm_model_config(
+                loaded.models,
+                {"VLM_NAME": "qwen3.5:19b"},
+            )
+
+    def test_resolve_vlm_model_config_requires_name(self) -> None:
+        loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
+
+        with self.assertRaisesRegex(ValueError, "missing VLM_NAME in .vocatio"):
+            manual_vlm_models.resolve_vlm_model_config(loaded.models, {})
+
+    def test_resolve_vlm_model_config_applies_local_override(self) -> None:
+        loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
+
+        resolved = manual_vlm_models.resolve_vlm_model_config(
+            loaded.models,
+            {
+                "VLM_NAME": "Ollama localhost qwen3.5:9b",
+                "VLM_TEMPERATURE": "1.0",
+                "IGNORED_FIELD": "value",
+            },
+        )
+
+        self.assertEqual(resolved["VLM_NAME"], "Ollama localhost qwen3.5:9b")
+        self.assertEqual(resolved["VLM_TEMPERATURE"], 1.0)
+        self.assertEqual(resolved["VLM_MODEL"], "qwen3.5:9b")
+        self.assertNotIn("IGNORED_FIELD", resolved)
+
+    def test_resolve_vlm_model_config_rejects_provider_mismatch(self) -> None:
+        loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Provider does not support keep_alive: llamacpp",
+        ):
+            manual_vlm_models.resolve_vlm_model_config(
+                loaded.models,
+                {
+                    "VLM_NAME": "Ollama localhost qwen3.5:9b",
+                    "VLM_PROVIDER": "llamacpp",
+                },
+            )
+
+    def test_resolve_premodel_model_config_requires_name(self) -> None:
+        loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
+
+        with self.assertRaisesRegex(ValueError, "missing PREMODEL_NAME in .vocatio"):
+            manual_vlm_models.resolve_premodel_model_config(loaded.models, {})
+
+    def test_resolve_premodel_model_config_requires_exact_name(self) -> None:
+        loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            'unknown PREMODEL_NAME "missing-preset"',
+        ):
+            manual_vlm_models.resolve_premodel_model_config(
+                loaded.models,
+                {"PREMODEL_NAME": "missing-preset"},
+            )
+
+    def test_resolve_premodel_model_config_applies_local_override(self) -> None:
+        loaded = manual_vlm_models.load_manual_vlm_models(self.repo_example_path())
+
+        resolved = manual_vlm_models.resolve_premodel_model_config(
+            loaded.models,
+            {
+                "PREMODEL_NAME": "llama.cpp localhost qwen3.5-4b-pre",
+                "PREMODEL_TIMEOUT_SECONDS": "240",
+                "UNRELATED": "ignored",
+            },
+        )
+
+        self.assertEqual(
+            resolved["PREMODEL_NAME"],
+            "llama.cpp localhost qwen3.5-4b-pre",
+        )
+        self.assertEqual(resolved["PREMODEL_TIMEOUT_SECONDS"], 240.0)
+        self.assertEqual(
+            resolved["PREMODEL_MODEL"],
+            "unsloth/Qwen3.5-4B-GGUF:UD-Q4_K_XL",
+        )
+        self.assertNotIn("UNRELATED", resolved)
 
 
 if __name__ == "__main__":
