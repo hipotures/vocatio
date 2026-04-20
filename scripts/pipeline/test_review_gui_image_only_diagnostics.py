@@ -803,12 +803,12 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("Reason: Left segment type: dance | Right segment type: rehearsal", body)
         self.assertIn("\n\nAnchors:\n  cam/left.jpg -> cam/right.jpg\n\nModel: Preset A", body)
         self.assertIn("Model config:", body)
-        self.assertNotIn("  VLM_NAME: Preset A", body)
+        self.assertIn("  VLM_NAME: Preset A", body)
         self.assertIn("  VLM_TEMPERATURE: 0", body)
         self.assertIn("Attempts: 3", body)
         self.assertIn("Succeeded on attempt: 3", body)
 
-    def test_format_manual_vlm_analyze_result_text_omits_vlm_name_from_model_config_block(self):
+    def test_format_manual_vlm_analyze_result_text_preserves_model_config_order(self):
         body = review_gui.format_manual_vlm_analyze_result_text(
             {
                 "decision": "cut_after_2",
@@ -844,6 +844,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(
             config_lines,
             [
+                "  VLM_NAME: Preset A",
                 "  VLM_PROVIDER: ollama",
                 "  VLM_BASE_URL: http://127.0.0.1:11434",
                 "  VLM_MODEL: qwen3.5:9b",
@@ -858,7 +859,30 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             ],
         )
         self.assertIn("Model: Preset A", body)
-        self.assertNotIn("  VLM_NAME: Preset A", body)
+        self.assertIn("  VLM_NAME: Preset A", body)
+
+    def test_manual_vlm_result_renders_model_config_in_yaml_order(self):
+        text = review_gui.format_manual_vlm_analyze_result_text(
+            {
+                "status": "result",
+                "preset_name": "Short A",
+                "model_config": {
+                    "VLM_NAME": "Short A",
+                    "VLM_DESCRIPTION": "Long description",
+                    "VLM_PROVIDER": "ollama",
+                    "VLM_BASE_URL": "http://127.0.0.1:11434",
+                },
+            }
+        )
+
+        self.assertIn(
+            "Model config:\n"
+            "  VLM_NAME: Short A\n"
+            "  VLM_DESCRIPTION: Long description\n"
+            "  VLM_PROVIDER: ollama\n"
+            "  VLM_BASE_URL: http://127.0.0.1:11434",
+            text,
+        )
 
     def test_manual_ml_prediction_section_renders_left_right_and_boundary(self):
         state = review_gui.build_manual_ml_prediction_section(

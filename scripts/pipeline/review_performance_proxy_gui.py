@@ -1448,10 +1448,12 @@ def format_manual_vlm_metadata_value(value: object) -> str:
 def build_manual_vlm_model_config(model_config: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     if not isinstance(model_config, Mapping):
         return {}
+    allowed_fields = set(manual_vlm_models.MODEL_FIELDS)
+    allowed_fields.add("VLM_DESCRIPTION")
     return {
-        field_name: model_config.get(field_name)
-        for field_name in manual_vlm_models.MODEL_FIELDS
-        if field_name in model_config
+        field_name: value
+        for field_name, value in model_config.items()
+        if field_name in allowed_fields
     }
 
 
@@ -1471,19 +1473,13 @@ def parse_manual_vlm_attempt_count(value: object) -> Optional[int]:
 def build_manual_vlm_model_lines(result: Mapping[str, Any]) -> List[str]:
     model_config = build_manual_vlm_model_config(result.get("model_config"))
     preset_name = str(result.get("preset_name", "") or model_config.get("VLM_NAME", "") or "").strip()
-    rendered_model_fields = [
-        field_name
-        for field_name in manual_vlm_models.MODEL_FIELDS
-        if field_name != "VLM_NAME"
-    ]
     lines: List[str] = []
     if preset_name:
         lines.append(f"Model: {preset_name}")
     if model_config:
         lines.append("Model config:")
-        for field_name in rendered_model_fields:
-            if field_name in model_config:
-                lines.append(f"  {field_name}: {format_manual_vlm_metadata_value(model_config.get(field_name))}")
+        for field_name, value in model_config.items():
+            lines.append(f"  {field_name}: {format_manual_vlm_metadata_value(value)}")
     return lines
 
 
