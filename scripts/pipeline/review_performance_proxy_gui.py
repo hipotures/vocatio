@@ -1457,12 +1457,17 @@ def parse_manual_vlm_attempt_count(value: object) -> Optional[int]:
 def build_manual_vlm_model_lines(result: Mapping[str, Any]) -> List[str]:
     model_config = build_manual_vlm_model_config(result.get("model_config"))
     preset_name = str(result.get("preset_name", "") or model_config.get("VLM_NAME", "") or "").strip()
+    rendered_model_fields = [
+        field_name
+        for field_name in manual_vlm_models.MODEL_FIELDS
+        if field_name != "VLM_NAME"
+    ]
     lines: List[str] = []
     if preset_name:
         lines.append(f"Model: {preset_name}")
     if model_config:
         lines.append("Model config:")
-        for field_name in manual_vlm_models.MODEL_FIELDS:
+        for field_name in rendered_model_fields:
             if field_name in model_config:
                 lines.append(f"  {field_name}: {format_manual_vlm_metadata_value(model_config.get(field_name))}")
     return lines
@@ -1593,8 +1598,10 @@ def build_manual_vlm_analyze_section(
         lines.append(f"Started: {format_value(state.get('started_at'))}")
     elif status == "error":
         lines.append(f"Error: {format_value(error_text or resolution_error)}")
-        lines.extend(build_manual_vlm_model_lines(state))
-        lines.extend(build_manual_vlm_retry_lines(state))
+        metadata_lines: List[str] = []
+        metadata_lines.extend(build_manual_vlm_model_lines(state))
+        metadata_lines.extend(build_manual_vlm_retry_lines(state))
+        append_info_block(lines, metadata_lines)
     elif status == "result":
         result_text = str(state.get("result_text", "") or "").strip()
         lines.extend(result_text.splitlines() if result_text else format_manual_vlm_analyze_result_text(state).splitlines())

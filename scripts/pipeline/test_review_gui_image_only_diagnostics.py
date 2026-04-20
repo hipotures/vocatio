@@ -504,6 +504,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
         self.assertIn("Status: error", error_section["body"])
         self.assertIn("Error: provider request timed out", error_section["body"])
+        self.assertIn("Error: provider request timed out\n\nModel: Preset A", error_section["body"])
         self.assertIn("Model: Preset A", error_section["body"])
         self.assertIn("Model config:", error_section["body"])
         self.assertIn("Attempts: 3", error_section["body"])
@@ -802,10 +803,62 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("Reason: Left segment type: dance | Right segment type: rehearsal", body)
         self.assertIn("\n\nAnchors:\n  cam/left.jpg -> cam/right.jpg\n\nModel: Preset A", body)
         self.assertIn("Model config:", body)
-        self.assertIn("  VLM_NAME: Preset A", body)
+        self.assertNotIn("  VLM_NAME: Preset A", body)
         self.assertIn("  VLM_TEMPERATURE: 0", body)
         self.assertIn("Attempts: 3", body)
         self.assertIn("Succeeded on attempt: 3", body)
+
+    def test_format_manual_vlm_analyze_result_text_omits_vlm_name_from_model_config_block(self):
+        body = review_gui.format_manual_vlm_analyze_result_text(
+            {
+                "decision": "cut_after_2",
+                "preset_name": "Preset A",
+                "model_config": {
+                    "VLM_NAME": "Preset A",
+                    "VLM_PROVIDER": "ollama",
+                    "VLM_BASE_URL": "http://127.0.0.1:11434",
+                    "VLM_MODEL": "qwen3.5:9b",
+                    "VLM_CONTEXT_TOKENS": 4096,
+                    "VLM_MAX_OUTPUT_TOKENS": 512,
+                    "VLM_KEEP_ALIVE": "15m",
+                    "VLM_TIMEOUT_SECONDS": 30,
+                    "VLM_TEMPERATURE": 0,
+                    "VLM_REASONING_LEVEL": "low",
+                    "VLM_RESPONSE_SCHEMA_MODE": "off",
+                    "VLM_JSON_VALIDATION_MODE": "strict",
+                },
+            }
+        )
+
+        config_lines: list[str] = []
+        capture_config = False
+        for line in body.splitlines():
+            if line == "Model config:":
+                capture_config = True
+                continue
+            if capture_config and not line.startswith("  "):
+                break
+            if capture_config:
+                config_lines.append(line)
+
+        self.assertEqual(
+            config_lines,
+            [
+                "  VLM_PROVIDER: ollama",
+                "  VLM_BASE_URL: http://127.0.0.1:11434",
+                "  VLM_MODEL: qwen3.5:9b",
+                "  VLM_CONTEXT_TOKENS: 4096",
+                "  VLM_MAX_OUTPUT_TOKENS: 512",
+                "  VLM_KEEP_ALIVE: 15m",
+                "  VLM_TIMEOUT_SECONDS: 30",
+                "  VLM_TEMPERATURE: 0",
+                "  VLM_REASONING_LEVEL: low",
+                "  VLM_RESPONSE_SCHEMA_MODE: off",
+                "  VLM_JSON_VALIDATION_MODE: strict",
+            ],
+        )
+        self.assertIn("Model: Preset A", body)
+        self.assertNotIn("  VLM_NAME: Preset A", body)
 
     def test_manual_ml_prediction_section_renders_left_right_and_boundary(self):
         state = review_gui.build_manual_ml_prediction_section(
@@ -2173,6 +2226,69 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(window.manual_vlm_analyze_state["status"], "error")
         self.assertEqual(window.manual_vlm_analyze_state["error"], "provider request timed out")
         self.assertEqual(window.refresh_current_info_dock.call_count, 2)
+
+    def test_on_manual_action_failed_carries_manual_vlm_metadata_into_state(self):
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.manual_vlm_analyze_state = {
+            "status": "running",
+            "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+            "result_text": "stale result",
+            "resolution_error": "stale resolution error",
+        }
+        window.refresh_current_info_dock = Mock()
+        bind_manual_action_methods(window)
+
+        error = review_gui.ManualVlmAnalyzeError(
+            "provider request timed out",
+            debug_file_paths=["/tmp/manual-vlm/request.json"],
+        )
+        error.preset_name = "Preset A"
+        error.model_config = {
+            "VLM_NAME": "Preset A",
+            "VLM_PROVIDER": "ollama",
+            "VLM_BASE_URL": "http://127.0.0.1:11434",
+            "VLM_MODEL": "qwen3.5:9b",
+            "VLM_CONTEXT_TOKENS": 4096,
+            "VLM_MAX_OUTPUT_TOKENS": 512,
+            "VLM_KEEP_ALIVE": "15m",
+            "VLM_TIMEOUT_SECONDS": 30,
+            "VLM_TEMPERATURE": 0,
+            "VLM_REASONING_LEVEL": "low",
+            "VLM_RESPONSE_SCHEMA_MODE": "off",
+            "VLM_JSON_VALIDATION_MODE": "strict",
+        }
+        error.attempt_count = 3
+        error.succeeded_on_attempt = 2
+
+        window.on_manual_action_failed("run_manual_vlm_analyze", error)
+
+        self.assertEqual(
+            window.manual_vlm_analyze_state,
+            {
+                "status": "error",
+                "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+                "error": "provider request timed out",
+                "debug_file_paths": ["/tmp/manual-vlm/request.json"],
+                "preset_name": "Preset A",
+                "model_config": {
+                    "VLM_NAME": "Preset A",
+                    "VLM_PROVIDER": "ollama",
+                    "VLM_BASE_URL": "http://127.0.0.1:11434",
+                    "VLM_MODEL": "qwen3.5:9b",
+                    "VLM_CONTEXT_TOKENS": 4096,
+                    "VLM_MAX_OUTPUT_TOKENS": 512,
+                    "VLM_KEEP_ALIVE": "15m",
+                    "VLM_TIMEOUT_SECONDS": 30,
+                    "VLM_TEMPERATURE": 0,
+                    "VLM_REASONING_LEVEL": "low",
+                    "VLM_RESPONSE_SCHEMA_MODE": "off",
+                    "VLM_JSON_VALIDATION_MODE": "strict",
+                },
+                "attempt_count": 3,
+                "succeeded_on_attempt": 2,
+            },
+        )
+        window.refresh_current_info_dock.assert_called_once_with()
 
     def test_run_manual_ml_prediction_reloads_probe_module_before_inference(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
