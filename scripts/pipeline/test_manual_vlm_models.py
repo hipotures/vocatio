@@ -47,16 +47,15 @@ class ManualVlmModelsTest(unittest.TestCase):
         }
 
     def test_checked_in_sample_config_loads(self) -> None:
-        path = REPO_ROOT / "conf" / "manual_vlm_models.yaml"
+        path = REPO_ROOT / "conf" / "manual_vlm_models.yaml.example"
         loaded = manual_vlm_models.load_manual_vlm_models(path)
-        self.assertEqual(len(loaded.models), 4)
+        self.assertEqual(len(loaded.models), 3)
         self.assertEqual(
             [model["VLM_NAME"] for model in loaded.models],
             [
-                "qwen3.5:9b",
-                "gemma-4-E4B-it",
-                "gemma-4-26B-A4B-it",
-                "vLLM Qwen3.5-0.8B",
+                "Ollama localhost qwen3.5:9b",
+                "llama.cpp localhost gemma-4-E4B-it-GGUF:Q8_0",
+                "vLLM localhost Qwen3.5-0.8B",
             ],
         )
         self.assertTrue(loaded.md5_hex)
