@@ -227,6 +227,61 @@ models:
             self.assertEqual(args.response_schema_mode, "on")
             self.assertEqual(args.json_validation_mode, "relaxed")
 
+    def test_apply_vocatio_defaults_preserves_explicit_default_valued_vlm_temperature(self):
+        day_dir = self.make_day_dir(
+            "\n".join(
+                [
+                    "VLM_NAME=qwen3.5:9b",
+                    "VLM_TEMPERATURE=0.15",
+                ]
+            )
+        )
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - VLM_NAME: "qwen3.5:9b"
+    VLM_PROVIDER: "ollama"
+    VLM_BASE_URL: "http://127.0.0.1:11434"
+    VLM_MODEL: "preset-model"
+    VLM_CONTEXT_TOKENS: 8192
+    VLM_MAX_OUTPUT_TOKENS: 256
+    VLM_KEEP_ALIVE: "30m"
+    VLM_TIMEOUT_SECONDS: 180
+    VLM_TEMPERATURE: 0.0
+    VLM_REASONING_LEVEL: "false"
+    VLM_RESPONSE_SCHEMA_MODE: "on"
+    VLM_JSON_VALIDATION_MODE: "relaxed"
+"""
+        )
+        with mock.patch.object(probe, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = probe.parse_args([str(day_dir), "--temperature", "0.0"])
+            args = probe.apply_vocatio_defaults(args, day_dir)
+            self.assertEqual(args.temperature, 0.0)
+
+    def test_apply_vocatio_defaults_preserves_explicit_default_valued_vlm_keep_alive(self):
+        day_dir = self.make_day_dir("VLM_NAME=qwen3.5:9b\n")
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - VLM_NAME: "qwen3.5:9b"
+    VLM_PROVIDER: "ollama"
+    VLM_BASE_URL: "http://127.0.0.1:11434"
+    VLM_MODEL: "preset-model"
+    VLM_CONTEXT_TOKENS: 8192
+    VLM_MAX_OUTPUT_TOKENS: 256
+    VLM_KEEP_ALIVE: "30m"
+    VLM_TIMEOUT_SECONDS: 180
+    VLM_TEMPERATURE: 0.0
+    VLM_REASONING_LEVEL: "false"
+    VLM_RESPONSE_SCHEMA_MODE: "on"
+    VLM_JSON_VALIDATION_MODE: "relaxed"
+"""
+        )
+        with mock.patch.object(probe, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = probe.parse_args([str(day_dir), "--ollama-keep-alive", probe.DEFAULT_OLLAMA_KEEP_ALIVE])
+            args = probe.apply_vocatio_defaults(args, day_dir)
+            self.assertEqual(args.ollama_keep_alive, probe.DEFAULT_OLLAMA_KEEP_ALIVE)
+
     def test_apply_vocatio_defaults_allows_cli_only_vlm_model_config_without_name(self):
         day_dir = self.make_day_dir("VLM_TEMPERATURE=0.15\n")
         config_path = self.write_vlm_models_config(

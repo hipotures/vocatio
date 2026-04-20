@@ -7,6 +7,7 @@ import csv
 import hashlib
 import json
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence
@@ -306,6 +307,7 @@ def non_negative_float_arg(value: str) -> float:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    raw_args = list(argv) if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(
         description="Probe a local VLM on overlapping stage-photo windows and write one CSV summary row per batch."
     )
@@ -461,7 +463,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Start a new VLM run instead of continuing the latest compatible run.",
     )
-    return parser.parse_args(argv)
+    cli_provided: set[str] = set()
+    for token in raw_args:
+        if token == "--":
+            break
+        if not token.startswith("-"):
+            continue
+        option_token = token.split("=", 1)[0]
+        action = parser._option_string_actions.get(option_token)
+        if action is not None:
+            cli_provided.add(str(action.dest))
+    args = parser.parse_args(raw_args)
+    setattr(args, "_cli_provided", frozenset(cli_provided))
+    return args
 
 
 def validate_required_columns(name: str, fieldnames: Optional[Sequence[str]], required: Sequence[str]) -> None:
@@ -548,16 +562,26 @@ def _arg_matches_default(args: argparse.Namespace, attr: str, default_value: Any
     return getattr(args, attr) == default_value
 
 
+def _arg_is_inheritable(
+    args: argparse.Namespace,
+    cli_provided: frozenset[str],
+    attr: str,
+    default_value: Any,
+) -> bool:
+    return attr not in cli_provided and _arg_matches_default(args, attr, default_value)
+
+
 def _needs_vlm_preset_resolution(args: argparse.Namespace, config: Mapping[str, str]) -> bool:
+    cli_provided = frozenset(getattr(args, "_cli_provided", frozenset()))
     preset_name = str(config.get("VLM_NAME", "") or "").strip()
     if preset_name:
         return any(
-            _arg_matches_default(args, attr_name, default_value)
+            _arg_is_inheritable(args, cli_provided, attr_name, default_value)
             for _field_name, attr_name, default_value in VLM_MODEL_ARG_SPECS
         )
     return any(
         str(config.get(field_name, "") or "").strip()
-        and _arg_matches_default(args, attr_name, default_value)
+        and _arg_is_inheritable(args, cli_provided, attr_name, default_value)
         for field_name, attr_name, default_value in VLM_MODEL_ARG_SPECS
     )
 
@@ -565,27 +589,28 @@ def _needs_vlm_preset_resolution(args: argparse.Namespace, config: Mapping[str, 
 def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.Namespace:
     config = load_vocatio_config(day_dir)
     _validate_supported_vlm_config_keys(config)
+    cli_provided = frozenset(getattr(args, "_cli_provided", frozenset()))
 
     def apply_string(attr: str, default_value: str, config_key: str) -> None:
-        if getattr(args, attr) == default_value:
+        if _arg_is_inheritable(args, cli_provided, attr, default_value):
             configured = str(config.get(config_key, "") or "").strip()
             if configured:
                 setattr(args, attr, configured)
 
     def apply_preset_string(attr: str, default_value: str, configured: Any) -> None:
-        if getattr(args, attr) == default_value:
+        if _arg_is_inheritable(args, cli_provided, attr, default_value):
             setattr(args, attr, str(configured))
 
     def apply_preset_optional_int(attr: str, configured: Any) -> None:
-        if getattr(args, attr) is None:
+        if attr not in cli_provided and getattr(args, attr) is None:
             setattr(args, attr, int(configured))
 
     def apply_preset_float(attr: str, default_value: float, configured: Any) -> None:
-        if getattr(args, attr) == default_value:
+        if _arg_is_inheritable(args, cli_provided, attr, default_value):
             setattr(args, attr, float(configured))
 
     def apply_int(attr: str, default_value: int, config_key: str, parser) -> None:
-        if getattr(args, attr) == default_value:
+        if _arg_is_inheritable(args, cli_provided, attr, default_value):
             configured = str(config.get(config_key, "") or "").strip()
             if configured:
                 setattr(args, attr, parser(configured))

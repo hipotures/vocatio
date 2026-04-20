@@ -192,6 +192,51 @@ models:
             self.assertEqual(args.temperature, 0.6)
             self.assertEqual(args.timeout_seconds, 45.0)
 
+    def test_apply_vocatio_defaults_preserves_explicit_default_valued_premodel_temperature(self):
+        day_dir = self.make_day_dir(
+            "\n".join(
+                [
+                    "PREMODEL_NAME=qwen3.5-4b-pre",
+                    "PREMODEL_TEMPERATURE=0.25",
+                ]
+            )
+        )
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - PREMODEL_NAME: "qwen3.5-4b-pre"
+    PREMODEL_PROVIDER: "llamacpp"
+    PREMODEL_BASE_URL: "http://127.0.0.1:8003"
+    PREMODEL_MODEL: "preset-model"
+    PREMODEL_MAX_OUTPUT_TOKENS: 2048
+    PREMODEL_TEMPERATURE: 0.0
+    PREMODEL_TIMEOUT_SECONDS: 90
+"""
+        )
+        with mock.patch.object(pre_model, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = pre_model.parse_args([str(day_dir), "--temperature", "0.0"])
+            args = pre_model.apply_vocatio_defaults(args, day_dir)
+            self.assertEqual(args.temperature, 0.0)
+
+    def test_apply_vocatio_defaults_preserves_explicit_default_valued_premodel_provider(self):
+        day_dir = self.make_day_dir("PREMODEL_NAME=qwen3.5-4b-pre\n")
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - PREMODEL_NAME: "qwen3.5-4b-pre"
+    PREMODEL_PROVIDER: "ollama"
+    PREMODEL_BASE_URL: "http://127.0.0.1:8003"
+    PREMODEL_MODEL: "preset-model"
+    PREMODEL_MAX_OUTPUT_TOKENS: 2048
+    PREMODEL_TEMPERATURE: 0.0
+    PREMODEL_TIMEOUT_SECONDS: 90
+"""
+        )
+        with mock.patch.object(pre_model, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = pre_model.parse_args([str(day_dir), "--provider", pre_model.DEFAULT_PROVIDER])
+            args = pre_model.apply_vocatio_defaults(args, day_dir)
+            self.assertEqual(args.provider, pre_model.DEFAULT_PROVIDER)
+
     def test_apply_vocatio_defaults_allows_cli_only_premodel_config_without_name(self):
         day_dir = self.make_day_dir("PREMODEL_TEMPERATURE=0.25\n")
         config_path = self.write_vlm_models_config(
