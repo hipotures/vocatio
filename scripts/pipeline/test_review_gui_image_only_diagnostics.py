@@ -11,6 +11,7 @@ from unittest.mock import Mock
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QVBoxLayout, QWidget
+from lib.vlm_transport import VlmTransportError
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -2382,6 +2383,100 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(attempts["count"], 1)
         sleep_mock.assert_not_called()
+
+    def test_compute_manual_vlm_analyze_result_surfaces_debug_artifacts_for_non_retry_transport_errors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            image_paths = []
+            for name in ("left.jpg", "right.jpg", "tail.jpg"):
+                image_path = temp_path / name
+                image_path.write_bytes(b"jpeg")
+                image_paths.append(image_path)
+
+            joined_rows = [
+                {
+                    "photo_id": "left",
+                    "relative_path": "cam/left.jpg",
+                    "start_epoch_ms": "1000",
+                    "image_path": str(image_paths[0]),
+                },
+                {
+                    "photo_id": "right",
+                    "relative_path": "cam/right.jpg",
+                    "start_epoch_ms": "2000",
+                    "image_path": str(image_paths[1]),
+                },
+                {
+                    "photo_id": "tail",
+                    "relative_path": "cam/tail.jpg",
+                    "start_epoch_ms": "3000",
+                    "image_path": str(image_paths[2]),
+                },
+            ]
+
+            manual_vlm_model = {
+                "VLM_NAME": "Preset A",
+                "VLM_PROVIDER": "ollama",
+                "VLM_BASE_URL": "http://127.0.0.1:11434",
+                "VLM_MODEL": "qwen3.5:9b",
+                "VLM_CONTEXT_TOKENS": 4096,
+                "VLM_MAX_OUTPUT_TOKENS": 512,
+                "VLM_KEEP_ALIVE": "15m",
+                "VLM_TIMEOUT_SECONDS": 30,
+                "VLM_TEMPERATURE": 0,
+                "VLM_REASONING_LEVEL": "low",
+                "VLM_RESPONSE_SCHEMA_MODE": "off",
+                "VLM_JSON_VALIDATION_MODE": "strict",
+            }
+
+            with unittest.mock.patch.object(
+                review_gui,
+                "load_manual_vlm_hint_lines",
+                return_value=["ML hints unavailable."],
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "build_run_id",
+                return_value="manual-nonretry",
+            ), unittest.mock.patch.object(
+                review_gui.tempfile,
+                "gettempdir",
+                return_value=temp_dir,
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "run_vlm_request",
+                side_effect=VlmTransportError(
+                    "invalid_request",
+                    "VLM request model must be non-empty",
+                ),
+            ):
+                with self.assertRaises(review_gui.ManualVlmAnalyzeError) as raised:
+                    review_gui.compute_manual_vlm_analyze_result(
+                        day_dir=Path("/tmp/20260323"),
+                        workspace_dir=temp_path,
+                        payload={"day": "20260323", "window_radius": 1},
+                        joined_rows=joined_rows,
+                        anchor_pair={
+                            "left_row_index": 0,
+                            "right_row_index": 1,
+                            "left_relative_path": "cam/left.jpg",
+                            "right_relative_path": "cam/right.jpg",
+                        },
+                        window_config={"window_radius": 1},
+                        manual_vlm_model=manual_vlm_model,
+                    )
+
+            error = raised.exception
+            self.assertEqual(str(error), "VLM request model must be non-empty")
+            self.assertEqual(
+                error.debug_file_paths,
+                [
+                    str(temp_path / "vlm_probe_manual-nonretry_batch_001_prompt.txt"),
+                    str(temp_path / "vlm_probe_manual-nonretry_batch_001_request.json"),
+                    str(temp_path / "vlm_probe_manual-nonretry_batch_001_error.txt"),
+                ],
+            )
+            for debug_file_path in error.debug_file_paths:
+                self.assertTrue(Path(debug_file_path).exists(), debug_file_path)
 
     def test_compute_manual_ml_prediction_result_uses_image_paths_for_manual_thumbnail_columns(self):
         joined_rows = [

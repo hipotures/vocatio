@@ -526,8 +526,8 @@ def run_manual_vlm_request_with_retries(
     for attempt_index in range(MANUAL_VLM_REQUEST_MAX_ATTEMPTS):
         try:
             return request_fn()
-        except ManualVlmAnalyzeError:
-            if attempt_index + 1 >= MANUAL_VLM_REQUEST_MAX_ATTEMPTS:
+        except ManualVlmAnalyzeError as exc:
+            if not exc.retryable or attempt_index + 1 >= MANUAL_VLM_REQUEST_MAX_ATTEMPTS:
                 raise
             sleep_fn(MANUAL_VLM_REQUEST_RETRY_DELAY_SECONDS)
 
@@ -780,9 +780,16 @@ def compute_manual_ml_prediction_result(
 
 
 class ManualVlmAnalyzeError(RuntimeError):
-    def __init__(self, message: str, *, debug_file_paths: Optional[Sequence[str]] = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        debug_file_paths: Optional[Sequence[str]] = None,
+        retryable: bool = True,
+    ):
         super().__init__(message)
         self.debug_file_paths = [str(value).strip() for value in (debug_file_paths or []) if str(value).strip()]
+        self.retryable = bool(retryable)
 
 
 def extract_manual_vlm_response_payload(raw_response: str) -> Dict[str, Any]:
@@ -930,12 +937,14 @@ def compute_manual_vlm_analyze_result(
     request_payload = probe_vlm_boundary.build_provider_request_payload(request)
     run_id = probe_vlm_boundary.build_run_id()
     debug_dir = resolve_manual_vlm_debug_dir(workspace_dir, runtime_args, run_id)
+
     def execute_request() -> tuple[str, Optional[Mapping[str, Any]], Dict[str, str]]:
         try:
             response = probe_vlm_boundary.run_vlm_request(request)
         except Exception as exc:
             retryable_categories = {"connection", "http", "timeout", "invalid_response"}
-            if getattr(exc, "category", None) not in retryable_categories:
+            transport_category = str(getattr(exc, "category", "") or "").strip()
+            if not transport_category:
                 raise
             debug_file_paths = build_manual_vlm_debug_file_paths(
                 debug_dir,
@@ -951,7 +960,11 @@ def compute_manual_vlm_analyze_result(
                 response_payload=None,
                 error_text=str(exc),
             )
-            raise ManualVlmAnalyzeError(str(exc), debug_file_paths=debug_file_paths) from exc
+            raise ManualVlmAnalyzeError(
+                str(exc),
+                debug_file_paths=debug_file_paths,
+                retryable=transport_category in retryable_categories,
+            ) from exc
         raw_response = str(response.text)
         response_payload = response.raw_response if isinstance(response.raw_response, Mapping) else None
         parsed_response = probe_vlm_boundary.parse_model_response(
