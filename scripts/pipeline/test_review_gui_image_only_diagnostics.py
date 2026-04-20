@@ -2644,10 +2644,6 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             review_gui.probe_vlm_boundary,
             "parse_args",
             return_value=parsed_args,
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "apply_vocatio_defaults",
-            return_value=parsed_args,
         ):
             runtime_args = review_gui.resolve_manual_vlm_runtime_args(
                 day_dir=Path("/day"),
@@ -2711,10 +2707,6 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             review_gui.probe_vlm_boundary,
             "parse_args",
             return_value=parsed_args,
-        ), unittest.mock.patch.object(
-            review_gui.probe_vlm_boundary,
-            "apply_vocatio_defaults",
-            return_value=parsed_args,
         ):
             runtime_args = review_gui.resolve_manual_vlm_runtime_args(
                 day_dir=Path("/day"),
@@ -2739,6 +2731,52 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(runtime_args.json_validation_mode, "strict")
         self.assertEqual(runtime_args.window_radius, 3)
         self.assertEqual(runtime_args.image_variant, "thumb")
+
+    def test_resolve_manual_vlm_runtime_args_does_not_require_vlm_name_in_vocatio(self):
+        parsed_args = argparse.Namespace(
+            provider="config-provider",
+            model="config-model",
+            ollama_base_url="http://config",
+            ollama_num_ctx=111,
+            ollama_num_predict=222,
+            ollama_keep_alive="15m",
+            timeout_seconds=33.0,
+            temperature=0.9,
+            ollama_think="high",
+            response_schema_mode="off",
+            json_validation_mode="relaxed",
+            image_variant="preview",
+            ml_model_run_id="config-ml",
+            photo_pre_model_dir="config-pre",
+            window_radius=2,
+        )
+        manual_vlm_model = {
+            "VLM_NAME": "Preset D",
+            "VLM_PROVIDER": "llamacpp",
+            "VLM_BASE_URL": "http://127.0.0.1:8080",
+            "VLM_MODEL": "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_XL",
+            "VLM_MAX_OUTPUT_TOKENS": 512,
+            "VLM_TIMEOUT_SECONDS": 300.0,
+            "VLM_TEMPERATURE": 0.0,
+            "VLM_RESPONSE_SCHEMA_MODE": "off",
+            "VLM_JSON_VALIDATION_MODE": "strict",
+        }
+
+        with unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary,
+            "parse_args",
+            return_value=parsed_args,
+        ):
+            runtime_args = review_gui.resolve_manual_vlm_runtime_args(
+                day_dir=Path("/day"),
+                workspace_dir=Path("/workspace"),
+                payload={"window_radius": 3, "vlm_image_variant": "preview"},
+                manual_vlm_model=manual_vlm_model,
+            )
+
+        self.assertEqual(runtime_args.provider, "llamacpp")
+        self.assertEqual(runtime_args.model, "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_XL")
+        self.assertEqual(runtime_args.ollama_base_url, "http://127.0.0.1:8080")
 
     def test_run_manual_vlm_request_with_retries_retries_manual_vlm_failures_three_times(self):
         attempts = {"count": 0}

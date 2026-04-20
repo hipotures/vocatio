@@ -545,7 +545,6 @@ def resolve_manual_vlm_runtime_args(
     manual_vlm_model: Mapping[str, Any],
 ) -> argparse.Namespace:
     args = probe_vlm_boundary.parse_args([str(day_dir), "--workspace-dir", str(workspace_dir)])
-    args = probe_vlm_boundary.apply_vocatio_defaults(args, day_dir)
     args.provider = str(manual_vlm_model.get("VLM_PROVIDER", "") or "").strip()
     args.model = str(manual_vlm_model.get("VLM_MODEL", "") or "").strip()
     args.ollama_base_url = str(manual_vlm_model.get("VLM_BASE_URL", "") or "").strip()
