@@ -437,11 +437,16 @@ class VlmTransportExecutionTests(unittest.TestCase):
         post_json_mock.assert_called_once()
         self.assertEqual(post_json_mock.call_args.args[1], "/api/chat")
 
+    @mock.patch.object(vlm_transport, "fetch_json")
     @mock.patch.object(vlm_transport, "post_json")
     def test_run_vlm_request_uses_openai_chat_completions_for_llamacpp(
         self,
         post_json_mock: mock.Mock,
+        fetch_json_mock: mock.Mock,
     ) -> None:
+        fetch_json_mock.return_value = {
+            "data": [{"id": "demo"}],
+        }
         post_json_mock.return_value = {
             "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
         }
@@ -456,7 +461,62 @@ class VlmTransportExecutionTests(unittest.TestCase):
 
         vlm_transport.run_vlm_request(request)
 
+        fetch_json_mock.assert_called_once_with("http://127.0.0.1:8002", "/v1/models", 10.0)
         self.assertEqual(post_json_mock.call_args.args[1], "/v1/chat/completions")
+
+    @mock.patch.object(vlm_transport, "fetch_json")
+    @mock.patch.object(vlm_transport, "post_json")
+    def test_run_vlm_request_rejects_llamacpp_model_mismatch(
+        self,
+        post_json_mock: mock.Mock,
+        fetch_json_mock: mock.Mock,
+    ) -> None:
+        fetch_json_mock.return_value = {
+            "data": [{"id": "actual-model"}],
+            "models": [{"model": "actual-model"}],
+        }
+        request = vlm_transport.VlmRequest(
+            provider="llamacpp",
+            base_url="http://127.0.0.1:8002",
+            model="configured-model",
+            messages=[{"role": "user", "content": "hi"}],
+            image_paths=[],
+            timeout_seconds=10.0,
+        )
+
+        with self.assertRaises(vlm_transport.VlmTransportError) as error:
+            vlm_transport.run_vlm_request(request)
+
+        self.assertEqual(error.exception.category, "unsupported_configuration")
+        self.assertEqual(
+            str(error.exception),
+            'llama.cpp model mismatch: configured model "configured-model" but server advertises "actual-model"',
+        )
+        post_json_mock.assert_not_called()
+
+    @mock.patch.object(vlm_transport, "fetch_json")
+    def test_run_vlm_request_rejects_llamacpp_models_payload_without_ids(
+        self,
+        fetch_json_mock: mock.Mock,
+    ) -> None:
+        fetch_json_mock.return_value = {
+            "data": [{}],
+            "models": [{}],
+        }
+        request = vlm_transport.VlmRequest(
+            provider="llamacpp",
+            base_url="http://127.0.0.1:8002",
+            model="configured-model",
+            messages=[{"role": "user", "content": "hi"}],
+            image_paths=[],
+            timeout_seconds=10.0,
+        )
+
+        with self.assertRaises(vlm_transport.VlmTransportError) as error:
+            vlm_transport.run_vlm_request(request)
+
+        self.assertEqual(error.exception.category, "invalid_response")
+        self.assertIn("missing advertised model ids at /v1/models", str(error.exception))
 
     @mock.patch.object(vlm_transport, "post_json")
     def test_run_vlm_request_wraps_url_errors_as_connection(
@@ -518,9 +578,11 @@ class VlmTransportExecutionTests(unittest.TestCase):
 
         self.assertEqual(error.exception.category, "timeout")
 
+    @mock.patch.object(vlm_transport, "fetch_json")
     @mock.patch.object(vlm_transport, "post_json")
     def test_run_vlm_request_rejects_malformed_success_payloads_as_invalid_response(
         self,
+        fetch_json_mock: mock.Mock,
         post_json_mock: mock.Mock,
     ) -> None:
         for provider, base_url, payload in (
@@ -529,7 +591,10 @@ class VlmTransportExecutionTests(unittest.TestCase):
         ):
             with self.subTest(provider=provider):
                 post_json_mock.reset_mock()
+                fetch_json_mock.reset_mock()
                 post_json_mock.return_value = payload
+                if provider == "llamacpp":
+                    fetch_json_mock.return_value = {"data": [{"id": "demo"}]}
                 request = vlm_transport.VlmRequest(
                     provider=provider,
                     base_url=base_url,

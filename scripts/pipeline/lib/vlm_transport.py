@@ -381,8 +381,73 @@ def post_json(base_url: str, path: str, payload: dict[str, Any], timeout_seconds
     return response_payload
 
 
+def fetch_json(base_url: str, path: str, timeout_seconds: float) -> dict[str, Any]:
+    request = Request(
+        f"{base_url.rstrip('/')}{path}",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    with urlopen(request, timeout=timeout_seconds) as response:
+        response_payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(response_payload, dict):
+        raise VlmTransportError("invalid_response", "VLM transport response must be a JSON object")
+    return response_payload
+
+
+def _extract_advertised_model_ids(payload: dict[str, Any]) -> list[str]:
+    advertised: list[str] = []
+    for item in payload.get("data", []):
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id", "") or "").strip()
+        if model_id and model_id not in advertised:
+            advertised.append(model_id)
+    for item in payload.get("models", []):
+        if not isinstance(item, dict):
+            continue
+        for key in ("model", "name"):
+            model_id = str(item.get(key, "") or "").strip()
+            if model_id and model_id not in advertised:
+                advertised.append(model_id)
+    return advertised
+
+
+def _validate_llamacpp_server_model(request: VlmRequest) -> None:
+    try:
+        response_payload = fetch_json(request.base_url, "/v1/models", request.timeout_seconds)
+    except VlmTransportError:
+        raise
+    except HTTPError as exc:
+        raise VlmTransportError("http", f"HTTP error from {request.provider}: {exc}") from exc
+    except TimeoutError as exc:
+        raise VlmTransportError("timeout", f"Timeout from {request.provider}: {exc}") from exc
+    except URLError as exc:
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, TimeoutError):
+            raise VlmTransportError("timeout", f"Timeout from {request.provider}: {exc}") from exc
+        raise VlmTransportError("connection", f"Connection error from {request.provider}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise VlmTransportError("invalid_response", f"Invalid JSON response from {request.provider}: {exc}") from exc
+
+    advertised_models = _extract_advertised_model_ids(response_payload)
+    if not advertised_models:
+        raise VlmTransportError(
+            "invalid_response",
+            f'Invalid response payload from {request.provider}: missing advertised model ids at /v1/models',
+        )
+    if request.model in advertised_models:
+        return
+    raise VlmTransportError(
+        "unsupported_configuration",
+        f'llama.cpp model mismatch: configured model "{request.model}" but server advertises '
+        + ", ".join(f'"{model_id}"' for model_id in advertised_models),
+    )
+
+
 def run_vlm_request(request: VlmRequest) -> VlmResponse:
     validate_vlm_request(request)
+    if request.provider == "llamacpp":
+        _validate_llamacpp_server_model(request)
     payload = build_provider_request_payload(request)
     path = "/api/chat" if request.provider == "ollama" else "/v1/chat/completions"
     try:
