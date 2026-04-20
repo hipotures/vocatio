@@ -29,6 +29,21 @@ probe = load_module("probe_vlm_photo_boundaries_test", "scripts/pipeline/probe_v
 
 
 class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
+    def make_day_dir(self, vocatio_text: str) -> Path:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        day_dir = Path(temp_dir.name) / "20260323"
+        day_dir.mkdir(parents=True)
+        (day_dir / ".vocatio").write_text(vocatio_text, encoding="utf-8")
+        return day_dir
+
+    def write_vlm_models_config(self, contents: str) -> Path:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        config_path = Path(temp_dir.name) / "vlm_models.yaml"
+        config_path.write_text(contents, encoding="utf-8")
+        return config_path
+
     def test_parse_args_accepts_window_radius_and_temperature(self):
         args = probe.parse_args(
             [
@@ -87,36 +102,41 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(minus_one_args.max_batches, -1)
 
     def test_apply_vocatio_defaults_reads_vlm_values(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            day_dir = Path(tmp_dir) / "20260323"
-            day_dir.mkdir(parents=True)
-            (day_dir / ".vocatio").write_text(
-                "\n".join(
-                    [
-                        "VLM_PROVIDER=ollama",
-                        "VLM_BASE_URL=http://127.0.0.1:11435",
-                        "VLM_MODEL=test-model",
-                        "VLM_PHOTO_MANIFEST_CSV=media_manifest.csv",
-                        "VLM_EMBEDDED_MANIFEST_CSV=photo_embedded_manifest.csv",
-                        "VLM_IMAGE_VARIANT=thumb",
-                        "VLM_WINDOW_RADIUS=4",
-                        "VLM_BOUNDARY_GAP_SECONDS=20",
-                        "VLM_MAX_BATCHES=0",
-                        "VLM_CONTEXT_TOKENS=8192",
-                        "VLM_MAX_OUTPUT_TOKENS=256",
-                        "VLM_KEEP_ALIVE=30m",
-                        "VLM_TIMEOUT_SECONDS=180",
-                        "VLM_TEMPERATURE=0.15",
-                        "VLM_REASONING_LEVEL=false",
-                        "VLM_RESPONSE_SCHEMA_MODE=on",
-                        "VLM_JSON_VALIDATION_MODE=relaxed",
-                        "VLM_PHOTO_PRE_MODEL_DIR=custom_pre_model",
-                        "VLM_ML_MODEL_RUN_ID=day-20260323-best",
-                        "VLM_DUMP_DEBUG_DIR=/tmp/vlm-debug",
-                    ]
-                ),
-                encoding="utf-8",
+        day_dir = self.make_day_dir(
+            "\n".join(
+                [
+                    "VLM_NAME=qwen3.5:9b",
+                    "VLM_TEMPERATURE=0.15",
+                    "VLM_PHOTO_MANIFEST_CSV=media_manifest.csv",
+                    "VLM_EMBEDDED_MANIFEST_CSV=photo_embedded_manifest.csv",
+                    "VLM_IMAGE_VARIANT=thumb",
+                    "VLM_WINDOW_RADIUS=4",
+                    "VLM_BOUNDARY_GAP_SECONDS=20",
+                    "VLM_MAX_BATCHES=0",
+                    "VLM_PHOTO_PRE_MODEL_DIR=custom_pre_model",
+                    "VLM_ML_MODEL_RUN_ID=day-20260323-best",
+                    "VLM_DUMP_DEBUG_DIR=/tmp/vlm-debug",
+                ]
             )
+        )
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - VLM_NAME: "qwen3.5:9b"
+    VLM_PROVIDER: "ollama"
+    VLM_BASE_URL: "http://127.0.0.1:11435"
+    VLM_MODEL: "test-model"
+    VLM_CONTEXT_TOKENS: 8192
+    VLM_MAX_OUTPUT_TOKENS: 256
+    VLM_KEEP_ALIVE: "30m"
+    VLM_TIMEOUT_SECONDS: 180
+    VLM_TEMPERATURE: 0.0
+    VLM_REASONING_LEVEL: "false"
+    VLM_RESPONSE_SCHEMA_MODE: "on"
+    VLM_JSON_VALIDATION_MODE: "relaxed"
+"""
+        )
+        with mock.patch.object(probe, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
             args = probe.parse_args([str(day_dir)])
             args = probe.apply_vocatio_defaults(args, day_dir)
             self.assertEqual(args.provider, "ollama")
@@ -141,21 +161,146 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
             self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
 
     def test_apply_vocatio_defaults_ignores_legacy_window_size_and_overlap_env(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            day_dir = Path(tmp_dir) / "20260323"
-            day_dir.mkdir(parents=True)
-            (day_dir / ".vocatio").write_text(
-                "\n".join(
-                    [
-                        "VLM_WINDOW_SIZE=7",
-                        "VLM_OVERLAP=3",
-                    ]
-                ),
-                encoding="utf-8",
+        day_dir = self.make_day_dir(
+            "\n".join(
+                [
+                    "VLM_NAME=qwen3.5:9b",
+                    "VLM_WINDOW_SIZE=7",
+                    "VLM_OVERLAP=3",
+                ]
             )
+        )
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - VLM_NAME: "qwen3.5:9b"
+    VLM_PROVIDER: "ollama"
+    VLM_BASE_URL: "http://127.0.0.1:11434"
+    VLM_MODEL: "qwen3.5:9b"
+    VLM_CONTEXT_TOKENS: 16384
+    VLM_MAX_OUTPUT_TOKENS: 512
+    VLM_KEEP_ALIVE: "15m"
+    VLM_TIMEOUT_SECONDS: 300
+    VLM_TEMPERATURE: 0.0
+    VLM_REASONING_LEVEL: "inherit"
+    VLM_RESPONSE_SCHEMA_MODE: "off"
+    VLM_JSON_VALIDATION_MODE: "strict"
+"""
+        )
+        with mock.patch.object(probe, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
             args = probe.parse_args([str(day_dir)])
             args = probe.apply_vocatio_defaults(args, day_dir)
             self.assertEqual(args.window_radius, probe.DEFAULT_WINDOW_RADIUS)
+
+    def test_apply_vocatio_defaults_requires_vlm_name(self):
+        day_dir = self.make_day_dir("VLM_TEMPERATURE=0.5\n")
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - VLM_NAME: "qwen3.5:9b"
+    VLM_PROVIDER: "ollama"
+    VLM_BASE_URL: "http://127.0.0.1:11434"
+    VLM_MODEL: "qwen3.5:9b"
+    VLM_CONTEXT_TOKENS: 16384
+    VLM_MAX_OUTPUT_TOKENS: 512
+    VLM_KEEP_ALIVE: "15m"
+    VLM_TIMEOUT_SECONDS: 300
+    VLM_TEMPERATURE: 0.0
+    VLM_REASONING_LEVEL: "inherit"
+    VLM_RESPONSE_SCHEMA_MODE: "off"
+    VLM_JSON_VALIDATION_MODE: "strict"
+"""
+        )
+        with mock.patch.object(probe, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = probe.parse_args([str(day_dir)])
+            with self.assertRaisesRegex(ValueError, "missing VLM_NAME in .vocatio"):
+                probe.apply_vocatio_defaults(args, day_dir)
+
+    def test_apply_vocatio_defaults_requires_known_vlm_name(self):
+        day_dir = self.make_day_dir("VLM_NAME=missing-preset\n")
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - VLM_NAME: "qwen3.5:9b"
+    VLM_PROVIDER: "ollama"
+    VLM_BASE_URL: "http://127.0.0.1:11434"
+    VLM_MODEL: "qwen3.5:9b"
+    VLM_CONTEXT_TOKENS: 16384
+    VLM_MAX_OUTPUT_TOKENS: 512
+    VLM_KEEP_ALIVE: "15m"
+    VLM_TIMEOUT_SECONDS: 300
+    VLM_TEMPERATURE: 0.0
+    VLM_REASONING_LEVEL: "inherit"
+    VLM_RESPONSE_SCHEMA_MODE: "off"
+    VLM_JSON_VALIDATION_MODE: "strict"
+"""
+        )
+        with mock.patch.object(probe, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = probe.parse_args([str(day_dir)])
+            with self.assertRaisesRegex(ValueError, 'unknown VLM_NAME "missing-preset"'):
+                probe.apply_vocatio_defaults(args, day_dir)
+
+    def test_apply_vocatio_defaults_rejects_unsupported_vlm_keys(self):
+        day_dir = self.make_day_dir(
+            "\n".join(
+                [
+                    "VLM_NAME=qwen3.5:9b",
+                    "VLM_DESCRIPTION=not-allowed",
+                ]
+            )
+        )
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - VLM_NAME: "qwen3.5:9b"
+    VLM_PROVIDER: "ollama"
+    VLM_BASE_URL: "http://127.0.0.1:11434"
+    VLM_MODEL: "qwen3.5:9b"
+    VLM_CONTEXT_TOKENS: 16384
+    VLM_MAX_OUTPUT_TOKENS: 512
+    VLM_KEEP_ALIVE: "15m"
+    VLM_TIMEOUT_SECONDS: 300
+    VLM_TEMPERATURE: 0.0
+    VLM_REASONING_LEVEL: "inherit"
+    VLM_RESPONSE_SCHEMA_MODE: "off"
+    VLM_JSON_VALIDATION_MODE: "strict"
+"""
+        )
+        with mock.patch.object(probe, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = probe.parse_args([str(day_dir)])
+            with self.assertRaisesRegex(ValueError, "unsupported VLM config key"):
+                probe.apply_vocatio_defaults(args, day_dir)
+
+    def test_apply_vocatio_defaults_surfaces_provider_incompatible_vlm_override(self):
+        day_dir = self.make_day_dir(
+            "\n".join(
+                [
+                    "VLM_NAME=qwen3.5:9b",
+                    "VLM_PROVIDER=llamacpp",
+                ]
+            )
+        )
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - VLM_NAME: "qwen3.5:9b"
+    VLM_PROVIDER: "ollama"
+    VLM_BASE_URL: "http://127.0.0.1:11434"
+    VLM_MODEL: "qwen3.5:9b"
+    VLM_CONTEXT_TOKENS: 16384
+    VLM_MAX_OUTPUT_TOKENS: 512
+    VLM_KEEP_ALIVE: "15m"
+    VLM_TIMEOUT_SECONDS: 300
+    VLM_TEMPERATURE: 0.0
+    VLM_REASONING_LEVEL: "inherit"
+    VLM_RESPONSE_SCHEMA_MODE: "off"
+    VLM_JSON_VALIDATION_MODE: "strict"
+"""
+        )
+        with mock.patch.object(probe, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = probe.parse_args([str(day_dir)])
+            with self.assertRaisesRegex(ValueError, "Provider does not support keep_alive: llamacpp"):
+                probe.apply_vocatio_defaults(args, day_dir)
 
     def test_window_radius_contract_derives_even_window_size_and_centered_bounds(self):
         contract = load_module(

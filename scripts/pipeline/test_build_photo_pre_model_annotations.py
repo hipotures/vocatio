@@ -28,6 +28,21 @@ pre_model = load_module(
 
 
 class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
+    def make_day_dir(self, vocatio_text: str) -> Path:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        day_dir = Path(temp_dir.name) / "20260323"
+        day_dir.mkdir(parents=True)
+        (day_dir / ".vocatio").write_text(vocatio_text, encoding="utf-8")
+        return day_dir
+
+    def write_vlm_models_config(self, contents: str) -> Path:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        config_path = Path(temp_dir.name) / "vlm_models.yaml"
+        config_path.write_text(contents, encoding="utf-8")
+        return config_path
+
     def make_annotation_payload(self) -> dict[str, object]:
         return {
             "people_count": "solo",
@@ -93,26 +108,31 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
             self.assertEqual(request.response_format, {"type": "json_object"})
 
     def test_apply_vocatio_defaults_reads_premodel_values(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            day_dir = Path(tmp_dir) / "20260323"
-            day_dir.mkdir(parents=True)
-            (day_dir / ".vocatio").write_text(
-                "\n".join(
-                    [
-                        "PREMODEL_PROVIDER=llamacpp",
-                        "PREMODEL_BASE_URL=http://127.0.0.1:8003",
-                        "PREMODEL_MODEL=test-model",
-                        "PREMODEL_PHOTO_INDEX=photo_embedded_manifest.csv",
-                        "PREMODEL_IMAGE_COLUMN=thumb_path",
-                        "PREMODEL_OUTPUT_DIR=custom_annotations",
-                        "PREMODEL_MAX_OUTPUT_TOKENS=2048",
-                        "PREMODEL_TEMPERATURE=0.25",
-                        "PREMODEL_TIMEOUT_SECONDS=90",
-                        "PREMODEL_WORKERS=3",
-                    ]
-                ),
-                encoding="utf-8",
+        day_dir = self.make_day_dir(
+            "\n".join(
+                [
+                    "PREMODEL_NAME=qwen3.5-4b-pre",
+                    "PREMODEL_TEMPERATURE=0.25",
+                    "PREMODEL_PHOTO_INDEX=photo_embedded_manifest.csv",
+                    "PREMODEL_IMAGE_COLUMN=thumb_path",
+                    "PREMODEL_OUTPUT_DIR=custom_annotations",
+                    "PREMODEL_WORKERS=3",
+                ]
             )
+        )
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - PREMODEL_NAME: "qwen3.5-4b-pre"
+    PREMODEL_PROVIDER: "llamacpp"
+    PREMODEL_BASE_URL: "http://127.0.0.1:8003"
+    PREMODEL_MODEL: "test-model"
+    PREMODEL_MAX_OUTPUT_TOKENS: 2048
+    PREMODEL_TEMPERATURE: 0.0
+    PREMODEL_TIMEOUT_SECONDS: 90
+"""
+        )
+        with mock.patch.object(pre_model, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
             args = pre_model.parse_args([str(day_dir)])
             args = pre_model.apply_vocatio_defaults(args, day_dir)
             self.assertEqual(args.provider, "llamacpp")
@@ -124,6 +144,96 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
             self.assertEqual(args.temperature, 0.25)
             self.assertEqual(args.timeout_seconds, 90.0)
             self.assertEqual(args.workers, 3)
+
+    def test_apply_vocatio_defaults_requires_premodel_name(self):
+        day_dir = self.make_day_dir("PREMODEL_TEMPERATURE=0.25\n")
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - PREMODEL_NAME: "qwen3.5-4b-pre"
+    PREMODEL_PROVIDER: "llamacpp"
+    PREMODEL_BASE_URL: "http://127.0.0.1:8003"
+    PREMODEL_MODEL: "test-model"
+    PREMODEL_MAX_OUTPUT_TOKENS: 2048
+    PREMODEL_TEMPERATURE: 0.0
+    PREMODEL_TIMEOUT_SECONDS: 90
+"""
+        )
+        with mock.patch.object(pre_model, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = pre_model.parse_args([str(day_dir)])
+            with self.assertRaisesRegex(ValueError, "missing PREMODEL_NAME in .vocatio"):
+                pre_model.apply_vocatio_defaults(args, day_dir)
+
+    def test_apply_vocatio_defaults_requires_known_premodel_name(self):
+        day_dir = self.make_day_dir("PREMODEL_NAME=missing-preset\n")
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - PREMODEL_NAME: "qwen3.5-4b-pre"
+    PREMODEL_PROVIDER: "llamacpp"
+    PREMODEL_BASE_URL: "http://127.0.0.1:8003"
+    PREMODEL_MODEL: "test-model"
+    PREMODEL_MAX_OUTPUT_TOKENS: 2048
+    PREMODEL_TEMPERATURE: 0.0
+    PREMODEL_TIMEOUT_SECONDS: 90
+"""
+        )
+        with mock.patch.object(pre_model, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = pre_model.parse_args([str(day_dir)])
+            with self.assertRaisesRegex(ValueError, 'unknown PREMODEL_NAME "missing-preset"'):
+                pre_model.apply_vocatio_defaults(args, day_dir)
+
+    def test_apply_vocatio_defaults_rejects_unsupported_premodel_keys(self):
+        day_dir = self.make_day_dir(
+            "\n".join(
+                [
+                    "PREMODEL_NAME=qwen3.5-4b-pre",
+                    "PREMODEL_CONTEXT_TOKENS=4096",
+                ]
+            )
+        )
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - PREMODEL_NAME: "qwen3.5-4b-pre"
+    PREMODEL_PROVIDER: "llamacpp"
+    PREMODEL_BASE_URL: "http://127.0.0.1:8003"
+    PREMODEL_MODEL: "test-model"
+    PREMODEL_MAX_OUTPUT_TOKENS: 2048
+    PREMODEL_TEMPERATURE: 0.0
+    PREMODEL_TIMEOUT_SECONDS: 90
+"""
+        )
+        with mock.patch.object(pre_model, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = pre_model.parse_args([str(day_dir)])
+            with self.assertRaisesRegex(ValueError, "unsupported PREMODEL config key"):
+                pre_model.apply_vocatio_defaults(args, day_dir)
+
+    def test_apply_vocatio_defaults_surfaces_invalid_premodel_provider_override(self):
+        day_dir = self.make_day_dir(
+            "\n".join(
+                [
+                    "PREMODEL_NAME=qwen3.5-4b-pre",
+                    "PREMODEL_PROVIDER=bogus",
+                ]
+            )
+        )
+        config_path = self.write_vlm_models_config(
+            """
+models:
+  - PREMODEL_NAME: "qwen3.5-4b-pre"
+    PREMODEL_PROVIDER: "llamacpp"
+    PREMODEL_BASE_URL: "http://127.0.0.1:8003"
+    PREMODEL_MODEL: "test-model"
+    PREMODEL_MAX_OUTPUT_TOKENS: 2048
+    PREMODEL_TEMPERATURE: 0.0
+    PREMODEL_TIMEOUT_SECONDS: 90
+"""
+        )
+        with mock.patch.object(pre_model, "VLM_MODELS_CONFIG_PATH", config_path, create=True):
+            args = pre_model.parse_args([str(day_dir)])
+            with self.assertRaisesRegex(ValueError, 'unsupported PREMODEL_PROVIDER "bogus"'):
+                pre_model.apply_vocatio_defaults(args, day_dir)
 
     def test_build_annotation_output_path_uses_relative_path_subdirectories(self):
         output_path = pre_model.build_annotation_output_path(
@@ -330,7 +440,20 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
             day_dir = Path(tmp_dir) / "20260323"
             workspace_dir = day_dir / "_workspace"
             workspace_dir.mkdir(parents=True)
+            (day_dir / ".vocatio").write_text("PREMODEL_NAME=qwen3.5-4b-pre\n", encoding="utf-8")
             output_dir = workspace_dir / pre_model.DEFAULT_OUTPUT_DIRNAME
+            config_path = self.write_vlm_models_config(
+                """
+models:
+  - PREMODEL_NAME: "qwen3.5-4b-pre"
+    PREMODEL_PROVIDER: "llamacpp"
+    PREMODEL_BASE_URL: "http://127.0.0.1:8002"
+    PREMODEL_MODEL: "test-model"
+    PREMODEL_MAX_OUTPUT_TOKENS: 1024
+    PREMODEL_TEMPERATURE: 0.0
+    PREMODEL_TIMEOUT_SECONDS: 120
+"""
+            )
             entries = [
                 pre_model.ImageEntry(image_path=Path("/tmp/a.jpg"), output_name="a.jpg.txt", source_id="cam/a.hif"),
                 pre_model.ImageEntry(image_path=Path("/tmp/b.jpg"), output_name="b.jpg.txt", source_id="cam/b.hif"),
@@ -344,7 +467,9 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
                     {"prompt_n": 1, "prompt_ms": 1.0, "predicted_n": 1, "predicted_ms": 1.0},
                 )
 
-            with mock.patch.object(pre_model, "load_image_entries", return_value=entries), mock.patch.object(
+            with mock.patch.object(pre_model, "VLM_MODELS_CONFIG_PATH", config_path, create=True), mock.patch.object(
+                pre_model, "load_image_entries", return_value=entries
+            ), mock.patch.object(
                 pre_model, "process_entry", side_effect=fake_process_entry
             ) as process_entry:
                 exit_code = pre_model.main([str(day_dir), "--limit", "2"])
@@ -353,7 +478,9 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
                 self.assertTrue(pre_model.build_annotation_output_path(output_dir, "cam/a.hif").exists())
                 self.assertTrue(pre_model.build_annotation_output_path(output_dir, "cam/b.hif").exists())
 
-            with mock.patch.object(pre_model, "load_image_entries", return_value=entries), mock.patch.object(
+            with mock.patch.object(pre_model, "VLM_MODELS_CONFIG_PATH", config_path, create=True), mock.patch.object(
+                pre_model, "load_image_entries", return_value=entries
+            ), mock.patch.object(
                 pre_model, "process_entry", side_effect=fake_process_entry
             ) as process_entry:
                 exit_code = pre_model.main([str(day_dir), "--limit", "2"])
@@ -361,7 +488,9 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
                 self.assertEqual(process_entry.call_count, 1)
                 self.assertTrue(pre_model.build_annotation_output_path(output_dir, "cam/c.hif").exists())
 
-            with mock.patch.object(pre_model, "load_image_entries", return_value=entries), mock.patch.object(
+            with mock.patch.object(pre_model, "VLM_MODELS_CONFIG_PATH", config_path, create=True), mock.patch.object(
+                pre_model, "load_image_entries", return_value=entries
+            ), mock.patch.object(
                 pre_model, "process_entry", side_effect=fake_process_entry
             ) as process_entry:
                 exit_code = pre_model.main([str(day_dir), "--limit", "2", "--overwrite"])
@@ -373,7 +502,20 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
             day_dir = Path(tmp_dir) / "20260323"
             workspace_dir = day_dir / "_workspace"
             workspace_dir.mkdir(parents=True)
+            (day_dir / ".vocatio").write_text("PREMODEL_NAME=qwen3.5-4b-pre\n", encoding="utf-8")
             output_dir = workspace_dir / pre_model.DEFAULT_OUTPUT_DIRNAME
+            config_path = self.write_vlm_models_config(
+                """
+models:
+  - PREMODEL_NAME: "qwen3.5-4b-pre"
+    PREMODEL_PROVIDER: "llamacpp"
+    PREMODEL_BASE_URL: "http://127.0.0.1:8002"
+    PREMODEL_MODEL: "test-model"
+    PREMODEL_MAX_OUTPUT_TOKENS: 1024
+    PREMODEL_TEMPERATURE: 0.0
+    PREMODEL_TIMEOUT_SECONDS: 120
+"""
+            )
             entries = [
                 pre_model.ImageEntry(image_path=Path("/tmp/a.jpg"), output_name="a.jpg.txt", source_id="cam/a.hif"),
                 pre_model.ImageEntry(image_path=Path("/tmp/b.jpg"), output_name="b.jpg.txt", source_id="cam/b.hif"),
@@ -388,7 +530,9 @@ class BuildPhotoPreModelAnnotationsTests(unittest.TestCase):
                     )
                 raise json.JSONDecodeError("Expecting ',' delimiter", '{"broken": true "oops"}', 16)
 
-            with mock.patch.object(pre_model, "load_image_entries", return_value=entries), mock.patch.object(
+            with mock.patch.object(pre_model, "VLM_MODELS_CONFIG_PATH", config_path, create=True), mock.patch.object(
+                pre_model, "load_image_entries", return_value=entries
+            ), mock.patch.object(
                 pre_model, "process_entry", side_effect=fake_process_entry
             ) as process_entry, mock.patch.object(pre_model.console, "print") as console_print:
                 exit_code = pre_model.main([str(day_dir), "--limit", "2", "--workers", "2"])

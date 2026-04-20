@@ -21,6 +21,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from lib import manual_vlm_models
 from lib.caption_scene_common import (
     DEFAULT_IMAGE_COLUMN,
     ImageEntry,
@@ -53,6 +54,15 @@ DEFAULT_TEMPERATURE = 0.0
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_WORKERS = 1
 DEFAULT_PROVIDER = "llamacpp"
+VLM_MODELS_CONFIG_PATH = Path(__file__).resolve().parents[2] / "conf" / "vlm_models.yaml"
+PREMODEL_WORKFLOW_CONFIG_KEYS = frozenset(
+    {
+        "PREMODEL_PHOTO_INDEX",
+        "PREMODEL_IMAGE_COLUMN",
+        "PREMODEL_OUTPUT_DIR",
+        "PREMODEL_WORKERS",
+    }
+)
 
 
 def build_progress_columns() -> tuple[object, ...]:
@@ -104,6 +114,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.Namespace:
     config = load_vocatio_config(day_dir)
 
+    supported_keys = set(manual_vlm_models.PREMODEL_MODEL_FIELDS)
+    supported_keys.update(PREMODEL_WORKFLOW_CONFIG_KEYS)
+    unsupported_keys = sorted(
+        key
+        for key in config
+        if key.startswith("PREMODEL_") and key not in supported_keys
+    )
+    if unsupported_keys:
+        raise ValueError(
+            "unsupported PREMODEL config key(s) in .vocatio: "
+            + ", ".join(unsupported_keys)
+        )
+    loaded = manual_vlm_models.load_manual_vlm_models(VLM_MODELS_CONFIG_PATH)
+    preset_config = manual_vlm_models.resolve_premodel_model_config(loaded.models, config)
+
     def apply_string(attr: str, default_value: str, config_key: str) -> None:
         if getattr(args, attr) == default_value:
             configured = str(config.get(config_key, "") or "").strip()
@@ -116,21 +141,15 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
             if configured:
                 setattr(args, attr, positive_int_arg(configured))
 
-    def apply_float(attr: str, default_value: float, config_key: str) -> None:
-        if getattr(args, attr) == default_value:
-            configured = str(config.get(config_key, "") or "").strip()
-            if configured:
-                setattr(args, attr, float(configured))
-
-    apply_string("provider", DEFAULT_PROVIDER, "PREMODEL_PROVIDER")
+    args.provider = str(preset_config["PREMODEL_PROVIDER"])
+    args.base_url = str(preset_config["PREMODEL_BASE_URL"])
+    args.model_name = str(preset_config["PREMODEL_MODEL"])
+    args.max_tokens = int(preset_config["PREMODEL_MAX_OUTPUT_TOKENS"])
+    args.temperature = float(preset_config["PREMODEL_TEMPERATURE"])
+    args.timeout_seconds = float(preset_config["PREMODEL_TIMEOUT_SECONDS"])
     apply_string("photo_index", DEFAULT_PHOTO_INDEX, "PREMODEL_PHOTO_INDEX")
     apply_string("image_column", DEFAULT_IMAGE_COLUMN, "PREMODEL_IMAGE_COLUMN")
     apply_string("output_dir", DEFAULT_OUTPUT_DIRNAME, "PREMODEL_OUTPUT_DIR")
-    apply_string("base_url", DEFAULT_BASE_URL, "PREMODEL_BASE_URL")
-    apply_string("model_name", DEFAULT_MODEL_NAME, "PREMODEL_MODEL")
-    apply_int("max_tokens", DEFAULT_MAX_TOKENS, "PREMODEL_MAX_OUTPUT_TOKENS")
-    apply_float("temperature", DEFAULT_TEMPERATURE, "PREMODEL_TEMPERATURE")
-    apply_float("timeout_seconds", DEFAULT_TIMEOUT_SECONDS, "PREMODEL_TIMEOUT_SECONDS")
     apply_int("workers", DEFAULT_WORKERS, "PREMODEL_WORKERS")
     return args
 

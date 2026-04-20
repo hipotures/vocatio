@@ -23,6 +23,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from lib import manual_vlm_models
 from lib.image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1
 from lib.ml_boundary_dataset import normalize_timestamp
 from lib.ml_boundary_features import build_candidate_feature_row
@@ -77,6 +78,21 @@ DEFAULT_JSON_VALIDATION_MODE = "strict"
 DEFAULT_PHOTO_PRE_MODEL_DIR = DEFAULT_PHOTO_PRE_MODEL_DIRNAME
 DEFAULT_PROVIDER = "ollama"
 DEFAULT_ML_MODEL_RUN_ID = ""
+VLM_MODELS_CONFIG_PATH = Path(__file__).resolve().parents[2] / "conf" / "vlm_models.yaml"
+VLM_WORKFLOW_CONFIG_KEYS = frozenset(
+    {
+        "VLM_EMBEDDED_MANIFEST_CSV",
+        "VLM_PHOTO_MANIFEST_CSV",
+        "VLM_IMAGE_VARIANT",
+        "VLM_WINDOW_RADIUS",
+        "VLM_BOUNDARY_GAP_SECONDS",
+        "VLM_MAX_BATCHES",
+        "VLM_PHOTO_PRE_MODEL_DIR",
+        "VLM_ML_MODEL_RUN_ID",
+        "VLM_DUMP_DEBUG_DIR",
+    }
+)
+VLM_IGNORED_LEGACY_CONFIG_KEYS = frozenset({"VLM_WINDOW_SIZE", "VLM_OVERLAP"})
 SEGMENT_TYPES = ("dance", "ceremony", "audience", "rehearsal", "other")
 ML_SEGMENT_TYPE_TO_PROMPT_LABEL = {
     "performance": "dance",
@@ -494,8 +510,31 @@ def read_photo_manifest(path: Path) -> Dict[str, Dict[str, str]]:
     return {str(row["relative_path"]): row for row in rows}
 
 
+def _validate_supported_vlm_config_keys(config: Mapping[str, str]) -> None:
+    supported_keys = set(manual_vlm_models.VLM_MODEL_FIELDS)
+    supported_keys.update(VLM_WORKFLOW_CONFIG_KEYS)
+    supported_keys.update(VLM_IGNORED_LEGACY_CONFIG_KEYS)
+    unsupported_keys = sorted(
+        key
+        for key in config
+        if key.startswith("VLM_") and key not in supported_keys
+    )
+    if unsupported_keys:
+        raise ValueError(
+            "unsupported VLM config key(s) in .vocatio: "
+            + ", ".join(unsupported_keys)
+        )
+
+
+def _resolve_vlm_preset_config(config: Mapping[str, str]) -> Mapping[str, Any]:
+    _validate_supported_vlm_config_keys(config)
+    loaded = manual_vlm_models.load_manual_vlm_models(VLM_MODELS_CONFIG_PATH)
+    return manual_vlm_models.resolve_vlm_model_config(loaded.models, config)
+
+
 def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.Namespace:
     config = load_vocatio_config(day_dir)
+    preset_config = _resolve_vlm_preset_config(config)
 
     def apply_string(attr: str, default_value: str, config_key: str) -> None:
         if getattr(args, attr) == default_value:
@@ -503,25 +542,23 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
             if configured:
                 setattr(args, attr, configured)
 
-    def apply_optional_int(attr: str, config_key: str) -> None:
-        if getattr(args, attr) is None:
-            configured = str(config.get(config_key, "") or "").strip()
-            if configured:
-                setattr(args, attr, positive_int_arg(configured))
-
     def apply_int(attr: str, default_value: int, config_key: str, parser) -> None:
         if getattr(args, attr) == default_value:
             configured = str(config.get(config_key, "") or "").strip()
             if configured:
                 setattr(args, attr, parser(configured))
 
-    def apply_float(attr: str, default_value: float, config_key: str) -> None:
-        if getattr(args, attr) == default_value:
-            configured = str(config.get(config_key, "") or "").strip()
-            if configured:
-                setattr(args, attr, non_negative_float_arg(configured))
-
-    apply_string("provider", DEFAULT_PROVIDER, "VLM_PROVIDER")
+    args.provider = str(preset_config["VLM_PROVIDER"])
+    args.model = str(preset_config["VLM_MODEL"])
+    args.ollama_base_url = str(preset_config["VLM_BASE_URL"])
+    args.ollama_num_ctx = int(preset_config["VLM_CONTEXT_TOKENS"])
+    args.ollama_num_predict = int(preset_config["VLM_MAX_OUTPUT_TOKENS"])
+    args.ollama_keep_alive = str(preset_config["VLM_KEEP_ALIVE"])
+    args.timeout_seconds = float(preset_config["VLM_TIMEOUT_SECONDS"])
+    args.temperature = float(preset_config["VLM_TEMPERATURE"])
+    args.ollama_think = str(preset_config["VLM_REASONING_LEVEL"])
+    args.response_schema_mode = str(preset_config["VLM_RESPONSE_SCHEMA_MODE"])
+    args.json_validation_mode = str(preset_config["VLM_JSON_VALIDATION_MODE"])
     apply_string("embedded_manifest_csv", PHOTO_EMBEDDED_MANIFEST_FILENAME, "VLM_EMBEDDED_MANIFEST_CSV")
     apply_string("photo_manifest_csv", PHOTO_MANIFEST_FILENAME, "VLM_PHOTO_MANIFEST_CSV")
     apply_string("image_variant", DEFAULT_IMAGE_VARIANT, "VLM_IMAGE_VARIANT")
@@ -533,16 +570,6 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
         non_negative_int_arg,
     )
     apply_int("max_batches", DEFAULT_MAX_BATCHES, "VLM_MAX_BATCHES", max_batches_arg)
-    apply_string("model", DEFAULT_MODEL_NAME, "VLM_MODEL")
-    apply_string("ollama_base_url", DEFAULT_OLLAMA_BASE_URL, "VLM_BASE_URL")
-    apply_optional_int("ollama_num_ctx", "VLM_CONTEXT_TOKENS")
-    apply_optional_int("ollama_num_predict", "VLM_MAX_OUTPUT_TOKENS")
-    apply_string("ollama_keep_alive", DEFAULT_OLLAMA_KEEP_ALIVE, "VLM_KEEP_ALIVE")
-    apply_float("timeout_seconds", DEFAULT_TIMEOUT_SECONDS, "VLM_TIMEOUT_SECONDS")
-    apply_float("temperature", DEFAULT_TEMPERATURE, "VLM_TEMPERATURE")
-    apply_string("ollama_think", DEFAULT_OLLAMA_THINK, "VLM_REASONING_LEVEL")
-    apply_string("response_schema_mode", DEFAULT_RESPONSE_SCHEMA_MODE, "VLM_RESPONSE_SCHEMA_MODE")
-    apply_string("json_validation_mode", DEFAULT_JSON_VALIDATION_MODE, "VLM_JSON_VALIDATION_MODE")
     apply_string("photo_pre_model_dir", DEFAULT_PHOTO_PRE_MODEL_DIR, "VLM_PHOTO_PRE_MODEL_DIR")
     apply_string("ml_model_run_id", DEFAULT_ML_MODEL_RUN_ID, "VLM_ML_MODEL_RUN_ID")
     if args.dump_debug_dir is None:
