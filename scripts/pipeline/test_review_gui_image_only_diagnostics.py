@@ -518,9 +518,17 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             {"VLM_NAME": "Preset B"},
         ]
         window.manual_vlm_models_md5 = "abc"
+        section_config = review_gui.build_manual_vlm_analyze_section_config(window)
 
-        section = review_gui.build_manual_vlm_analyze_section(window)
+        section = review_gui.build_manual_vlm_analyze_section(
+            window.manual_vlm_analyze_state,
+            preset_names=section_config["preset_names"],
+            selected_name=section_config["selected_name"],
+            description=section_config["description"],
+            on_choice_changed=section_config["on_choice_changed"],
+        )
 
+        self.assertIsNone(window.manual_vlm_selected_name)
         self.assertEqual(section["choice_items"], ["Preset A", "Preset B"])
         self.assertEqual(section["choice_value"], "Preset A")
         self.assertTrue(section["choice_enabled"])
@@ -531,8 +539,15 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.manual_vlm_models = []
         window.manual_vlm_models_error = "Model config error: bad yaml"
         window.run_manual_vlm_analyze = Mock()
+        section_config = review_gui.build_manual_vlm_analyze_section_config(window)
 
-        section = review_gui.build_manual_vlm_analyze_section(window)
+        section = review_gui.build_manual_vlm_analyze_section(
+            window.manual_vlm_analyze_state,
+            preset_names=section_config["preset_names"],
+            selected_name=section_config["selected_name"],
+            description=section_config["description"],
+            on_choice_changed=section_config["on_choice_changed"],
+        )
         widget = window.build_info_section_widget(section)
         self.addCleanup(widget.deleteLater)
         widget.show()
@@ -1389,7 +1404,14 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             {"VLM_NAME": "Preset A"},
             {"VLM_NAME": "Preset B"},
         ]
-        section = review_gui.build_manual_vlm_analyze_section(window)
+        section_config = review_gui.build_manual_vlm_analyze_section_config(window)
+        section = review_gui.build_manual_vlm_analyze_section(
+            window.manual_vlm_analyze_state,
+            preset_names=section_config["preset_names"],
+            selected_name=section_config["selected_name"],
+            description=section_config["description"],
+            on_choice_changed=section_config["on_choice_changed"],
+        )
 
         widget = window.build_info_section_widget(section)
         self.addCleanup(widget.deleteLater)

@@ -1333,18 +1333,42 @@ def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
     return join_info_section_lines(lines)
 
 
+def build_manual_vlm_analyze_section_config(window: object) -> Dict[str, Any]:
+    preset_names = [
+        str(model.get("VLM_NAME", "") or "").strip()
+        for model in getattr(window, "manual_vlm_models", [])
+        if str(model.get("VLM_NAME", "") or "").strip()
+    ]
+    configured_name = str(getattr(window, "manual_vlm_selected_name", "") or "").strip()
+    selected_name = configured_name if configured_name in preset_names else (preset_names[0] if preset_names else None)
+    description = (
+        str(getattr(window, "manual_vlm_models_error", "") or "").strip()
+        or "Ephemeral runtime state for manual VLM boundary analysis."
+    )
+    return {
+        "preset_names": preset_names,
+        "selected_name": selected_name,
+        "description": description,
+        "on_choice_changed": lambda value: setattr(window, "manual_vlm_selected_name", str(value).strip() or None),
+    }
+
+
 def build_manual_vlm_analyze_section(
-    manual_vlm_analyze_state: Optional[object],
+    manual_vlm_analyze_state: Optional[Mapping[str, Any]],
     *,
+    preset_names: Optional[Sequence[str]] = None,
+    selected_name: Optional[str] = None,
+    description: str = "Ephemeral runtime state for manual VLM boundary analysis.",
+    on_choice_changed: Optional[Callable[[str], None]] = None,
     action_locked: bool = False,
     show_spinner: bool = False,
 ) -> Dict[str, Any]:
-    window = None if isinstance(manual_vlm_analyze_state, Mapping) or manual_vlm_analyze_state is None else manual_vlm_analyze_state
-    if window is None:
-        state = dict(manual_vlm_analyze_state or {})
+    if manual_vlm_analyze_state is None:
+        state = {}
+    elif isinstance(manual_vlm_analyze_state, Mapping):
+        state = dict(manual_vlm_analyze_state)
     else:
-        current_state = getattr(window, "manual_vlm_analyze_state", None)
-        state = dict(current_state or {}) if isinstance(current_state, Mapping) else {}
+        raise TypeError("manual_vlm_analyze_state must be a mapping or None")
     status = str(state.get("status", "") or "idle").strip().lower() or "idle"
     resolution_error = str(state.get("resolution_error", "") or "").strip()
     error_text = str(state.get("error", "") or "").strip()
@@ -1362,24 +1386,10 @@ def build_manual_vlm_analyze_section(
     else:
         lines.append("Analyze run not started.")
     append_info_block(lines, build_manual_vlm_debug_lines(state.get("debug_file_paths", [])))
-    preset_names = []
-    selected_name = None
-    description = "Ephemeral runtime state for manual VLM boundary analysis."
-    on_choice_changed = None
-    if window is not None:
-        preset_names = [
-            str(model.get("VLM_NAME", "") or "").strip()
-            for model in getattr(window, "manual_vlm_models", [])
-            if str(model.get("VLM_NAME", "") or "").strip()
-        ]
-        configured_name = str(getattr(window, "manual_vlm_selected_name", "") or "").strip()
-        if configured_name in preset_names:
-            selected_name = configured_name
-        elif preset_names:
-            selected_name = preset_names[0]
-            window.manual_vlm_selected_name = selected_name
-        description = str(getattr(window, "manual_vlm_models_error", "") or "").strip() or description
-        on_choice_changed = lambda value: setattr(window, "manual_vlm_selected_name", str(value).strip() or None)
+    normalized_preset_names = [str(name).strip() for name in (preset_names or []) if str(name).strip()]
+    normalized_selected_name = str(selected_name or "").strip() or None
+    if normalized_selected_name not in normalized_preset_names:
+        normalized_selected_name = normalized_preset_names[0] if normalized_preset_names else None
     active_action_locked = status == "running" or action_locked
     section = build_info_section(
         "Manual VLM analyze",
@@ -1387,13 +1397,13 @@ def build_manual_vlm_analyze_section(
         join_info_section_lines(lines),
         key="manual_vlm_analyze",
     )
-    section["choice_items"] = preset_names
-    section["choice_value"] = selected_name
-    section["choice_enabled"] = bool(preset_names) and not active_action_locked
+    section["choice_items"] = normalized_preset_names
+    section["choice_value"] = normalized_selected_name
+    section["choice_enabled"] = bool(normalized_preset_names) and not active_action_locked
     section["on_choice_changed"] = on_choice_changed
     section["action_key"] = "run_manual_vlm_analyze"
     section["action_text"] = "Analyze"
-    section["action_enabled"] = bool(preset_names) and selected_name is not None and not active_action_locked
+    section["action_enabled"] = bool(normalized_preset_names) and normalized_selected_name is not None and not active_action_locked
     section["action_show_spinner"] = show_spinner or status == "running"
     return section
 
@@ -1604,6 +1614,11 @@ def append_manual_runtime_sections(
     active_action_key: str = "",
 ) -> List[Dict[str, Any]]:
     normalized_active_action_key = str(active_action_key or "").strip()
+    manual_vlm_section_config = (
+        build_manual_vlm_analyze_section_config(manual_vlm_section_source)
+        if manual_vlm_section_source is not None
+        else {}
+    )
     if show_manual_ml_prediction:
         sections.append(
             build_manual_ml_prediction_section(
@@ -1616,7 +1631,12 @@ def append_manual_runtime_sections(
     if show_manual_vlm_analyze:
         sections.append(
             build_manual_vlm_analyze_section(
-                manual_vlm_section_source if manual_vlm_section_source is not None else manual_vlm_analyze_state,
+                manual_vlm_analyze_state,
+                preset_names=manual_vlm_section_config.get("preset_names"),
+                selected_name=manual_vlm_section_config.get("selected_name"),
+                description=str(manual_vlm_section_config.get("description", "") or "")
+                or "Ephemeral runtime state for manual VLM boundary analysis.",
+                on_choice_changed=manual_vlm_section_config.get("on_choice_changed"),
                 action_locked=bool(normalized_active_action_key)
                 and normalized_active_action_key != "run_manual_vlm_analyze",
                 show_spinner=normalized_active_action_key == "run_manual_vlm_analyze",
@@ -2193,7 +2213,7 @@ class MainWindow(QMainWindow):
         self.manual_vlm_models_md5: Optional[str] = None
         self.manual_vlm_models_error: Optional[str] = None
         self.manual_vlm_selected_name: Optional[str] = None
-        self.reload_manual_vlm_models(startup=True)
+        self.reload_manual_vlm_models()
         self.thread_pool = QThreadPool.globalInstance()
         self.manual_action_running_key: Optional[str] = None
         self.manual_action_workers: Dict[str, QRunnable] = {}
@@ -3676,7 +3696,7 @@ class MainWindow(QMainWindow):
         )
         self.show_single_preview(photo["proxy_path"], "Selected")
 
-    def reload_manual_vlm_models(self, startup: bool = False) -> None:
+    def reload_manual_vlm_models(self) -> None:
         models, md5_hex, error_text = load_manual_vlm_models_for_gui(REPO_ROOT)
         self.manual_vlm_models = models
         self.manual_vlm_models_md5 = md5_hex
