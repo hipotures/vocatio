@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from unittest.mock import Mock
 
 from PySide6.QtCore import Qt
@@ -135,6 +136,12 @@ def bind_manual_action_methods(window) -> None:
 
 
 class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
+    def test_manual_vlm_gui_uses_new_models_path(self) -> None:
+        self.assertEqual(
+            review_gui.MANUAL_VLM_MODELS_PATH,
+            Path("conf/vlm_models.yaml"),
+        )
+
     def write_csv(self, path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -640,7 +647,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
     def test_load_manual_vlm_models_for_gui_returns_config_error_for_invalid_yaml(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = Path(temp_dir)
-            config_path = repo_root / "conf" / "manual_vlm_models.yaml"
+            config_path = repo_root / "conf" / "vlm_models.yaml"
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text("models: [\n", encoding="utf-8")
 
@@ -654,7 +661,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
     def test_main_window_init_loads_startup_manual_vlm_preset_from_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = Path(temp_dir)
-            config_path = repo_root / "conf" / "manual_vlm_models.yaml"
+            config_path = repo_root / "conf" / "vlm_models.yaml"
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(
                 "\n".join(
@@ -707,6 +714,20 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIsNotNone(window.manual_vlm_models_md5)
         self.assertIsNone(window.manual_vlm_models_error)
         self.assertEqual(window.manual_vlm_selected_name, "Preset B")
+
+    def test_repo_example_uses_only_new_vlm_models_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            (repo_root / "conf").mkdir(parents=True, exist_ok=True)
+            old_path = repo_root / "conf" / "manual_vlm_models.yaml"
+            old_path.write_text("models: [\n", encoding="utf-8")
+
+            with mock.patch.object(review_gui, "REPO_ROOT", repo_root):
+                models, md5_hex, error_text = review_gui.load_manual_vlm_models_for_gui(repo_root)
+
+        self.assertEqual(models, [])
+        self.assertIsNone(md5_hex)
+        self.assertIn("does not exist", str(error_text))
 
     def test_manual_vlm_analyze_reloads_models_when_md5_changes(self) -> None:
         window = self.build_test_window_with_two_selected_rows()

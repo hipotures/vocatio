@@ -8,7 +8,10 @@ from typing import Any, Mapping, Sequence
 
 import yaml
 
-from scripts.pipeline.lib.vlm_transport import VlmRequest, VlmTransportError, validate_vlm_request
+try:
+    from lib.vlm_transport import VlmRequest, VlmTransportError, validate_vlm_request
+except ModuleNotFoundError:
+    from scripts.pipeline.lib.vlm_transport import VlmRequest, VlmTransportError, validate_vlm_request
 
 
 VLM_MODEL_FIELDS = (

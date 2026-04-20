@@ -137,7 +137,7 @@ LEGACY_INDEX_FILENAMES = (
     "performance_proxy_index.image.json",
 )
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MANUAL_VLM_MODELS_PATH = Path("conf/manual_vlm_models.yaml")
+MANUAL_VLM_MODELS_PATH = Path("conf/vlm_models.yaml")
 MANUAL_VLM_REQUEST_MAX_ATTEMPTS = 3
 MANUAL_VLM_REQUEST_RETRY_DELAY_SECONDS = 5.0
 
