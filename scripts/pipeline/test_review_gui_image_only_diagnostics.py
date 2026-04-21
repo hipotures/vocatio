@@ -244,9 +244,14 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.manual_vlm_models = []
         window.manual_vlm_models_md5 = None
         window.manual_vlm_models_error = None
+        window.manual_vlm_prompt_templates = []
+        window.manual_vlm_prompt_templates_md5 = None
+        window.manual_vlm_prompt_templates_error = None
         window.manual_vlm_status_message = None
         window.manual_vlm_selected_name = None
         window.manual_vlm_selected_window_schema = None
+        window.manual_vlm_selected_prompt_template_id = None
+        window.manual_prediction_day_dir = Mock(return_value=Path("/day"))
         window.selected_photo_entries = Mock(
             return_value=[
                 {"relative_path": "cam/a.jpg", "source_path": "/src/a.jpg"},
@@ -597,8 +602,27 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             {"VLM_NAME": "Preset A"},
             {"VLM_NAME": "Preset B"},
         ]
+        window.manual_vlm_prompt_templates = [
+            {
+                "id": "group_compare_long",
+                "label": "Group Compare Long",
+                "description": "Default long prompt.",
+                "file": "conf/vlm_boundary_prompt.group_compare_long.txt",
+            },
+            {
+                "id": "group_compare_short",
+                "label": "Group Compare Short",
+                "description": "Short prompt.",
+                "file": "conf/vlm_boundary_prompt.group_compare_short.txt",
+            },
+        ]
         window.manual_vlm_models_md5 = "abc"
-        section_config = review_gui.build_manual_vlm_analyze_section_config(window)
+        with mock.patch.object(
+            review_gui,
+            "load_manual_prediction_vocatio_config",
+            return_value={"VLM_PROMPT_TEMPLATE_ID": "group_compare_short"},
+        ):
+            section_config = review_gui.build_manual_vlm_analyze_section_config(window)
 
         section = review_gui.build_manual_vlm_analyze_section(
             window.manual_vlm_analyze_state,
@@ -606,17 +630,24 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             selected_name=section_config["selected_name"],
             window_schema_names=section_config["window_schema_names"],
             selected_window_schema=section_config["selected_window_schema"],
+            prompt_template_ids=section_config["prompt_template_ids"],
+            selected_prompt_template_id=section_config["selected_prompt_template_id"],
+            prompt_template_descriptions=section_config["prompt_template_tooltips"],
             description=section_config["description"],
             on_choice_changed=section_config["on_choice_changed"],
             on_window_schema_changed=section_config["on_window_schema_changed"],
+            on_prompt_template_changed=section_config["on_prompt_template_changed"],
         )
 
         self.assertIsNone(window.manual_vlm_selected_name)
         self.assertIsNone(window.manual_vlm_selected_window_schema)
+        self.assertIsNone(window.manual_vlm_selected_prompt_template_id)
         self.assertEqual(section["choice_items"], ["Preset A", "Preset B"])
         self.assertEqual(section["choice_value"], "Preset A")
         self.assertEqual(section["secondary_choice_items"], list(review_gui.probe_vlm_boundary.window_schema_lib.WINDOW_SCHEMA_VALUES))
         self.assertEqual(section["secondary_choice_value"], review_gui.probe_vlm_boundary.DEFAULT_WINDOW_SCHEMA)
+        self.assertEqual(section["tertiary_choice_items"], ["group_compare_long", "group_compare_short"])
+        self.assertEqual(section["tertiary_choice_value"], "group_compare_short")
         self.assertTrue(section["choice_enabled"])
         self.assertTrue(section["action_enabled"])
 
@@ -633,9 +664,13 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             selected_name=section_config["selected_name"],
             window_schema_names=section_config["window_schema_names"],
             selected_window_schema=section_config["selected_window_schema"],
+            prompt_template_ids=section_config["prompt_template_ids"],
+            selected_prompt_template_id=section_config["selected_prompt_template_id"],
+            prompt_template_descriptions=section_config["prompt_template_tooltips"],
             description=section_config["description"],
             on_choice_changed=section_config["on_choice_changed"],
             on_window_schema_changed=section_config["on_window_schema_changed"],
+            on_prompt_template_changed=section_config["on_prompt_template_changed"],
         )
         widget = window.build_info_section_widget(section)
         self.addCleanup(widget.deleteLater)
@@ -648,6 +683,53 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual([button.text() for button in buttons], ["Manual VLM analyze", "Analyze"])
         self.assertFalse(buttons[1].isEnabled())
         self.assertIn("Model config error: bad yaml", [label.text() for label in labels])
+
+    def test_manual_vlm_section_widget_renders_third_dropdown(self):
+        window = self.build_test_window_with_two_selected_rows()
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        window.manual_vlm_prompt_templates = [
+            {
+                "id": "group_compare_long",
+                "label": "Group Compare Long",
+                "description": "Default long prompt.",
+                "file": "conf/vlm_boundary_prompt.group_compare_long.txt",
+            },
+            {
+                "id": "group_compare_short",
+                "label": "Group Compare Short",
+                "description": "Short prompt.",
+                "file": "conf/vlm_boundary_prompt.group_compare_short.txt",
+            },
+        ]
+        window.run_manual_vlm_analyze = Mock()
+        section_config = review_gui.build_manual_vlm_analyze_section_config(window)
+
+        section = review_gui.build_manual_vlm_analyze_section(
+            window.manual_vlm_analyze_state,
+            preset_names=section_config["preset_names"],
+            selected_name=section_config["selected_name"],
+            window_schema_names=section_config["window_schema_names"],
+            selected_window_schema=section_config["selected_window_schema"],
+            prompt_template_ids=section_config["prompt_template_ids"],
+            selected_prompt_template_id=section_config["selected_prompt_template_id"],
+            prompt_template_descriptions=section_config["prompt_template_tooltips"],
+            description=section_config["description"],
+            on_choice_changed=section_config["on_choice_changed"],
+            on_window_schema_changed=section_config["on_window_schema_changed"],
+            on_prompt_template_changed=section_config["on_prompt_template_changed"],
+        )
+        widget = window.build_info_section_widget(section)
+        self.addCleanup(widget.deleteLater)
+        widget.show()
+        TEST_QT_APP.processEvents()
+
+        combos = widget.findChildren(QComboBox)
+
+        self.assertEqual(len(combos), 3)
+        self.assertEqual(combos[0].currentText(), "Preset A")
+        self.assertEqual(combos[1].currentText(), review_gui.probe_vlm_boundary.DEFAULT_WINDOW_SCHEMA)
+        self.assertEqual(combos[2].currentText(), "group_compare_long")
+        self.assertEqual(combos[2].itemData(0, Qt.ToolTipRole), "Group Compare Long: Default long prompt.")
 
     def test_manual_vlm_debug_dir_always_uses_tmp_root(self):
         runtime_args = argparse.Namespace(dump_debug_dir="/tmp/vlm-probe-debug")
@@ -672,6 +754,54 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIsNone(md5_hex)
         self.assertIsNotNone(error_text)
         self.assertIn("Model config error:", error_text)
+
+    def test_load_prompt_templates_for_gui_returns_registry_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            config_path = repo_root / "conf" / "vlm_prompt_templates.yaml"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "templates:",
+                        "  - id: group_compare_long",
+                        "    label: Group Compare Long",
+                        "    file: conf/vlm_boundary_prompt.group_compare_long.txt",
+                        "    description: Default long prompt.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            templates, md5_hex, error_text = review_gui.load_prompt_templates_for_gui(repo_root)
+
+        self.assertEqual(
+            templates,
+            [
+                {
+                    "id": "group_compare_long",
+                    "label": "Group Compare Long",
+                    "file": "conf/vlm_boundary_prompt.group_compare_long.txt",
+                    "description": "Default long prompt.",
+                }
+            ],
+        )
+        self.assertIsNotNone(md5_hex)
+        self.assertIsNone(error_text)
+
+    def test_load_prompt_templates_for_gui_returns_config_error_for_invalid_yaml(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            config_path = repo_root / "conf" / "vlm_prompt_templates.yaml"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text("templates: [\n", encoding="utf-8")
+
+            templates, md5_hex, error_text = review_gui.load_prompt_templates_for_gui(repo_root)
+
+        self.assertEqual(templates, [])
+        self.assertIsNone(md5_hex)
+        self.assertIsNotNone(error_text)
+        self.assertIn("Prompt template config error:", error_text)
 
     def test_main_window_init_loads_startup_manual_vlm_preset_from_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -823,6 +953,33 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(window.manual_vlm_selected_name, "Preset A")
 
+    def test_manual_vlm_prompt_templates_keep_selection_when_id_survives_reload(self) -> None:
+        window = self.build_test_window_with_two_selected_rows()
+        window.manual_vlm_selected_prompt_template_id = "group_compare_short"
+
+        review_gui.apply_reloaded_prompt_templates(
+            window,
+            prompt_templates=[
+                {
+                    "id": "group_compare_long",
+                    "label": "Group Compare Long",
+                    "description": "Default long prompt.",
+                    "file": "conf/vlm_boundary_prompt.group_compare_long.txt",
+                },
+                {
+                    "id": "group_compare_short",
+                    "label": "Group Compare Short",
+                    "description": "Short prompt.",
+                    "file": "conf/vlm_boundary_prompt.group_compare_short.txt",
+                },
+            ],
+            md5_hex="next",
+            message="Prompt templates reloaded from config.",
+        )
+
+        self.assertEqual(window.manual_vlm_selected_prompt_template_id, "group_compare_short")
+        self.assertEqual(window.manual_vlm_status_message, "Prompt templates reloaded from config.")
+
     def test_format_manual_vlm_analyze_result_text_splits_reason_into_blocks(self):
         body = review_gui.format_manual_vlm_analyze_result_text(
             {
@@ -859,6 +1016,9 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     "window_schema": "random",
                     "window_schema_seed": 42,
                 },
+                "prompt_template_id": "group_compare_short",
+                "prompt_template_file": "conf/vlm_boundary_prompt.group_compare_short.txt",
+                "response_contract_id": "grouped_v1",
                 "attempt_count": 3,
                 "succeeded_on_attempt": 3,
             }
@@ -882,6 +1042,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("  VLM_WINDOW_RADIUS: 3", body)
         self.assertIn("  VLM_WINDOW_SCHEMA: random", body)
         self.assertIn("  VLM_WINDOW_SCHEMA_SEED: 42", body)
+        self.assertIn("Prompt config:", body)
+        self.assertIn("  VLM_PROMPT_TEMPLATE_ID: group_compare_short", body)
+        self.assertIn("  VLM_PROMPT_TEMPLATE_FILE: conf/vlm_boundary_prompt.group_compare_short.txt", body)
+        self.assertIn("  response_contract_id: grouped_v1", body)
         self.assertIn("Attempts: 3", body)
         self.assertIn("Succeeded on attempt: 3", body)
 
@@ -973,6 +1137,9 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     "window_schema": "random",
                     "window_schema_seed": 42,
                 },
+                "prompt_template_id": "group_compare_short",
+                "prompt_template_file": "conf/vlm_boundary_prompt.group_compare_short.txt",
+                "response_contract_id": "grouped_v1",
                 "attempt_count": 3,
             }
         )
@@ -981,6 +1148,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("  VLM_WINDOW_RADIUS: 3", section["body"])
         self.assertIn("  VLM_WINDOW_SCHEMA: random", section["body"])
         self.assertIn("  VLM_WINDOW_SCHEMA_SEED: 42", section["body"])
+        self.assertIn("Prompt config:", section["body"])
+        self.assertIn("  VLM_PROMPT_TEMPLATE_ID: group_compare_short", section["body"])
+        self.assertIn("  VLM_PROMPT_TEMPLATE_FILE: conf/vlm_boundary_prompt.group_compare_short.txt", section["body"])
+        self.assertIn("  response_contract_id: grouped_v1", section["body"])
 
     def test_manual_ml_prediction_section_renders_left_right_and_boundary(self):
         state = review_gui.build_manual_ml_prediction_section(
@@ -1810,6 +1981,57 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         TEST_QT_APP.processEvents()
         self.assertEqual(window.manual_vlm_selected_window_schema, "random")
 
+    def test_build_info_section_widget_renders_manual_vlm_prompt_template_combo_and_updates_selection(self):
+        window = self.build_test_window_with_two_selected_rows()
+        window.run_manual_vlm_analyze = Mock()
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        window.manual_vlm_prompt_templates = [
+            {
+                "id": "group_compare_long",
+                "label": "Group Compare Long",
+                "description": "Default long prompt.",
+                "file": "conf/vlm_boundary_prompt.group_compare_long.txt",
+            },
+            {
+                "id": "group_compare_short",
+                "label": "Group Compare Short",
+                "description": "Short prompt.",
+                "file": "conf/vlm_boundary_prompt.group_compare_short.txt",
+            },
+        ]
+        section_config = review_gui.build_manual_vlm_analyze_section_config(window)
+        section = review_gui.build_manual_vlm_analyze_section(
+            window.manual_vlm_analyze_state,
+            preset_names=section_config["preset_names"],
+            selected_name=section_config["selected_name"],
+            window_schema_names=section_config["window_schema_names"],
+            selected_window_schema=section_config["selected_window_schema"],
+            prompt_template_ids=section_config["prompt_template_ids"],
+            selected_prompt_template_id=section_config["selected_prompt_template_id"],
+            prompt_template_descriptions=section_config["prompt_template_tooltips"],
+            description=section_config["description"],
+            on_choice_changed=section_config["on_choice_changed"],
+            on_window_schema_changed=section_config["on_window_schema_changed"],
+            on_prompt_template_changed=section_config["on_prompt_template_changed"],
+        )
+
+        widget = window.build_info_section_widget(section)
+        self.addCleanup(widget.deleteLater)
+        widget.show()
+        TEST_QT_APP.processEvents()
+
+        prompt_combo = widget.findChild(QComboBox, "infoSectionTertiaryChoiceCombo")
+        self.assertIsNotNone(prompt_combo)
+        self.assertEqual(
+            [prompt_combo.itemText(index) for index in range(prompt_combo.count())],
+            ["group_compare_long", "group_compare_short"],
+        )
+        self.assertEqual(prompt_combo.currentText(), "group_compare_long")
+
+        prompt_combo.setCurrentText("group_compare_short")
+        TEST_QT_APP.processEvents()
+        self.assertEqual(window.manual_vlm_selected_prompt_template_id, "group_compare_short")
+
     def test_manual_vlm_choice_uses_description_as_combobox_tooltip(self):
         window = self.build_test_window_with_two_selected_rows()
         section = review_gui.build_manual_vlm_analyze_section(
@@ -2601,6 +2823,54 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             window.run_manual_vlm_analyze()
 
         reload_mock.assert_called_once_with()
+
+    def test_build_manual_vlm_analyze_work_fn_snapshots_selected_prompt_template_id(self) -> None:
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.workspace_dir = Path("/workspace")
+        window.payload = {"day": "20260323"}
+        window.manual_prediction_day_dir = Mock(return_value=Path("/day"))
+        window.manual_vlm_selected_window_schema = "consecutive"
+        window.manual_vlm_selected_prompt_template_id = "group_compare_short"
+        bind_manual_action_methods(window)
+
+        selected_photos = [
+            {"relative_path": "cam/a.jpg", "source_path": "/src/a.jpg"},
+            {"relative_path": "cam/b.jpg", "source_path": "/src/b.jpg"},
+        ]
+
+        with unittest.mock.patch.object(
+            review_gui,
+            "reload_probe_vlm_boundary_module",
+        ), unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_vlm_analyze_state",
+            return_value={
+                "status": "idle",
+                "window_config": {"window_radius": 2},
+                "anchor_pair": {
+                    "left_relative_path": "cam/a.jpg",
+                    "right_relative_path": "cam/b.jpg",
+                },
+            },
+        ) as resolve_mock, unittest.mock.patch.object(
+            review_gui,
+            "compute_manual_vlm_analyze_result",
+            return_value={"result_text": "ok", "prompt_template_id": "group_compare_short"},
+        ) as compute_mock, unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_joined_rows",
+            return_value=[],
+        ):
+            work_fn = window.build_manual_vlm_analyze_work_fn(
+                selected_photos,
+                {"VLM_NAME": "Preset A"},
+            )
+            window.manual_vlm_selected_prompt_template_id = "group_compare_long"
+            result = work_fn()
+
+        self.assertEqual(resolve_mock.call_args.kwargs["selected_prompt_template_id"], "group_compare_short")
+        self.assertEqual(compute_mock.call_args.kwargs["selected_prompt_template_id"], "group_compare_short")
+        self.assertEqual(result["prompt_template_id"], "group_compare_short")
 
     def test_run_manual_ml_prediction_reload_failure_sets_error_without_downstream_work(self):
         window = review_gui.MainWindow.__new__(review_gui.MainWindow)
