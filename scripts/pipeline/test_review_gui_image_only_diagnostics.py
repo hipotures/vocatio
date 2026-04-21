@@ -1090,7 +1090,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
 
         self.assertIn("Decision: different_segments", body)
-        self.assertIn("Compatibility decision: cut_after_3", body)
+        self.assertNotIn("Compatibility decision:", body)
         self.assertIn("Segments: dance -> rehearsal", body)
         self.assertIn("Reasoning:", body)
         self.assertIn("  Left segment type: dance", body)
@@ -1256,7 +1256,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(result["semantic_decision"], "different_segments")
         self.assertEqual(result["compatibility_decision"], "cut_after_1")
         self.assertIn("Decision: different_segments", result["result_text"])
-        self.assertIn("Compatibility decision: cut_after_1", result["result_text"])
+        self.assertNotIn("Compatibility decision:", result["result_text"])
         self.assertIn("  response_contract_id: grouped_v1", result["result_text"])
 
     def test_format_manual_vlm_analyze_result_text_preserves_model_config_order(self):

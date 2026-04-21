@@ -1965,12 +1965,9 @@ def format_manual_vlm_reason_lines(reason: str, summary: str) -> List[str]:
 
 def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
     decision = str(result.get("decision", "") or "").strip()
-    compatibility_decision = str(result.get("compatibility_decision", "") or "").strip()
     semantic_lines = [
         f"Decision: {format_value(decision)}",
     ]
-    if compatibility_decision and compatibility_decision != decision:
-        semantic_lines.append(f"Compatibility decision: {compatibility_decision}")
     left_segment_type = str(result.get("left_segment_type", "") or "").strip()
     right_segment_type = str(result.get("right_segment_type", "") or "").strip()
     if left_segment_type or right_segment_type:
