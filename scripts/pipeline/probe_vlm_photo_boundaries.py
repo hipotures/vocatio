@@ -1877,6 +1877,8 @@ def build_result_row(
     model: str = DEFAULT_MODEL_NAME,
     temperature: float = DEFAULT_TEMPERATURE,
     global_row_numbers: Optional[Sequence[int]] = None,
+    candidate_cut_relative_paths: Optional[tuple[str, str]] = None,
+    candidate_cut_global_row: Optional[int] = None,
 ) -> Dict[str, str]:
     decision = str(parsed_response["decision"])
     cut_after_local_index = ""
@@ -1889,9 +1891,15 @@ def build_result_row(
     if decision.startswith("cut_after_"):
         cut_after_local_index = decision.removeprefix("cut_after_")
         local_index = int(cut_after_local_index)
-        cut_after_global_row = str(resolved_global_row_numbers[local_index - 1])
-        cut_left_relative_path = str(rows[local_index - 1]["relative_path"])
-        cut_right_relative_path = str(rows[local_index]["relative_path"])
+        response_contract_id = str(parsed_response.get("response_contract_id", "") or "").strip()
+        if response_contract_id == DEFAULT_RESPONSE_CONTRACT_ID and candidate_cut_relative_paths is not None:
+            cut_after_global_row = str(candidate_cut_global_row or "")
+            cut_left_relative_path = str(candidate_cut_relative_paths[0])
+            cut_right_relative_path = str(candidate_cut_relative_paths[1])
+        else:
+            cut_after_global_row = str(resolved_global_row_numbers[local_index - 1])
+            cut_left_relative_path = str(rows[local_index - 1]["relative_path"])
+            cut_right_relative_path = str(rows[local_index]["relative_path"])
     first_epoch_ms = int(str(rows[0]["start_epoch_ms"]))
     previous_epoch_ms = first_epoch_ms
     delta_from_first_seconds: List[int] = []
@@ -2880,6 +2888,14 @@ def probe_vlm_photo_boundaries(
             )
             raw_response = str(analysis["raw_response"])
             parsed_response = analysis["parsed_response"]
+            candidate_cut_relative_paths = None
+            candidate_cut_global_row = None
+            if 0 <= cut_index < len(joined_rows) - 1:
+                candidate_cut_relative_paths = (
+                    str(joined_rows[cut_index]["relative_path"]),
+                    str(joined_rows[cut_index + 1]["relative_path"]),
+                )
+                candidate_cut_global_row = cut_index + 1
             result_row = build_result_row(
                 generated_at=generated_at,
                 run_id=run_id,
@@ -2895,6 +2911,8 @@ def probe_vlm_photo_boundaries(
                 model=model,
                 temperature=temperature,
                 global_row_numbers=global_row_numbers,
+                candidate_cut_relative_paths=candidate_cut_relative_paths,
+                candidate_cut_global_row=candidate_cut_global_row,
             )
             append_result_rows(output_csv, [result_row])
             if str(result_row["decision"]).startswith("cut_after_"):

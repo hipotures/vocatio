@@ -1726,6 +1726,48 @@ models:
         self.assertEqual(row["semantic_group_b_segment_type"], "ceremony")
         self.assertEqual(row["response_contract_id"], "grouped_v1")
 
+    def test_build_result_row_uses_actual_candidate_gap_for_grouped_contract(self) -> None:
+        row = probe.build_result_row(
+            generated_at="2026-04-21T10:00:00+02:00",
+            run_id="vlm-20260421100000",
+            config_hash="abc",
+            image_variant="preview",
+            batch_index=7,
+            start_row=20,
+            end_row=40,
+            rows=[
+                {
+                    "relative_path": "cam/sample-left.jpg",
+                    "filename": "sample-left.jpg",
+                    "image_path": "/tmp/sample-left.jpg",
+                    "start_epoch_ms": "1000",
+                },
+                {
+                    "relative_path": "cam/sample-right.jpg",
+                    "filename": "sample-right.jpg",
+                    "image_path": "/tmp/sample-right.jpg",
+                    "start_epoch_ms": "2000",
+                },
+            ],
+            window_radius=3,
+            raw_response='{"decision":"different_segments"}',
+            parsed_response={
+                "decision": "cut_after_1",
+                "semantic_decision": "different_segments",
+                "semantic_group_a_segment_type": "dance",
+                "semantic_group_b_segment_type": "ceremony",
+                "response_contract_id": "grouped_v1",
+                "reason": "Summary: mismatch",
+                "response_status": "ok",
+            },
+            candidate_cut_relative_paths=("cam/actual-left.jpg", "cam/actual-right.jpg"),
+            candidate_cut_global_row=31,
+        )
+
+        self.assertEqual(row["cut_after_global_row"], "31")
+        self.assertEqual(row["cut_left_relative_path"], "cam/actual-left.jpg")
+        self.assertEqual(row["cut_right_relative_path"], "cam/actual-right.jpg")
+
     def test_build_vlm_request_maps_ollama_fields_to_transport_request(self):
         schema = probe.build_response_schema(group_a_ids=["frame_01"], group_b_ids=["frame_02"])
         with tempfile.TemporaryDirectory() as tmp:

@@ -143,6 +143,16 @@ def resolve_runtime_window_schema_seed(run_metadata: Mapping[str, Any]) -> int:
     return probe.window_schema_lib.parse_window_schema_seed(args.get("window_schema_seed", ""))
 
 
+def resolve_runtime_boundary_gap_seconds(run_metadata: Mapping[str, Any]) -> int:
+    args = run_metadata.get("args")
+    if not isinstance(args, Mapping):
+        return probe.DEFAULT_BOUNDARY_GAP_SECONDS
+    raw_value = str(args.get("boundary_gap_seconds", "") or "").strip()
+    if not raw_value:
+        return probe.DEFAULT_BOUNDARY_GAP_SECONDS
+    return int(raw_value)
+
+
 def resolve_runtime_prompt_template_id(run_metadata: Mapping[str, Any]) -> str:
     args = run_metadata.get("args")
     if not isinstance(args, Mapping):
@@ -156,6 +166,49 @@ def resolve_runtime_prompt_template_id(run_metadata: Mapping[str, Any]) -> str:
 
 def resolve_response_contract_id(run_metadata: Mapping[str, Any]) -> str:
     return str(run_metadata.get("response_contract_id", "") or "").strip()
+
+
+def normalize_grouped_cut_pairs_for_run(
+    *,
+    run_metadata: Mapping[str, Any],
+    ordered_rows: Sequence[Mapping[str, str]],
+    run_rows: Sequence[Mapping[str, str]],
+) -> list[Dict[str, str]]:
+    runtime_window_radius = resolve_runtime_window_radius(run_metadata)
+    boundary_gap_seconds = resolve_runtime_boundary_gap_seconds(run_metadata)
+    if len(ordered_rows) < probe.window_radius_to_window_size(runtime_window_radius):
+        return [dict(row) for row in run_rows]
+    candidate_windows = probe.build_candidate_windows(
+        ordered_rows,
+        window_radius=runtime_window_radius,
+        boundary_gap_seconds=boundary_gap_seconds,
+    )
+    normalized_rows: list[Dict[str, str]] = []
+    for result_row in run_rows:
+        patched_row = dict(result_row)
+        decision = str(patched_row.get("decision", "") or "").strip()
+        response_contract_id = str(
+            patched_row.get("response_contract_id", "") or resolve_response_contract_id(run_metadata)
+        ).strip()
+        if response_contract_id != probe.DEFAULT_RESPONSE_CONTRACT_ID or not decision.startswith("cut_after_"):
+            normalized_rows.append(patched_row)
+            continue
+        try:
+            batch_index = int(str(patched_row.get("batch_index", "") or "").strip())
+        except ValueError:
+            normalized_rows.append(patched_row)
+            continue
+        if batch_index < 1 or batch_index > len(candidate_windows):
+            normalized_rows.append(patched_row)
+            continue
+        cut_index = int(candidate_windows[batch_index - 1]["cut_index"])
+        left_relative_path = str(ordered_rows[cut_index]["relative_path"])
+        right_relative_path = str(ordered_rows[cut_index + 1]["relative_path"])
+        patched_row["cut_left_relative_path"] = left_relative_path
+        patched_row["cut_right_relative_path"] = right_relative_path
+        patched_row["cut_after_global_row"] = str(cut_index + 1)
+        normalized_rows.append(patched_row)
+    return normalized_rows
 
 
 def build_ml_hint_pairs_for_run(
@@ -202,7 +255,6 @@ def build_ml_hint_pairs_for_run(
         }
         candidate_windows: list[tuple[tuple[str, str], list[Mapping[str, str]]]] = []
         seen_pairs: set[tuple[str, str]] = set()
-        expected_window_size = probe.window_radius_to_window_size(runtime_window_radius)
         for result_row in run_rows:
             relative_paths_json = str(result_row.get("relative_paths_json", "") or "").strip()
             if not relative_paths_json:
@@ -216,11 +268,6 @@ def build_ml_hint_pairs_for_run(
             normalized_relative_paths = [str(value or "").strip() for value in relative_paths]
             if any(not value for value in normalized_relative_paths):
                 raise ValueError("run row relative_paths_json must not contain blank relative paths")
-            if len(normalized_relative_paths) != expected_window_size:
-                raise ValueError(
-                    "run row window_radius mismatch: "
-                    f"runtime={runtime_window_radius}, row_frame_count={len(normalized_relative_paths)}"
-                )
             row_window_radius_text = str(result_row.get("window_radius", "") or "").strip()
             if row_window_radius_text:
                 row_window_radius = probe.positive_window_radius_arg(row_window_radius_text)
@@ -275,6 +322,10 @@ def build_ml_hint_pairs_for_run(
                         break
                 if not left_relative_path or not right_relative_path:
                     left_relative_path, right_relative_path = pair
+                expected_window_size = probe.window_radius_to_window_size(runtime_window_radius)
+                if len(candidate_rows) != expected_window_size:
+                    progress.advance(task_id)
+                    continue
                 prediction = probe.predict_ml_hint_for_candidate(
                     ml_hint_context=ml_hint_context,
                     candidate_row=probe._build_ml_candidate_row(
@@ -346,6 +397,11 @@ def build_gui_index_for_run(
     ordered_rows = joined_rows
     if not ordered_rows:
         raise ValueError(f"No joined manifest rows found for run_id={run_id}")
+    run_rows = normalize_grouped_cut_pairs_for_run(
+        run_metadata=run_metadata,
+        ordered_rows=ordered_rows,
+        run_rows=run_rows,
+    )
     payload = probe.build_gui_index_payload(
         day_name=day_dir.name,
         workspace_dir=workspace_dir,
