@@ -3547,6 +3547,10 @@ models:
     def test_dump_debug_artifacts_writes_prompt_request_and_response(self):
         with tempfile.TemporaryDirectory() as tmp:
             debug_dir = Path(tmp)
+            from PIL import Image
+
+            image_path = debug_dir / "sample.jpg"
+            Image.new("RGB", (40, 30), "red").save(image_path)
             probe.dump_debug_artifacts(
                 debug_dir=debug_dir,
                 run_id="20260414_031500",
@@ -3562,16 +3566,24 @@ models:
                     }
                 },
                 error_text=None,
+                photo_sheet_items=[{"label": "a_01 sample.jpg", "image_path": str(image_path)}],
             )
             prompt_path = debug_dir / "vlm_probe_20260414_031500_batch_003_prompt.txt"
             request_path = debug_dir / "vlm_probe_20260414_031500_batch_003_request.json"
             response_path = debug_dir / "vlm_probe_20260414_031500_batch_003_response.json"
+            photos_path = debug_dir / "vlm_probe_20260414_031500_batch_003_photos.jpg"
             self.assertTrue(prompt_path.exists())
             self.assertTrue(request_path.exists())
             self.assertTrue(response_path.exists())
+            self.assertTrue(photos_path.exists())
             self.assertEqual(prompt_path.read_text(encoding="utf-8"), "prompt body")
             self.assertEqual(json.loads(request_path.read_text(encoding="utf-8"))["model"], "qwen3.5:9b")
             self.assertIn('"decision":"no_cut"', json.loads(response_path.read_text(encoding="utf-8"))["message"]["content"])
+            from PIL import Image
+
+            exif = Image.open(photos_path).getexif()
+            self.assertEqual(exif.get(270), "a_01 sample.jpg")
+            self.assertEqual(exif.get(37510), b"a_01 sample.jpg")
 
     def test_dump_debug_artifacts_writes_error_without_response(self):
         with tempfile.TemporaryDirectory() as tmp:

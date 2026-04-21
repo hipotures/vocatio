@@ -1299,6 +1299,13 @@ def compute_manual_vlm_analyze_result(
         reasoning_level=str(runtime_args.ollama_think),
         response_schema=response_schema,
     )
+    photo_sheet_items = [
+        {
+            "label": f"{frame_id} {Path(str(row.get('relative_path', '') or '')).name}",
+            "image_path": str(row.get("image_path", "") or "").strip(),
+        }
+        for frame_id, row in zip([*group_a_ids, *group_b_ids], candidate_rows)
+    ]
     request_payload = probe_vlm_boundary.build_provider_request_payload(request)
     run_id = probe_vlm_boundary.build_run_id()
     debug_dir = resolve_manual_vlm_debug_dir(workspace_dir, runtime_args, run_id)
@@ -1326,6 +1333,7 @@ def compute_manual_vlm_analyze_result(
                 request_payload=request_payload,
                 response_payload=None,
                 error_text=str(exc),
+                photo_sheet_items=photo_sheet_items,
             )
             raise ManualVlmAnalyzeError(
                 str(exc),
@@ -1356,6 +1364,7 @@ def compute_manual_vlm_analyze_result(
                 request_payload=request_payload,
                 response_payload=response_payload,
                 error_text=str(parsed_response.get("reason", "") or "invalid VLM response"),
+                photo_sheet_items=photo_sheet_items,
             )
             raise ManualVlmAnalyzeError(
                 str(parsed_response.get("reason", "") or "invalid VLM response"),
@@ -1369,6 +1378,7 @@ def compute_manual_vlm_analyze_result(
             request_payload=request_payload,
             response_payload=response_payload,
             error_text=None,
+            photo_sheet_items=photo_sheet_items,
         )
         return raw_response, response_payload, parsed_response
 

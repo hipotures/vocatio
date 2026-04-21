@@ -1,0 +1,93 @@
+You will receive {{WINDOW_SIZE}} stage-event photos divided into two groups around one suspected segment boundary.
+
+Group sizes:
+- group_a: {{GROUP_A_COUNT}} photos
+- group_b: {{GROUP_B_COUNT}} photos
+
+Group IDs:
+- group_a: {{GROUP_A_IDS}}
+- group_b: {{GROUP_B_IDS}}
+
+Group mapping:
+{{GROUP_MAPPING}}
+
+Important:
+- The photos are attached in the order shown above.
+- group_a and group_b come from opposite sides of one already suspected boundary.
+- Photos inside each group may be non-consecutive.
+- The two groups may still belong to the same segment.
+- Do not assume that a real boundary exists only because the groups were sampled around a candidate split.
+- Do not search for another internal boundary inside the groups.
+
+Task:
+Decide whether group_a and group_b belong to the same segment or to different segments.
+
+Allowed decision values:
+- same_segment
+- different_segments
+
+Possible segment type labels:
+- dance = active staged dance performance
+- ceremony = awards, medals, result reading, host speaking, or formal presentation
+- audience = viewers, crowd, or audience-facing non-performance shots
+- rehearsal = floor test, stage test, or non-performance rehearsal
+- other = does not clearly fit the categories above
+
+Always assign group_a_segment_type and group_b_segment_type using only:
+{{SEGMENT_TYPES_INLINE}}
+
+Use visual evidence first.
+ML hints are secondary and may be incomplete or wrong.
+
+ML hints:
+{{ML_HINTS_BLOCK}}
+
+Required thinking order:
+- First, mentally identify the visible costume system in group_a.
+- Then, mentally identify the visible costume system in group_b.
+- For each group, pay special attention to visible upper-garment logic, lower-garment logic, sleeve coverage, leg coverage, dominant colors, props, and overall costume silhouette.
+- Then decide whether the two groups show the same costume system, a plausible same-act costume variation, or clearly different costume systems.
+- Only after that, weigh performer identity, segment context, pose, framing, staging, and choreography cues.
+- Do not let pose similarity, floor position, camera angle, or local choreography continuity override a clearly different costume system.
+- Base the final decision on the full set of images in both groups, not on only one especially salient frame.
+
+Decision guidance:
+- Choose same_segment when performer identity, costume identity, and segment context remain consistent across the two groups.
+- Costume identity can remain consistent even if jackets are opened, outer layers are removed, inner garments become visible, or choreography changes the apparent coverage or silhouette.
+- Choose different_segments only when multiple independent cues support a true transition, such as different cast identity, clearly different costume system, clearly different segment type, or a strong scene reset.
+- A pose change, movement phrase change, framing change, crop change, zoom change, lighting change alone, or background change alone is not enough to justify different_segments.
+- A solo image and a wider group image can still be the same segment if performer identity and costume identity remain consistent.
+- Formation changes, spacing changes, or a shift to another choreography phrase are common within the same dance act.
+- If one group is blurry, distant, partially occluded, or visually ambiguous, do not make a strong segment-change claim from fine-grained costume details.
+- Use coarse visible continuity over speculative fine detail.
+- If the evidence is ambiguous, prefer same_segment.
+
+False-positive guards:
+- Do not infer different_segments from opened jackets, removed outer layers, partially revealed inner garments, or costume progression within the same choreography.
+- A newly visible top, shirt, sequined layer, or underlayer is not sufficient evidence of a new segment.
+- The same segment may include costume reveal, jacket opening, outer-layer removal, solo-to-group transitions, or large changes in body pose and choreography phase.
+- Treat "outer layer removed or revealed" as weak evidence unless it is supported by multiple independent cues.
+
+Return exactly one JSON object with this structure:
+{
+  "decision": "<same_segment|different_segments>",
+  "group_a_segment_type": "<{{SEGMENT_TYPES_INLINE}}>",
+  "group_b_segment_type": "<{{SEGMENT_TYPES_INLINE}}>",
+  "frame_notes": {{FRAME_NOTES_JSON_EXAMPLE}},
+  "primary_evidence": [
+    "<short evidence item>",
+    "<short evidence item>"
+  ],
+  "summary": "<one short sentence>"
+}
+
+Rules:
+- Output only valid JSON.
+- Do not output markdown.
+- Do not output any text before or after JSON.
+- frame_notes must include every runtime frame_id exactly once.
+- Keep frame notes short and concrete.
+- primary_evidence must be concrete, observable, and conservative.
+- Do not speculate about hidden garments, unseen cast continuity, or implied act changes.
+- primary_evidence must contain at least one non-empty item.
+- summary must be one short sentence.

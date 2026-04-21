@@ -2119,7 +2119,14 @@ def dump_debug_artifacts(
     request_payload: Mapping[str, Any],
     response_payload: Optional[Mapping[str, Any]],
     error_text: Optional[str],
+    photo_sheet_items: Optional[Sequence[Mapping[str, str]]] = None,
 ) -> None:
+    try:
+        from PIL import Image, ImageDraw, ImageOps
+    except Exception:
+        Image = None
+        ImageDraw = None
+        ImageOps = None
     debug_dir.mkdir(parents=True, exist_ok=True)
     stem = f"vlm_probe_{run_id}_batch_{batch_index:03d}"
     (debug_dir / f"{stem}_prompt.txt").write_text(prompt, encoding="utf-8")
@@ -2134,6 +2141,51 @@ def dump_debug_artifacts(
         )
     if error_text is not None:
         (debug_dir / f"{stem}_error.txt").write_text(error_text, encoding="utf-8")
+    if photo_sheet_items and Image is not None and ImageDraw is not None and ImageOps is not None:
+        thumb_width = 320
+        thumb_height = 240
+        margin = 20
+        label_height = 40
+        columns = 3
+        rows = (len(photo_sheet_items) + columns - 1) // columns
+        sheet_width = columns * thumb_width + (columns + 1) * margin
+        sheet_height = rows * (thumb_height + label_height) + (rows + 1) * margin
+        sheet = Image.new("RGB", (sheet_width, sheet_height), "white")
+        draw = ImageDraw.Draw(sheet)
+        for item_index, item in enumerate(photo_sheet_items):
+            label = str(item.get("label", "") or "").strip()
+            image_path_value = str(item.get("image_path", "") or "").strip()
+            if not image_path_value:
+                continue
+            image_path = Path(image_path_value)
+            if not image_path.exists():
+                continue
+            try:
+                source_image = Image.open(image_path).convert("RGB")
+            except Exception:
+                continue
+            thumbnail = ImageOps.contain(source_image, (thumb_width, thumb_height))
+            tile = Image.new("RGB", (thumb_width, thumb_height), "#dddddd")
+            tile.paste(
+                thumbnail,
+                ((thumb_width - thumbnail.width) // 2, (thumb_height - thumbnail.height) // 2),
+            )
+            column_index = item_index % columns
+            row_index = item_index // columns
+            x = margin + column_index * (thumb_width + margin)
+            y = margin + row_index * (thumb_height + label_height + margin)
+            sheet.paste(tile, (x, y))
+            draw.text((x, y + thumb_height + 8), label, fill="black")
+        mapping_lines = [
+            str(item.get("label", "") or "").strip()
+            for item in photo_sheet_items
+            if str(item.get("label", "") or "").strip()
+        ]
+        mapping_text = "\n".join(mapping_lines)
+        exif = Image.Exif()
+        exif[270] = mapping_text
+        exif[37510] = mapping_text.encode("utf-8")
+        sheet.save(debug_dir / f"{stem}_photos.jpg", quality=90, exif=exif)
 
 
 def build_gui_index_payload(
@@ -2514,6 +2566,13 @@ def run_vlm_window_analysis(
         reasoning_level=reasoning_level,
         response_schema=response_schema,
     )
+    photo_sheet_items = [
+        {
+            "label": f"{frame_id} {Path(str(row.get('relative_path', '') or '')).name}",
+            "image_path": str(row.get("image_path", "") or "").strip(),
+        }
+        for frame_id, row in zip([*group_a_ids, *group_b_ids], window_rows)
+    ]
     request_payload = build_provider_request_payload(request) if debug_dir is not None else None
     try:
         response = run_vlm_request(request)
@@ -2527,6 +2586,7 @@ def run_vlm_window_analysis(
                 request_payload=request_payload or {},
                 response_payload=None,
                 error_text=str(error),
+                photo_sheet_items=photo_sheet_items,
             )
         raise
     if debug_dir is not None:
@@ -2538,6 +2598,7 @@ def run_vlm_window_analysis(
             request_payload=request_payload or {},
             response_payload=response.raw_response,
             error_text=None,
+            photo_sheet_items=photo_sheet_items,
         )
     raw_response = response.text
     parsed_response = parse_model_response(
@@ -2591,6 +2652,7 @@ def run_vlm_window_analysis(
             request_payload=request_payload or {},
             response_payload=response.raw_response,
             error_text=str(parsed_response.get("reason", "") or "invalid VLM response"),
+            photo_sheet_items=photo_sheet_items,
         )
     return {
         "prompt": prompt,

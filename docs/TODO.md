@@ -169,6 +169,18 @@ result = whisperx.align(
 - Keep media identity stable across both flows, with one shared contract for source paths, relative paths, timestamps, and logical ordering.
 - Ensure the shared index can be rebuilt without breaking legacy artifacts already stored under `_workspace`.
 
+## VLM Group-Sheet Experiment
+
+- Evaluate a two-image grouped VLM mode where `group_a` and `group_b` are sent as separate photo sheets instead of six independent images.
+- Keep this as an experiment first; do not replace the current grouped-image flow until quality is verified on difficult boundary cases.
+- Preserve per-frame identity on the sheet itself and in embedded metadata so the grouped rendering remains auditable and debuggable.
+
+## Pre-Model Costume Attributes
+
+- Add a dedicated `hand_accessories` attribute to photo pre-model annotations.
+- Current pre-model costume annotations do not capture gloves explicitly, but gloves are visibly present in some dance photos and can matter for costume-system comparisons.
+- Do not overload `props` or `sleeves` with glove-specific information once `hand_accessories` exists.
+
 ## Review GUI and JSON Contract
 
 - Replace the current free-form naming model in the review GUI with an explicit choice:
