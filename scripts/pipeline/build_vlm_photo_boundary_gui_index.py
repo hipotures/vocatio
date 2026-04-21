@@ -82,8 +82,12 @@ def extract_segment_types(raw_response: str) -> tuple[str, str]:
         payload = json.loads(probe.extract_json_object_text(raw_response))
     except Exception:
         return "", ""
-    left_segment_type = str(payload.get("left_segment_type", "") or "").strip()
-    right_segment_type = str(payload.get("right_segment_type", "") or "").strip()
+    left_segment_type = str(
+        payload.get("group_a_segment_type", payload.get("left_segment_type", "")) or ""
+    ).strip()
+    right_segment_type = str(
+        payload.get("group_b_segment_type", payload.get("right_segment_type", "")) or ""
+    ).strip()
     if left_segment_type not in probe.SEGMENT_TYPES:
         left_segment_type = ""
     if right_segment_type not in probe.SEGMENT_TYPES:
@@ -141,6 +145,17 @@ def resolve_runtime_window_schema_seed(run_metadata: Mapping[str, Any]) -> int:
     if not isinstance(args, Mapping):
         raise ValueError("run metadata args are unavailable")
     return probe.window_schema_lib.parse_window_schema_seed(args.get("window_schema_seed", ""))
+
+
+def resolve_runtime_prompt_template_id(run_metadata: Mapping[str, Any]) -> str:
+    args = run_metadata.get("args")
+    if not isinstance(args, Mapping):
+        raise ValueError("run metadata args are unavailable")
+    return str(args.get("prompt_template_id", "") or "").strip()
+
+
+def resolve_response_contract_id(run_metadata: Mapping[str, Any]) -> str:
+    return str(run_metadata.get("response_contract_id", "") or "").strip()
 
 
 def build_ml_hint_pairs_for_run(
@@ -355,6 +370,13 @@ def build_gui_index_for_run(
     payload["embedded_manifest_csv"] = str(embedded_manifest_csv)
     payload["photo_manifest_csv"] = str(photo_manifest_csv)
     args = run_metadata.get("args")
+    payload["prompt_template_id"] = resolve_runtime_prompt_template_id(run_metadata)
+    payload["prompt_template_file"] = str(
+        run_metadata.get("prompt_template_file", "")
+        or (args.get("prompt_template_file", "") if isinstance(args, Mapping) else "")
+        or ""
+    ).strip()
+    payload["response_contract_id"] = resolve_response_contract_id(run_metadata)
     payload["photo_pre_model_dir"] = (
         str(args.get("photo_pre_model_dir", "") or "").strip()
         if isinstance(args, Mapping)

@@ -46,6 +46,15 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
         self.assertEqual(builder.resolve_runtime_window_schema(metadata), "random")
         self.assertEqual(builder.resolve_runtime_window_schema_seed(metadata), 42)
 
+    def test_resolve_runtime_prompt_template_id_reads_metadata_values(self) -> None:
+        metadata = {
+            "args": {"prompt_template_id": "group_compare_short"},
+            "response_contract_id": "grouped_v1",
+        }
+
+        self.assertEqual(builder.resolve_runtime_prompt_template_id(metadata), "group_compare_short")
+        self.assertEqual(builder.resolve_response_contract_id(metadata), "grouped_v1")
+
     def test_select_run_metadata_defaults_to_latest_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_dir = Path(tmp) / "_workspace"
@@ -696,15 +705,14 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
                 row["raw_response"] = json.dumps(
                     {
                         "boundary_after_frame": "frame_02",
-                        "left_segment_type": "dance",
-                        "right_segment_type": "ceremony",
-                        "frame_notes": {
-                            "frame_01": "a",
-                            "frame_02": "b",
-                            "frame_03": "c",
-                            "frame_04": "d",
-                            "frame_05": "e",
-                        },
+                        "group_a_segment_type": "dance",
+                        "group_b_segment_type": "ceremony",
+                        "frame_notes": [
+                            {"frame_id": "a_01", "group": "group_a", "note": "a"},
+                            {"frame_id": "a_02", "group": "group_a", "note": "b"},
+                            {"frame_id": "b_01", "group": "group_b", "note": "c"},
+                            {"frame_id": "b_02", "group": "group_b", "note": "d"},
+                        ],
                         "primary_evidence": ["x"],
                         "summary": "y",
                     }

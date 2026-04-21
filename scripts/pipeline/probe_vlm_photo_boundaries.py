@@ -25,6 +25,7 @@ from rich.progress import (
 )
 
 from lib import manual_vlm_models
+from lib import vlm_prompt_templates
 from lib import window_schema as window_schema_lib
 from lib.image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1
 from lib.ml_boundary_dataset import normalize_timestamp
@@ -61,6 +62,7 @@ from train_ml_boundary_verifier import (
 
 console = Console()
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 PHOTO_EMBEDDED_MANIFEST_FILENAME = "photo_embedded_manifest.csv"
 PHOTO_MANIFEST_FILENAME = "media_manifest.csv"
 PHOTO_BOUNDARY_SCORES_FILENAME = "photo_boundary_scores.csv"
@@ -84,7 +86,8 @@ DEFAULT_PROVIDER = "ollama"
 DEFAULT_ML_MODEL_RUN_ID = ""
 DEFAULT_WINDOW_SCHEMA = window_schema_lib.DEFAULT_WINDOW_SCHEMA
 DEFAULT_WINDOW_SCHEMA_SEED = window_schema_lib.DEFAULT_WINDOW_SCHEMA_SEED
-VLM_MODELS_CONFIG_PATH = Path(__file__).resolve().parents[2] / "conf" / "vlm_models.yaml"
+VLM_MODELS_CONFIG_PATH = REPO_ROOT / "conf" / "vlm_models.yaml"
+PROMPT_TEMPLATES_CONFIG_PATH = REPO_ROOT / "conf" / "vlm_prompt_templates.yaml"
 VLM_WORKFLOW_CONFIG_KEYS = frozenset(
     {
         "VLM_EMBEDDED_MANIFEST_CSV",
@@ -1962,6 +1965,62 @@ def build_config_hash(args_payload: Mapping[str, Any]) -> str:
     return hashlib.md5(encoded.encode("utf-8")).hexdigest()
 
 
+def build_example_ml_hint_lines() -> list[str]:
+    return [
+        "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
+        "ML hint for the left side of the candidate gap: likely dance (confidence 0.74).",
+        "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.73).",
+    ]
+
+
+def build_runtime_group_ids(group_a_count: int, group_b_count: int) -> tuple[list[str], list[str]]:
+    return (
+        [f"a_{index:02d}" for index in range(1, group_a_count + 1)],
+        [f"b_{index:02d}" for index in range(1, group_b_count + 1)],
+    )
+
+
+def resolve_prompt_template_path(
+    prompt_template_id: str = DEFAULT_PROMPT_TEMPLATE_ID,
+    prompt_template_file: str = "",
+) -> Path:
+    normalized_template_file = str(prompt_template_file or "").strip()
+    if normalized_template_file:
+        template_path = Path(normalized_template_file).expanduser()
+        return template_path if template_path.is_absolute() else (REPO_ROOT / template_path).resolve()
+    normalized_template_id = str(prompt_template_id or "").strip() or DEFAULT_PROMPT_TEMPLATE_ID
+    templates_config = vlm_prompt_templates.load_prompt_templates_config(PROMPT_TEMPLATES_CONFIG_PATH)
+    for template_entry in templates_config.templates:
+        if template_entry.id == normalized_template_id:
+            return (REPO_ROOT / template_entry.file).resolve()
+    raise ValueError(f"Unknown prompt_template_id: {normalized_template_id}")
+
+
+def render_runtime_user_prompt(
+    *,
+    prompt_template_id: str = DEFAULT_PROMPT_TEMPLATE_ID,
+    prompt_template_file: str = "",
+    group_a_ids: Sequence[str],
+    group_b_ids: Sequence[str],
+    ml_hint_lines: Sequence[str],
+    extra_instructions: str = "",
+) -> tuple[str, Path]:
+    template_path = resolve_prompt_template_path(
+        prompt_template_id=prompt_template_id,
+        prompt_template_file=prompt_template_file,
+    )
+    prompt = vlm_prompt_templates.render_prompt_template(
+        template_text=template_path.read_text(encoding="utf-8"),
+        group_a_ids=list(group_a_ids),
+        group_b_ids=list(group_b_ids),
+        ml_hint_lines=list(ml_hint_lines),
+    )
+    normalized_extra_instructions = str(extra_instructions or "").strip()
+    if normalized_extra_instructions:
+        prompt = f"{prompt}\n\nAdditional instructions:\n{normalized_extra_instructions}"
+    return prompt, template_path
+
+
 def build_user_prompt_template(
     window_size: int,
     extra_instructions: str = "",
@@ -1969,11 +2028,7 @@ def build_user_prompt_template(
     window_schema: str = DEFAULT_WINDOW_SCHEMA,
     group_a_count: Optional[int] = None,
 ) -> str:
-    ml_hint_lines = [
-        "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
-        "ML hint for the left side of the candidate gap: likely dance (confidence 0.74).",
-        "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.73).",
-    ]
+    ml_hint_lines = build_example_ml_hint_lines()
     return build_user_prompt(
         window_size=window_size,
         ml_hint_lines=ml_hint_lines,
@@ -1998,10 +2053,12 @@ def write_run_metadata(
     rendered_user_prompt: str,
     response_schema: Optional[Mapping[str, Any]],
     response_contract_id: str,
+    prompt_template_file: Optional[str] = None,
 ) -> Dict[str, Any]:
     runs_dir = workspace_dir / RUN_METADATA_DIRNAME
     runs_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = runs_dir / f"{run_id}.json"
+    prompt_template_id = str(args_payload.get("prompt_template_id", "") or "").strip()
     metadata = {
         "run_id": run_id,
         "generated_at": generated_at,
@@ -2010,6 +2067,12 @@ def write_run_metadata(
         "photo_manifest_csv": str(photo_manifest_csv),
         "output_csv": str(output_csv),
         "system_prompt": system_prompt,
+        "prompt_template_id": prompt_template_id,
+        "prompt_template_file": (
+            str(prompt_template_file).strip()
+            if prompt_template_file is not None
+            else str(args_payload.get("prompt_template_file", "") or "").strip()
+        ),
         "rendered_user_prompt": rendered_user_prompt,
         "response_schema": dict(response_schema) if response_schema is not None else None,
         "response_contract_id": response_contract_id,
@@ -2345,25 +2408,30 @@ def run_vlm_window_analysis(
     extra_instructions: str,
     response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
     json_validation_mode: str = DEFAULT_JSON_VALIDATION_MODE,
+    prompt_template_id: str = DEFAULT_PROMPT_TEMPLATE_ID,
+    prompt_template_file: str = "",
     debug_dir: Optional[Path] = None,
     debug_run_id: str = "",
     debug_batch_index: int = 1,
 ) -> Dict[str, Any]:
     window_size = len(window_rows)
     resolved_group_a_count = group_a_count if group_a_count is not None else max(1, window_size // 2)
-    group_a_ids, group_b_ids = build_group_frame_ids(window_size, group_a_count=resolved_group_a_count)
+    group_a_ids, group_b_ids = build_runtime_group_ids(
+        resolved_group_a_count,
+        max(0, window_size - resolved_group_a_count),
+    )
     response_schema = (
         build_response_schema(group_a_ids=group_a_ids, group_b_ids=group_b_ids)
         if response_schema_mode == "on"
         else None
     )
-    prompt = build_user_prompt(
-        window_size=window_size,
+    prompt, _ = render_runtime_user_prompt(
+        prompt_template_id=prompt_template_id,
+        prompt_template_file=prompt_template_file,
+        group_a_ids=group_a_ids,
+        group_b_ids=group_b_ids,
         ml_hint_lines=ml_hint_lines,
         extra_instructions=extra_instructions,
-        response_schema_mode=response_schema_mode,
-        window_schema=window_schema,
-        group_a_count=resolved_group_a_count,
     )
     request = build_vlm_request(
         provider=provider,
@@ -2639,14 +2707,23 @@ def probe_vlm_photo_boundaries(
     run_id = str(run_state["run_id"] or "")
     if not run_id:
         run_id = build_run_id(generated_at)
-        schema_group_a_ids, schema_group_b_ids = build_group_frame_ids(
-            window_radius_to_window_size(window_radius),
-            group_a_count=window_radius,
+        window_size = window_radius_to_window_size(window_radius)
+        schema_group_a_ids, schema_group_b_ids = build_runtime_group_ids(
+            window_radius,
+            max(0, window_size - window_radius),
         )
         response_schema = (
             build_response_schema(group_a_ids=schema_group_a_ids, group_b_ids=schema_group_b_ids)
             if str(args_payload.get("response_schema_mode", "off")) == "on"
             else None
+        )
+        rendered_user_prompt, prompt_template_path = render_runtime_user_prompt(
+            prompt_template_id=str(args_payload.get("prompt_template_id", DEFAULT_PROMPT_TEMPLATE_ID)),
+            prompt_template_file=str(args_payload.get("prompt_template_file", "") or ""),
+            group_a_ids=schema_group_a_ids,
+            group_b_ids=schema_group_b_ids,
+            ml_hint_lines=build_example_ml_hint_lines(),
+            extra_instructions=extra_instructions,
         )
         write_run_metadata(
             workspace_dir=workspace_dir,
@@ -2658,15 +2735,10 @@ def probe_vlm_photo_boundaries(
             output_csv=output_csv,
             args_payload=args_payload,
             system_prompt=build_system_prompt(str(args_payload.get("response_schema_mode", "off"))),
-            rendered_user_prompt=build_user_prompt_template(
-                window_size=window_radius_to_window_size(window_radius),
-                extra_instructions=extra_instructions,
-                response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
-                window_schema=window_schema,
-                group_a_count=window_radius,
-            ),
+            rendered_user_prompt=rendered_user_prompt,
             response_schema=response_schema,
             response_contract_id=response_contract_id,
+            prompt_template_file=str(prompt_template_path),
         )
         console.print(
             build_run_start_message(
@@ -2744,6 +2816,8 @@ def probe_vlm_photo_boundaries(
                 response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
                 json_validation_mode=json_validation_mode,
                 response_contract_id=response_contract_id,
+                prompt_template_id=str(args_payload.get("prompt_template_id", DEFAULT_PROMPT_TEMPLATE_ID)),
+                prompt_template_file=str(args_payload.get("prompt_template_file", "") or ""),
                 debug_dir=dump_debug_dir,
                 debug_run_id=run_id,
                 debug_batch_index=batch_index,
