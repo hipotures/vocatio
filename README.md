@@ -445,8 +445,11 @@ Important behavior:
 - `.vocatio` may override these shared preset fields locally: `VLM_PROVIDER`, `VLM_BASE_URL`, `VLM_MODEL`, `VLM_MAX_OUTPUT_TOKENS`, `VLM_TIMEOUT_SECONDS`, `VLM_TEMPERATURE`, `VLM_RESPONSE_SCHEMA_MODE`, `VLM_JSON_VALIDATION_MODE`
 - `.vocatio` may override `VLM_CONTEXT_TOKENS`, `VLM_KEEP_ALIVE`, and `VLM_REASONING_LEVEL` only when the resolved VLM provider is `ollama`; `llamacpp` and `vllm` presets must omit those fields
 - explicitly provided CLI model flags override the inherited preset values for that run
-- symmetric VLM context is configured only through `--window-radius` or `.vocatio` `VLM_WINDOW_RADIUS`
-- `vlm_boundary_results.csv`, VLM run metadata, and downstream GUI/review artifacts persist `window_radius` only
+- symmetric VLM context sample count is configured only through `--window-radius` or `.vocatio` `VLM_WINDOW_RADIUS`
+- VLM frame selection inside each side segment is configured through `--window-schema` or `.vocatio` `VLM_WINDOW_SCHEMA`
+- deterministic schema sampling is configured through `--window-schema-seed` or `.vocatio` `VLM_WINDOW_SCHEMA_SEED`
+- supported window schemas are `consecutive`, `random`, `index_quantile`, `time_quantile`, `time_max_min`, and `time_boundary_spread`
+- `vlm_boundary_results.csv`, VLM run metadata, and downstream GUI/review artifacts persist `window_radius`, `window_schema`, and `window_schema_seed`
 - legacy probe CSVs with `window_size` / `overlap` are not resumable; start a fresh run with `--new-run`
 - only gaps larger than `--boundary-gap-seconds` are probed
 - default `--max-batches` is `10`, so use a larger explicit value for real runs and rerun the same command or continue with `--run-id`
@@ -494,9 +497,9 @@ Use a dedicated VLM review-state file so you do not mix VLM review decisions wit
 
 #### Manual VLM model presets
 
-The GUI `Manual VLM analyze` action loads presets from `conf/vlm_models.yaml`, but its dropdown only includes entries that define `VLM_NAME`.
+The GUI `Manual VLM analyze` action loads presets from `conf/vlm_models.yaml`, but its preset dropdown only includes entries that define `VLM_NAME`. The same section also exposes a `window schema` dropdown for manual runtime overrides; its default comes from day-level `.vocatio` `VLM_WINDOW_SCHEMA`, or falls back to `consecutive`.
 
-This shared preset file contains one `models:` list and may mix `VLM_*` and `PREMODEL_*` entries. Day-level `.vocatio` must select an existing preset by exact `VLM_NAME` or `PREMODEL_NAME`; it does not define full models from scratch. Workflow fields such as `VLM_WINDOW_RADIUS`, `VLM_IMAGE_VARIANT`, `VLM_ML_MODEL_RUN_ID`, and `VLM_PHOTO_PRE_MODEL_DIR` remain local to `.vocatio` or explicit CLI flags rather than the shared preset file.
+This shared preset file contains one `models:` list and may mix `VLM_*` and `PREMODEL_*` entries. Day-level `.vocatio` must select an existing preset by exact `VLM_NAME` or `PREMODEL_NAME`; it does not define full models from scratch. Workflow fields such as `VLM_WINDOW_RADIUS`, `VLM_WINDOW_SCHEMA`, `VLM_WINDOW_SCHEMA_SEED`, `VLM_IMAGE_VARIANT`, `VLM_ML_MODEL_RUN_ID`, and `VLM_PHOTO_PRE_MODEL_DIR` remain local to `.vocatio` or explicit CLI flags rather than the shared preset file.
 
 Each VLM preset must define these shared fields:
 

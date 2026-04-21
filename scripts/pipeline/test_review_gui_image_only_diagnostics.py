@@ -246,6 +246,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.manual_vlm_models_error = None
         window.manual_vlm_status_message = None
         window.manual_vlm_selected_name = None
+        window.manual_vlm_selected_window_schema = None
         window.selected_photo_entries = Mock(
             return_value=[
                 {"relative_path": "cam/a.jpg", "source_path": "/src/a.jpg"},
@@ -603,13 +604,19 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             window.manual_vlm_analyze_state,
             preset_names=section_config["preset_names"],
             selected_name=section_config["selected_name"],
+            window_schema_names=section_config["window_schema_names"],
+            selected_window_schema=section_config["selected_window_schema"],
             description=section_config["description"],
             on_choice_changed=section_config["on_choice_changed"],
+            on_window_schema_changed=section_config["on_window_schema_changed"],
         )
 
         self.assertIsNone(window.manual_vlm_selected_name)
+        self.assertIsNone(window.manual_vlm_selected_window_schema)
         self.assertEqual(section["choice_items"], ["Preset A", "Preset B"])
         self.assertEqual(section["choice_value"], "Preset A")
+        self.assertEqual(section["secondary_choice_items"], list(review_gui.probe_vlm_boundary.window_schema_lib.WINDOW_SCHEMA_VALUES))
+        self.assertEqual(section["secondary_choice_value"], review_gui.probe_vlm_boundary.DEFAULT_WINDOW_SCHEMA)
         self.assertTrue(section["choice_enabled"])
         self.assertTrue(section["action_enabled"])
 
@@ -624,8 +631,11 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             window.manual_vlm_analyze_state,
             preset_names=section_config["preset_names"],
             selected_name=section_config["selected_name"],
+            window_schema_names=section_config["window_schema_names"],
+            selected_window_schema=section_config["selected_window_schema"],
             description=section_config["description"],
             on_choice_changed=section_config["on_choice_changed"],
+            on_window_schema_changed=section_config["on_window_schema_changed"],
         )
         widget = window.build_info_section_widget(section)
         self.addCleanup(widget.deleteLater)
@@ -1015,6 +1025,42 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             }
         )
         self.assertEqual(resolved, {"window_radius": 4})
+
+    def test_resolve_manual_vlm_window_config_uses_vocatio_defaults_and_schema_override(self):
+        with unittest.mock.patch.object(
+            review_gui,
+            "load_manual_prediction_vocatio_config",
+            return_value={
+                "VLM_WINDOW_SCHEMA": "random",
+                "VLM_WINDOW_SCHEMA_SEED": "99",
+            },
+        ):
+            resolved = review_gui.resolve_manual_vlm_window_config(
+                day_dir=Path("/tmp/20260323"),
+                payload={"window_radius": 4},
+            )
+            overridden = review_gui.resolve_manual_vlm_window_config(
+                day_dir=Path("/tmp/20260323"),
+                payload={"window_radius": 4},
+                selected_window_schema="time_quantile",
+            )
+
+        self.assertEqual(
+            resolved,
+            {
+                "window_radius": 4,
+                "window_schema": "random",
+                "window_schema_seed": 99,
+            },
+        )
+        self.assertEqual(
+            overridden,
+            {
+                "window_radius": 4,
+                "window_schema": "time_quantile",
+                "window_schema_seed": 99,
+            },
+        )
 
     def test_resolve_manual_prediction_window_config_rejects_missing_saved_index_radius(self):
         with self.assertRaisesRegex(ValueError, "review index window_radius is unavailable"):
@@ -1680,8 +1726,11 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             window.manual_vlm_analyze_state,
             preset_names=section_config["preset_names"],
             selected_name=section_config["selected_name"],
+            window_schema_names=section_config["window_schema_names"],
+            selected_window_schema=section_config["selected_window_schema"],
             description=section_config["description"],
             on_choice_changed=section_config["on_choice_changed"],
+            on_window_schema_changed=section_config["on_window_schema_changed"],
         )
 
         widget = window.build_info_section_widget(section)
@@ -1697,6 +1746,39 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         combo.setCurrentText("Preset B")
         TEST_QT_APP.processEvents()
         self.assertEqual(window.manual_vlm_selected_name, "Preset B")
+
+    def test_build_info_section_widget_renders_manual_vlm_schema_combo_and_updates_selection(self):
+        window = self.build_test_window_with_two_selected_rows()
+        window.run_manual_vlm_analyze = Mock()
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        section_config = review_gui.build_manual_vlm_analyze_section_config(window)
+        section = review_gui.build_manual_vlm_analyze_section(
+            window.manual_vlm_analyze_state,
+            preset_names=section_config["preset_names"],
+            selected_name=section_config["selected_name"],
+            window_schema_names=section_config["window_schema_names"],
+            selected_window_schema=section_config["selected_window_schema"],
+            description=section_config["description"],
+            on_choice_changed=section_config["on_choice_changed"],
+            on_window_schema_changed=section_config["on_window_schema_changed"],
+        )
+
+        widget = window.build_info_section_widget(section)
+        self.addCleanup(widget.deleteLater)
+        widget.show()
+        TEST_QT_APP.processEvents()
+
+        schema_combo = widget.findChild(QComboBox, "infoSectionSecondaryChoiceCombo")
+        self.assertIsNotNone(schema_combo)
+        self.assertEqual(
+            [schema_combo.itemText(index) for index in range(schema_combo.count())],
+            list(review_gui.probe_vlm_boundary.window_schema_lib.WINDOW_SCHEMA_VALUES),
+        )
+        self.assertEqual(schema_combo.currentText(), review_gui.probe_vlm_boundary.DEFAULT_WINDOW_SCHEMA)
+
+        schema_combo.setCurrentText("random")
+        TEST_QT_APP.processEvents()
+        self.assertEqual(window.manual_vlm_selected_window_schema, "random")
 
     def test_manual_vlm_choice_uses_description_as_combobox_tooltip(self):
         window = self.build_test_window_with_two_selected_rows()
@@ -2602,6 +2684,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             ml_model_run_id="config-ml",
             photo_pre_model_dir="config-pre",
             window_radius=2,
+            window_schema="consecutive",
+            window_schema_seed=42,
         )
         manual_vlm_model = {
             "VLM_NAME": "Preset B",
@@ -2632,6 +2716,11 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     "ml_model_run_id": "payload-ml",
                     "photo_pre_model_dir": "payload-pre",
                 },
+                window_config={
+                    "window_radius": 4,
+                    "window_schema": "time_quantile",
+                    "window_schema_seed": 17,
+                },
                 manual_vlm_model=manual_vlm_model,
             )
 
@@ -2647,6 +2736,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(runtime_args.response_schema_mode, "on")
         self.assertEqual(runtime_args.json_validation_mode, "strict")
         self.assertEqual(runtime_args.window_radius, 4)
+        self.assertEqual(runtime_args.window_schema, "time_quantile")
+        self.assertEqual(runtime_args.window_schema_seed, 17)
         self.assertEqual(runtime_args.image_variant, "thumb")
         self.assertEqual(runtime_args.ml_model_run_id, "payload-ml")
         self.assertEqual(runtime_args.photo_pre_model_dir, "payload-pre")
@@ -2668,6 +2759,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             ml_model_run_id="config-ml",
             photo_pre_model_dir="config-pre",
             window_radius=2,
+            window_schema="consecutive",
+            window_schema_seed=42,
         )
         manual_vlm_model = {
             "VLM_NAME": "Preset C",
@@ -2693,6 +2786,11 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     "window_radius": 3,
                     "vlm_image_variant": "thumb",
                 },
+                window_config={
+                    "window_radius": 3,
+                    "window_schema": "index_quantile",
+                    "window_schema_seed": 21,
+                },
                 manual_vlm_model=manual_vlm_model,
             )
 
@@ -2708,6 +2806,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(runtime_args.response_schema_mode, "on")
         self.assertEqual(runtime_args.json_validation_mode, "strict")
         self.assertEqual(runtime_args.window_radius, 3)
+        self.assertEqual(runtime_args.window_schema, "index_quantile")
+        self.assertEqual(runtime_args.window_schema_seed, 21)
         self.assertEqual(runtime_args.image_variant, "thumb")
 
     def test_resolve_manual_vlm_runtime_args_does_not_require_vlm_name_in_vocatio(self):
@@ -2727,6 +2827,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             ml_model_run_id="config-ml",
             photo_pre_model_dir="config-pre",
             window_radius=2,
+            window_schema="consecutive",
+            window_schema_seed=42,
         )
         manual_vlm_model = {
             "VLM_NAME": "Preset D",
@@ -2749,12 +2851,57 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 day_dir=Path("/day"),
                 workspace_dir=Path("/workspace"),
                 payload={"window_radius": 3, "vlm_image_variant": "preview"},
+                window_config={
+                    "window_radius": 3,
+                    "window_schema": "random",
+                    "window_schema_seed": 8,
+                },
                 manual_vlm_model=manual_vlm_model,
             )
 
         self.assertEqual(runtime_args.provider, "llamacpp")
         self.assertEqual(runtime_args.model, "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_XL")
         self.assertEqual(runtime_args.ollama_base_url, "http://127.0.0.1:8080")
+        self.assertEqual(runtime_args.window_schema, "random")
+        self.assertEqual(runtime_args.window_schema_seed, 8)
+
+    def test_build_manual_vlm_window_rows_keeps_selected_anchors_and_uses_schema_for_context(self):
+        joined_rows = [
+            {"relative_path": "cam/a.jpg", "start_epoch_ms": "1000"},
+            {"relative_path": "cam/b.jpg", "start_epoch_ms": "2000"},
+            {"relative_path": "cam/c.jpg", "start_epoch_ms": "3000"},
+            {"relative_path": "cam/d.jpg", "start_epoch_ms": "4000"},
+            {"relative_path": "cam/e.jpg", "start_epoch_ms": "5000"},
+            {"relative_path": "cam/f.jpg", "start_epoch_ms": "6000"},
+            {"relative_path": "cam/g.jpg", "start_epoch_ms": "7000"},
+            {"relative_path": "cam/h.jpg", "start_epoch_ms": "8000"},
+        ]
+
+        with unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary.window_schema_lib,
+            "select_segment_rows",
+            side_effect=[
+                [dict(joined_rows[1])],
+                [dict(joined_rows[6])],
+            ],
+        ) as select_rows:
+            window_rows = review_gui.build_manual_vlm_window_rows(
+                joined_rows,
+                anchor_pair={
+                    "left_row_index": 3,
+                    "right_row_index": 5,
+                },
+                window_radius=2,
+                window_schema="random",
+                window_schema_seed=42,
+                boundary_gap_seconds=10,
+            )
+
+        self.assertEqual(
+            [str(row["relative_path"]) for row in window_rows],
+            ["cam/b.jpg", "cam/d.jpg", "cam/f.jpg", "cam/g.jpg"],
+        )
+        self.assertEqual(select_rows.call_count, 2)
 
     def test_run_manual_vlm_request_with_retries_retries_manual_vlm_failures_three_times(self):
         attempts = {"count": 0}

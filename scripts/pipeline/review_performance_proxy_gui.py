@@ -381,6 +381,41 @@ def resolve_manual_prediction_window_config(payload: Mapping[str, Any]) -> Dict[
     }
 
 
+def resolve_manual_vlm_window_config(
+    *,
+    day_dir: Path,
+    payload: Mapping[str, Any],
+    selected_window_schema: Optional[str] = None,
+) -> Dict[str, Any]:
+    window_config: Dict[str, Any] = dict(resolve_manual_prediction_window_config(payload))
+    vocatio_config = load_manual_prediction_vocatio_config(day_dir)
+    configured_schema = (
+        str(selected_window_schema or "").strip()
+        or str(vocatio_config.get("VLM_WINDOW_SCHEMA", "") or "").strip()
+        or str(payload.get("window_schema", "") or "").strip()
+    )
+    configured_seed = (
+        str(vocatio_config.get("VLM_WINDOW_SCHEMA_SEED", "") or "").strip()
+        or str(payload.get("window_schema_seed", "") or "").strip()
+    )
+    window_config["window_schema"] = probe_vlm_boundary.window_schema_lib.parse_window_schema(configured_schema)
+    window_config["window_schema_seed"] = probe_vlm_boundary.window_schema_lib.parse_window_schema_seed(configured_seed)
+    return window_config
+
+
+def resolve_manual_vlm_boundary_gap_seconds(
+    *,
+    day_dir: Path,
+    payload: Mapping[str, Any],
+) -> int:
+    configured_value = (
+        str(payload.get("boundary_gap_seconds", "") or "").strip()
+        or str(load_manual_prediction_vocatio_config(day_dir).get("VLM_BOUNDARY_GAP_SECONDS", "") or "").strip()
+        or str(probe_vlm_boundary.DEFAULT_BOUNDARY_GAP_SECONDS)
+    )
+    return probe_vlm_boundary.positive_int_arg(configured_value)
+
+
 def resolve_manual_prediction_anchor_pair(
     selected_photos: Sequence[Mapping[str, Any]],
     joined_rows: Sequence[Mapping[str, Any]],
@@ -544,6 +579,7 @@ def resolve_manual_vlm_runtime_args(
     day_dir: Path,
     workspace_dir: Path,
     payload: Mapping[str, Any],
+    window_config: Optional[Mapping[str, Any]] = None,
     manual_vlm_model: Mapping[str, Any],
 ) -> argparse.Namespace:
     args = probe_vlm_boundary.parse_args([str(day_dir), "--workspace-dir", str(workspace_dir)])
@@ -568,7 +604,20 @@ def resolve_manual_vlm_runtime_args(
         args.ollama_think = ""
     args.response_schema_mode = str(manual_vlm_model.get("VLM_RESPONSE_SCHEMA_MODE", "") or "").strip()
     args.json_validation_mode = str(manual_vlm_model.get("VLM_JSON_VALIDATION_MODE", "") or "").strip()
-    args.window_radius = resolve_manual_prediction_window_config(payload)["window_radius"]
+    resolved_window_config = (
+        dict(window_config)
+        if isinstance(window_config, Mapping)
+        else resolve_manual_vlm_window_config(day_dir=day_dir, payload=payload)
+    )
+    args.window_radius = probe_vlm_boundary.positive_window_radius_arg(
+        str(resolved_window_config.get("window_radius", "") or "").strip()
+    )
+    args.window_schema = probe_vlm_boundary.window_schema_lib.parse_window_schema(
+        resolved_window_config.get("window_schema", "")
+    )
+    args.window_schema_seed = probe_vlm_boundary.window_schema_lib.parse_window_schema_seed(
+        resolved_window_config.get("window_schema_seed", "")
+    )
     image_variant = str(payload.get("vlm_image_variant", "") or "").strip()
     if image_variant:
         args.image_variant = image_variant
@@ -587,11 +636,16 @@ def resolve_manual_vlm_analyze_state(
     workspace_dir: Path,
     payload: Mapping[str, Any],
     selected_photos: Sequence[Mapping[str, Any]],
+    selected_window_schema: Optional[str],
     manual_vlm_model: Mapping[str, Any],
 ) -> Dict[str, Any]:
     next_state = build_idle_manual_vlm_analyze_state(selected_photos)
     try:
-        next_state["window_config"] = resolve_manual_prediction_window_config(payload)
+        next_state["window_config"] = resolve_manual_vlm_window_config(
+            day_dir=day_dir,
+            payload=payload,
+            selected_window_schema=selected_window_schema,
+        )
         next_state["anchor_pair"] = resolve_manual_prediction_anchor_pair(
             selected_photos,
             load_manual_prediction_joined_rows(workspace_dir, payload),
@@ -600,12 +654,14 @@ def resolve_manual_vlm_analyze_state(
             day_dir=day_dir,
             workspace_dir=workspace_dir,
             payload=payload,
+            window_config=next_state["window_config"],
             manual_vlm_model=manual_vlm_model,
         )
         next_state["runtime_config"] = {
             "provider": str(runtime_args.provider),
             "model": str(runtime_args.model),
             "image_variant": str(runtime_args.image_variant),
+            "window_schema": str(getattr(runtime_args, "window_schema", "") or ""),
         }
     except Exception as exc:
         next_state["status"] = "error"
@@ -705,6 +761,63 @@ def build_manual_prediction_joined_rows(
     return reduced_rows, left_row_index
 
 
+def build_manual_vlm_window_rows(
+    joined_rows: Sequence[Mapping[str, Any]],
+    *,
+    anchor_pair: Mapping[str, Any],
+    window_radius: int,
+    window_schema: str,
+    window_schema_seed: int,
+    boundary_gap_seconds: int,
+) -> List[Mapping[str, Any]]:
+    left_row_index = int(anchor_pair.get("left_row_index", -1))
+    right_row_index = int(anchor_pair.get("right_row_index", -1))
+    if left_row_index < 0 or right_row_index < 0:
+        raise ValueError("manual VLM anchor rows are unavailable")
+    if left_row_index >= right_row_index:
+        raise ValueError("manual VLM anchors must be ordered by joined rows")
+    if right_row_index >= len(joined_rows):
+        raise ValueError("manual VLM anchor rows are outside the joined manifest")
+
+    left_segment_start = 0
+    for index in range(left_row_index - 1, -1, -1):
+        left_epoch_ms = int(str(joined_rows[index].get("start_epoch_ms", "") or "").strip())
+        right_epoch_ms = int(str(joined_rows[index + 1].get("start_epoch_ms", "") or "").strip())
+        if probe_vlm_boundary.rounded_seconds(right_epoch_ms - left_epoch_ms) >= boundary_gap_seconds:
+            left_segment_start = index + 1
+            break
+
+    right_segment_end = len(joined_rows)
+    for index in range(right_row_index, len(joined_rows) - 1):
+        left_epoch_ms = int(str(joined_rows[index].get("start_epoch_ms", "") or "").strip())
+        right_epoch_ms = int(str(joined_rows[index + 1].get("start_epoch_ms", "") or "").strip())
+        if probe_vlm_boundary.rounded_seconds(right_epoch_ms - left_epoch_ms) >= boundary_gap_seconds:
+            right_segment_end = index + 1
+            break
+
+    context_count = max(int(window_radius) - 1, 0)
+    left_context_rows = probe_vlm_boundary.window_schema_lib.select_segment_rows(
+        joined_rows[left_segment_start:left_row_index],
+        radius=context_count,
+        schema=window_schema,
+        gap_side="left",
+        schema_seed=window_schema_seed,
+    )
+    right_context_rows = probe_vlm_boundary.window_schema_lib.select_segment_rows(
+        joined_rows[right_row_index + 1 : right_segment_end],
+        radius=context_count,
+        schema=window_schema,
+        gap_side="right",
+        schema_seed=window_schema_seed,
+    )
+    return [
+        *left_context_rows,
+        dict(joined_rows[left_row_index]),
+        dict(joined_rows[right_row_index]),
+        *right_context_rows,
+    ]
+
+
 def normalize_ml_candidate_rows(candidate_rows: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
     return [
         dict(
@@ -793,8 +906,7 @@ def _manual_vlm_hint_lines_subprocess_entry(
     result_queue: Any,
     workspace_dir_str: str,
     payload: Mapping[str, Any],
-    reduced_rows: Sequence[Mapping[str, Any]],
-    cut_index: int,
+    window_rows: Sequence[Mapping[str, Any]],
     runtime_window_radius: int,
     runtime_args_payload: Mapping[str, Any],
 ) -> None:
@@ -814,10 +926,9 @@ def _manual_vlm_hint_lines_subprocess_entry(
         ).strip()
         photo_pre_model_dir = probe_vlm_boundary.resolve_path(workspace_dir, photo_pre_model_dir_value)
         day_id = str(payload.get("day", "") or "").strip() or workspace_dir.parent.name
-        result = probe_vlm_boundary.build_ml_hint_lines_for_candidate(
+        result = probe_vlm_boundary.build_ml_hint_lines_for_window_rows(
             day_id=day_id,
-            joined_rows=[dict(row) for row in reduced_rows],
-            cut_index=cut_index,
+            window_rows=[dict(row) for row in window_rows],
             boundary_rows_by_pair=probe_vlm_boundary.read_boundary_scores_by_pair(
                 workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME
             ),
@@ -959,8 +1070,7 @@ def load_manual_vlm_hint_lines(
     *,
     workspace_dir: Path,
     payload: Mapping[str, Any],
-    reduced_rows: Sequence[Mapping[str, Any]],
-    cut_index: int,
+    window_rows: Sequence[Mapping[str, Any]],
     runtime_window_radius: int,
     runtime_args: argparse.Namespace,
 ) -> List[str]:
@@ -970,8 +1080,7 @@ def load_manual_vlm_hint_lines(
                 _manual_vlm_hint_lines_subprocess_entry,
                 str(workspace_dir),
                 dict(payload),
-                [dict(row) for row in reduced_rows],
-                int(cut_index),
+                [dict(row) for row in window_rows],
                 int(runtime_window_radius),
                 {
                     "ml_model_run_id": str(getattr(runtime_args, "ml_model_run_id", "") or "").strip(),
@@ -1004,20 +1113,29 @@ def compute_manual_vlm_analyze_result(
         day_dir=day_dir,
         workspace_dir=workspace_dir,
         payload=payload,
+        window_config=window_config,
         manual_vlm_model=manual_vlm_model,
     )
     runtime_window_radius = probe_vlm_boundary.positive_window_radius_arg(
         str(window_config.get("window_radius", "") or "").strip()
     )
-    runtime_args.window_radius = runtime_window_radius
-    reduced_rows, cut_index = build_manual_prediction_joined_rows(joined_rows, anchor_pair)
-    candidate_rows = probe_vlm_boundary._build_ml_candidate_window_rows(
-        joined_rows=reduced_rows,
-        cut_index=cut_index,
-        window_radius=runtime_window_radius,
+    runtime_window_schema = probe_vlm_boundary.window_schema_lib.parse_window_schema(
+        window_config.get("window_schema", "")
     )
-    if candidate_rows is None:
-        raise ValueError("manual VLM analyze needs enough surrounding context for inference")
+    runtime_window_schema_seed = probe_vlm_boundary.window_schema_lib.parse_window_schema_seed(
+        window_config.get("window_schema_seed", "")
+    )
+    runtime_args.window_radius = runtime_window_radius
+    runtime_args.window_schema = runtime_window_schema
+    runtime_args.window_schema_seed = runtime_window_schema_seed
+    candidate_rows = build_manual_vlm_window_rows(
+        joined_rows=joined_rows,
+        anchor_pair=anchor_pair,
+        window_radius=runtime_window_radius,
+        window_schema=runtime_window_schema,
+        window_schema_seed=runtime_window_schema_seed,
+        boundary_gap_seconds=resolve_manual_vlm_boundary_gap_seconds(day_dir=day_dir, payload=payload),
+    )
     extra_instructions = probe_vlm_boundary.load_extra_instructions(
         str(getattr(runtime_args, "extra_instructions", "") or ""),
         getattr(runtime_args, "extra_instructions_file", None),
@@ -1033,8 +1151,7 @@ def compute_manual_vlm_analyze_result(
         ml_hint_lines=load_manual_vlm_hint_lines(
             workspace_dir=workspace_dir,
             payload=payload,
-            reduced_rows=reduced_rows,
-            cut_index=cut_index,
+            window_rows=candidate_rows,
             runtime_window_radius=runtime_window_radius,
             runtime_args=runtime_args,
         ),
@@ -1679,6 +1796,27 @@ def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
     return join_info_section_lines(lines)
 
 
+def resolve_manual_vlm_selected_window_schema(window: object) -> str:
+    configured_value = str(getattr(window, "manual_vlm_selected_window_schema", "") or "").strip()
+    if configured_value:
+        return probe_vlm_boundary.window_schema_lib.parse_window_schema(configured_value)
+    day_dir_resolver = getattr(window, "manual_prediction_day_dir", None)
+    if callable(day_dir_resolver):
+        try:
+            vocatio_config = load_manual_prediction_vocatio_config(day_dir_resolver())
+        except Exception:
+            vocatio_config = {}
+        configured_value = str(vocatio_config.get("VLM_WINDOW_SCHEMA", "") or "").strip()
+        if configured_value:
+            return probe_vlm_boundary.window_schema_lib.parse_window_schema(configured_value)
+    payload = getattr(window, "payload", {})
+    if isinstance(payload, Mapping):
+        configured_value = str(payload.get("window_schema", "") or "").strip()
+        if configured_value:
+            return probe_vlm_boundary.window_schema_lib.parse_window_schema(configured_value)
+    return probe_vlm_boundary.DEFAULT_WINDOW_SCHEMA
+
+
 def build_manual_vlm_analyze_section_config(window: object) -> Dict[str, Any]:
     preset_names = []
     choice_tooltips: Dict[str, str] = {}
@@ -1696,12 +1834,22 @@ def build_manual_vlm_analyze_section_config(window: object) -> Dict[str, Any]:
         or str(getattr(window, "manual_vlm_status_message", "") or "").strip()
         or "Ephemeral runtime state for manual VLM boundary analysis."
     )
+    selected_window_schema = resolve_manual_vlm_selected_window_schema(window)
     return {
         "preset_names": preset_names,
         "selected_name": selected_name,
+        "window_schema_names": list(probe_vlm_boundary.window_schema_lib.WINDOW_SCHEMA_VALUES),
+        "selected_window_schema": selected_window_schema,
         "choice_tooltips": choice_tooltips,
         "description": description,
         "on_choice_changed": lambda value: setattr(window, "manual_vlm_selected_name", str(value).strip() or None),
+        "on_window_schema_changed": (
+            lambda value: setattr(
+                window,
+                "manual_vlm_selected_window_schema",
+                probe_vlm_boundary.window_schema_lib.parse_window_schema(value),
+            )
+        ),
     }
 
 
@@ -1710,9 +1858,12 @@ def build_manual_vlm_analyze_section(
     *,
     preset_names: Optional[Sequence[str]] = None,
     selected_name: Optional[str] = None,
+    window_schema_names: Optional[Sequence[str]] = None,
+    selected_window_schema: Optional[str] = None,
     preset_descriptions: Optional[Mapping[str, Any]] = None,
     description: str = "Ephemeral runtime state for manual VLM boundary analysis.",
     on_choice_changed: Optional[Callable[[str], None]] = None,
+    on_window_schema_changed: Optional[Callable[[str], None]] = None,
     action_locked: bool = False,
     show_spinner: bool = False,
 ) -> Dict[str, Any]:
@@ -1747,6 +1898,18 @@ def build_manual_vlm_analyze_section(
     normalized_selected_name = str(selected_name or "").strip() or None
     if normalized_selected_name not in normalized_preset_names:
         normalized_selected_name = normalized_preset_names[0] if normalized_preset_names else None
+    normalized_window_schema_names = [
+        probe_vlm_boundary.window_schema_lib.parse_window_schema(name)
+        for name in (window_schema_names or [])
+        if str(name).strip()
+    ]
+    normalized_selected_window_schema = probe_vlm_boundary.window_schema_lib.parse_window_schema(selected_window_schema or "")
+    if normalized_selected_window_schema not in normalized_window_schema_names:
+        normalized_selected_window_schema = (
+            normalized_window_schema_names[0]
+            if normalized_window_schema_names
+            else probe_vlm_boundary.DEFAULT_WINDOW_SCHEMA
+        )
     normalized_choice_tooltips = {
         preset_name: str((preset_descriptions or {}).get(preset_name, "") or "").strip() or preset_name
         for preset_name in normalized_preset_names
@@ -1763,6 +1926,10 @@ def build_manual_vlm_analyze_section(
     section["choice_tooltips"] = normalized_choice_tooltips
     section["choice_enabled"] = bool(normalized_preset_names) and not active_action_locked
     section["on_choice_changed"] = on_choice_changed
+    section["secondary_choice_items"] = normalized_window_schema_names
+    section["secondary_choice_value"] = normalized_selected_window_schema
+    section["secondary_choice_enabled"] = bool(normalized_window_schema_names) and not active_action_locked
+    section["on_secondary_choice_changed"] = on_window_schema_changed
     section["action_key"] = "run_manual_vlm_analyze"
     section["action_text"] = "Analyze"
     section["action_enabled"] = bool(normalized_preset_names) and normalized_selected_name is not None and not active_action_locked
@@ -1996,10 +2163,13 @@ def append_manual_runtime_sections(
                 manual_vlm_analyze_state,
                 preset_names=manual_vlm_section_config.get("preset_names"),
                 selected_name=manual_vlm_section_config.get("selected_name"),
+                window_schema_names=manual_vlm_section_config.get("window_schema_names"),
+                selected_window_schema=manual_vlm_section_config.get("selected_window_schema"),
                 preset_descriptions=manual_vlm_section_config.get("choice_tooltips"),
                 description=str(manual_vlm_section_config.get("description", "") or "")
                 or "Ephemeral runtime state for manual VLM boundary analysis.",
                 on_choice_changed=manual_vlm_section_config.get("on_choice_changed"),
+                on_window_schema_changed=manual_vlm_section_config.get("on_window_schema_changed"),
                 action_locked=bool(normalized_active_action_key)
                 and normalized_active_action_key != "run_manual_vlm_analyze",
                 show_spinner=normalized_active_action_key == "run_manual_vlm_analyze",
@@ -2577,6 +2747,7 @@ class MainWindow(QMainWindow):
         self.manual_vlm_models_error: Optional[str] = None
         self.manual_vlm_status_message: Optional[str] = None
         self.manual_vlm_selected_name: Optional[str] = None
+        self.manual_vlm_selected_window_schema: Optional[str] = None
         self.reload_manual_vlm_models(startup=True)
         self.thread_pool = QThreadPool.globalInstance()
         self.manual_action_running_key: Optional[str] = None
@@ -3773,6 +3944,7 @@ class MainWindow(QMainWindow):
         payload = dict(self.payload)
         selected_snapshot = [dict(photo) for photo in selected_photos]
         selected_manual_vlm_model = dict(manual_vlm_model)
+        selected_window_schema = str(getattr(self, "manual_vlm_selected_window_schema", "") or "").strip() or None
 
         def work_fn() -> Mapping[str, Any]:
             try:
@@ -3784,6 +3956,7 @@ class MainWindow(QMainWindow):
                 workspace_dir=workspace_dir,
                 payload=payload,
                 selected_photos=selected_snapshot,
+                selected_window_schema=selected_window_schema,
                 manual_vlm_model=selected_manual_vlm_model,
             )
             resolution_error = str(resolution_state.get("resolution_error", "") or "").strip()
@@ -4209,6 +4382,42 @@ class MainWindow(QMainWindow):
             if callable(on_choice_changed):
                 combo.currentTextChanged.connect(on_choice_changed)
             controls_layout.addWidget(combo)
+        secondary_choice_items_value = section.get("secondary_choice_items")
+        normalized_secondary_choice_items = None
+        if secondary_choice_items_value is not None:
+            normalized_secondary_choice_items = [str(item) for item in secondary_choice_items_value]
+        if normalized_secondary_choice_items is not None:
+            secondary_combo = QComboBox(controls_widget)
+            secondary_combo.setObjectName("infoSectionSecondaryChoiceCombo")
+            secondary_combo.addItems(normalized_secondary_choice_items)
+            secondary_choice_tooltips = section.get("secondary_choice_tooltips")
+            normalized_secondary_choice_tooltips = (
+                {str(key): str(value) for key, value in secondary_choice_tooltips.items()}
+                if isinstance(secondary_choice_tooltips, Mapping)
+                else {}
+            )
+            for index, item_text in enumerate(normalized_secondary_choice_items):
+                secondary_combo.setItemData(
+                    index,
+                    normalized_secondary_choice_tooltips.get(item_text, item_text),
+                    Qt.ToolTipRole,
+                )
+            secondary_choice_value = str(section.get("secondary_choice_value", "") or "").strip()
+            if secondary_choice_value in normalized_secondary_choice_items:
+                secondary_combo.setCurrentText(secondary_choice_value)
+            secondary_combo.setToolTip(
+                secondary_combo.currentData(Qt.ToolTipRole) or secondary_combo.currentText()
+            )
+            secondary_combo.currentTextChanged.connect(
+                lambda _value, current_combo=secondary_combo: current_combo.setToolTip(
+                    current_combo.currentData(Qt.ToolTipRole) or current_combo.currentText()
+                )
+            )
+            secondary_combo.setEnabled(bool(section.get("secondary_choice_enabled", True)))
+            on_secondary_choice_changed = section.get("on_secondary_choice_changed")
+            if callable(on_secondary_choice_changed):
+                secondary_combo.currentTextChanged.connect(on_secondary_choice_changed)
+            controls_layout.addWidget(secondary_combo)
         if action_handler is not None:
             if bool(section.get("action_show_spinner", False)):
                 spinner_label = QLabel("⏳")
