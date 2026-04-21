@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import yaml
@@ -28,6 +29,8 @@ REQUIRED_TEMPLATE_PLACEHOLDERS = (
     "{{ML_HINTS_BLOCK}}",
     "{{FRAME_NOTES_JSON_EXAMPLE}}",
 )
+
+UNRESOLVED_PLACEHOLDER_PATTERN = re.compile(r"\{\{[^{}]+\}\}")
 
 
 def _validate_required_string_field(item: dict[str, Any], index: int, field_name: str) -> str:
@@ -88,6 +91,9 @@ def render_prompt_template(
     rendered = template_text
     for key, value in replacements.items():
         rendered = rendered.replace(key, value)
+    unresolved_placeholder = UNRESOLVED_PLACEHOLDER_PATTERN.search(rendered)
+    if unresolved_placeholder is not None:
+        raise ValueError(f"template contains unresolved placeholder {unresolved_placeholder.group(0)}")
     return rendered
 
 

@@ -125,3 +125,41 @@ def test_render_prompt_template_rejects_missing_required_placeholder() -> None:
         assert "{{ML_HINTS_BLOCK}}" in str(exc) or "{{FRAME_NOTES_JSON_EXAMPLE}}" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_render_prompt_template_rejects_unresolved_placeholder() -> None:
+    try:
+        vlm_prompt_templates.render_prompt_template(
+            template_text=(
+                "Group mapping:\n{{GROUP_MAPPING}}\n\n"
+                "Hints:\n{{ML_HINTS_BLOCK}}\n\n"
+                "{{FRAME_NOTES_JSON_EXAMPLE}}\n\n"
+                "Unexpected:\n{{NOT_A_REAL_TOKEN}}\n"
+            ),
+            group_a_ids=["a_01"],
+            group_b_ids=["b_01"],
+            ml_hint_lines=[],
+        )
+    except ValueError as exc:
+        assert "{{NOT_A_REAL_TOKEN}}" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_render_prompt_template_consumes_placeholders_in_built_in_templates() -> None:
+    template_paths = (
+        REPO_ROOT / "conf" / "vlm_boundary_prompt.group_compare_long.txt",
+        REPO_ROOT / "conf" / "vlm_boundary_prompt.group_compare_short.txt",
+    )
+
+    for template_path in template_paths:
+        rendered = vlm_prompt_templates.render_prompt_template(
+            template_text=template_path.read_text(encoding="utf-8"),
+            group_a_ids=["a_01", "a_02"],
+            group_b_ids=["b_01", "b_02"],
+            ml_hint_lines=["overall hint: same_segment"],
+        )
+
+        assert "{{" not in rendered
+        assert "}}" not in rendered
+        assert "a_01 = attached image 1" in rendered
