@@ -1,0 +1,9 @@
+templates:
+  - id: group_compare_long
+    label: Group Compare Long
+    file: conf/vlm_boundary_prompt.group_compare_long.txt
+    description: Default detailed grouped boundary prompt.
+  - id: group_compare_short
+    label: Group Compare Short
+    file: conf/vlm_boundary_prompt.group_compare_short.txt
+    description: Short grouped boundary prompt for experiments.
