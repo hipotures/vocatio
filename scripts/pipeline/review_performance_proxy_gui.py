@@ -313,6 +313,7 @@ def apply_reloaded_prompt_templates(
     prompt_templates: List[Dict[str, Any]],
     md5_hex: Optional[str],
     message: Optional[str],
+    fallback_prompt_template_id: Optional[str] = None,
 ) -> None:
     previous_prompt_template_id = (
         str(getattr(window, "manual_vlm_selected_prompt_template_id", "") or "").strip() or None
@@ -329,6 +330,8 @@ def apply_reloaded_prompt_templates(
     window.manual_vlm_status_message = message
     if previous_prompt_template_id in prompt_template_ids:
         window.manual_vlm_selected_prompt_template_id = previous_prompt_template_id
+    elif fallback_prompt_template_id in prompt_template_ids:
+        window.manual_vlm_selected_prompt_template_id = fallback_prompt_template_id
     elif prompt_template_ids:
         window.manual_vlm_selected_prompt_template_id = prompt_template_ids[0]
     else:
@@ -872,7 +875,7 @@ def build_manual_vlm_window_rows(
     window_schema: str,
     window_schema_seed: int,
     boundary_gap_seconds: int,
-) -> List[Mapping[str, Any]]:
+) -> tuple[List[Mapping[str, Any]], int]:
     left_row_index = int(anchor_pair.get("left_row_index", -1))
     right_row_index = int(anchor_pair.get("right_row_index", -1))
     if left_row_index < 0 or right_row_index < 0:
@@ -913,12 +916,15 @@ def build_manual_vlm_window_rows(
         gap_side="right",
         schema_seed=window_schema_seed,
     )
-    return [
-        *left_context_rows,
-        dict(joined_rows[left_row_index]),
-        dict(joined_rows[right_row_index]),
-        *right_context_rows,
-    ]
+    return (
+        [
+            *left_context_rows,
+            dict(joined_rows[left_row_index]),
+            dict(joined_rows[right_row_index]),
+            *right_context_rows,
+        ],
+        len(left_context_rows) + 1,
+    )
 
 
 def normalize_ml_candidate_rows(candidate_rows: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
@@ -1233,7 +1239,7 @@ def compute_manual_vlm_analyze_result(
     runtime_args.window_radius = runtime_window_radius
     runtime_args.window_schema = runtime_window_schema
     runtime_args.window_schema_seed = runtime_window_schema_seed
-    candidate_rows = build_manual_vlm_window_rows(
+    candidate_rows, group_a_count = build_manual_vlm_window_rows(
         joined_rows=joined_rows,
         anchor_pair=anchor_pair,
         window_radius=runtime_window_radius,
@@ -1241,28 +1247,38 @@ def compute_manual_vlm_analyze_result(
         window_schema_seed=runtime_window_schema_seed,
         boundary_gap_seconds=resolve_manual_vlm_boundary_gap_seconds(day_dir=day_dir, payload=payload),
     )
+    group_b_count = max(0, len(candidate_rows) - group_a_count)
+    group_a_ids, group_b_ids = probe_vlm_boundary.build_runtime_group_ids(group_a_count, group_b_count)
     extra_instructions = probe_vlm_boundary.load_extra_instructions(
         str(getattr(runtime_args, "extra_instructions", "") or ""),
         getattr(runtime_args, "extra_instructions_file", None),
     )
     response_schema_mode = str(getattr(runtime_args, "response_schema_mode", "off") or "off")
+    prompt_template_id = str(
+        getattr(runtime_args, "prompt_template_id", "") or getattr(probe_vlm_boundary, "DEFAULT_PROMPT_TEMPLATE_ID", "")
+    ).strip()
+    response_contract_id = str(
+        getattr(runtime_args, "response_contract_id", "") or getattr(probe_vlm_boundary, "DEFAULT_RESPONSE_CONTRACT_ID", "")
+    ).strip()
+    ml_hint_lines = load_manual_vlm_hint_lines(
+        workspace_dir=workspace_dir,
+        payload=payload,
+        window_rows=candidate_rows,
+        runtime_window_radius=runtime_window_radius,
+        runtime_args=runtime_args,
+    )
+    prompt, prompt_template_path = probe_vlm_boundary.render_runtime_user_prompt(
+        prompt_template_id=prompt_template_id,
+        prompt_template_file=str(getattr(runtime_args, "prompt_template_file", "") or "").strip(),
+        group_a_ids=group_a_ids,
+        group_b_ids=group_b_ids,
+        ml_hint_lines=ml_hint_lines,
+        extra_instructions=extra_instructions,
+    )
     response_schema = (
-        probe_vlm_boundary.build_response_schema(len(candidate_rows))
+        probe_vlm_boundary.build_response_schema(group_a_ids=group_a_ids, group_b_ids=group_b_ids)
         if response_schema_mode == "on"
         else None
-    )
-    prompt = probe_vlm_boundary.build_user_prompt(
-        window_size=len(candidate_rows),
-        ml_hint_lines=load_manual_vlm_hint_lines(
-            workspace_dir=workspace_dir,
-            payload=payload,
-            window_rows=candidate_rows,
-            runtime_window_radius=runtime_window_radius,
-            runtime_args=runtime_args,
-        ),
-        extra_instructions=extra_instructions,
-        response_schema_mode=response_schema_mode,
-        window_schema=runtime_window_schema,
     )
     request = probe_vlm_boundary.build_vlm_request(
         provider=str(runtime_args.provider),
@@ -1316,7 +1332,9 @@ def compute_manual_vlm_analyze_result(
         response_payload = response.raw_response if isinstance(response.raw_response, Mapping) else None
         parsed_response = probe_vlm_boundary.parse_model_response(
             raw_response,
-            window_size=len(candidate_rows),
+            group_a_ids=group_a_ids,
+            group_b_ids=group_b_ids,
+            response_contract_id=response_contract_id,
             json_validation_mode=str(getattr(runtime_args, "json_validation_mode", "strict")),
         )
         if str(parsed_response.get("response_status", "") or "") != "ok":
@@ -1357,15 +1375,11 @@ def compute_manual_vlm_analyze_result(
             setattr(exc, "preset_name", preset_name)
         if model_config:
             setattr(exc, "model_config", dict(model_config))
-        prompt_template_id = str(getattr(runtime_args, "prompt_template_id", "") or "").strip()
         if prompt_template_id:
             setattr(exc, "prompt_template_id", prompt_template_id)
-        prompt_template_file = str(getattr(runtime_args, "prompt_template_file", "") or "").strip()
+        prompt_template_file = str(prompt_template_path)
         if prompt_template_file:
             setattr(exc, "prompt_template_file", prompt_template_file)
-        response_contract_id = str(
-            getattr(runtime_args, "response_contract_id", "") or getattr(probe_vlm_boundary, "DEFAULT_RESPONSE_CONTRACT_ID", "")
-        ).strip()
         if response_contract_id:
             setattr(exc, "response_contract_id", response_contract_id)
         if attempt_count > 0:
@@ -1378,19 +1392,27 @@ def compute_manual_vlm_analyze_result(
         "preset_name": preset_name,
         "model_config": dict(model_config),
         "window_config": dict(window_config),
-        "prompt_template_id": str(getattr(runtime_args, "prompt_template_id", "") or "").strip(),
-        "prompt_template_file": str(getattr(runtime_args, "prompt_template_file", "") or "").strip(),
-        "response_contract_id": str(
-            getattr(runtime_args, "response_contract_id", "") or getattr(probe_vlm_boundary, "DEFAULT_RESPONSE_CONTRACT_ID", "")
-        ).strip(),
+        "prompt_template_id": prompt_template_id,
+        "prompt_template_file": str(prompt_template_path),
+        "response_contract_id": response_contract_id,
         "attempt_count": attempt_count,
         "run_id": run_id,
         "decision": str(parsed_response.get("decision", "") or "").strip(),
         "reason": str(parsed_response.get("reason", "") or "").strip(),
         "response_status": str(parsed_response.get("response_status", "") or "").strip(),
         "summary": str(response_json.get("summary", "") or "").strip(),
-        "left_segment_type": str(response_json.get("left_segment_type", "") or "").strip(),
-        "right_segment_type": str(response_json.get("right_segment_type", "") or "").strip(),
+        "left_segment_type": str(
+            parsed_response.get("semantic_group_a_segment_type", "")
+            or response_json.get("group_a_segment_type", "")
+            or response_json.get("left_segment_type", "")
+            or ""
+        ).strip(),
+        "right_segment_type": str(
+            parsed_response.get("semantic_group_b_segment_type", "")
+            or response_json.get("group_b_segment_type", "")
+            or response_json.get("right_segment_type", "")
+            or ""
+        ).strip(),
         "left_anchor": str(anchor_pair.get("left_relative_path", "") or "").strip(),
         "right_anchor": str(anchor_pair.get("right_relative_path", "") or "").strip(),
         "raw_response": raw_response,
@@ -4633,11 +4655,13 @@ class MainWindow(QMainWindow):
         if error_text is not None:
             apply_prompt_templates_reload_error(self, md5_hex, error_text)
             return
+        fallback_prompt_template_id = resolve_manual_vlm_selected_prompt_template_id(self) if startup else None
         apply_reloaded_prompt_templates(
             self,
             prompt_templates=prompt_templates,
             md5_hex=md5_hex,
             message=None if startup else "Prompt templates reloaded from config.",
+            fallback_prompt_template_id=fallback_prompt_template_id,
         )
 
     def set_view_mode(self, mode: int) -> None:

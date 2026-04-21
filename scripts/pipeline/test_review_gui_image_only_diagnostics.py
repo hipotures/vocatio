@@ -980,6 +980,40 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(window.manual_vlm_selected_prompt_template_id, "group_compare_short")
         self.assertEqual(window.manual_vlm_status_message, "Prompt templates reloaded from config.")
 
+    def test_reload_prompt_templates_startup_prefers_valid_vocatio_default(self) -> None:
+        window = self.build_test_window_with_two_selected_rows()
+        window.reload_prompt_templates = review_gui.MainWindow.reload_prompt_templates.__get__(window, review_gui.MainWindow)
+
+        with mock.patch.object(
+            review_gui,
+            "load_prompt_templates_for_gui",
+            return_value=(
+                [
+                    {
+                        "id": "group_compare_long",
+                        "label": "Group Compare Long",
+                        "description": "Default long prompt.",
+                        "file": "conf/vlm_boundary_prompt.group_compare_long.txt",
+                    },
+                    {
+                        "id": "group_compare_short",
+                        "label": "Group Compare Short",
+                        "description": "Short prompt.",
+                        "file": "conf/vlm_boundary_prompt.group_compare_short.txt",
+                    },
+                ],
+                "next",
+                None,
+            ),
+        ), mock.patch.object(
+            review_gui,
+            "load_manual_prediction_vocatio_config",
+            return_value={"VLM_PROMPT_TEMPLATE_ID": "group_compare_short"},
+        ):
+            window.reload_prompt_templates(startup=True)
+
+        self.assertEqual(window.manual_vlm_selected_prompt_template_id, "group_compare_short")
+
     def test_format_manual_vlm_analyze_result_text_splits_reason_into_blocks(self):
         body = review_gui.format_manual_vlm_analyze_result_text(
             {
@@ -2367,6 +2401,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         window.manual_vlm_models_error = None
         window.manual_vlm_status_message = None
         window.manual_vlm_selected_name = "Preset A"
+        window.manual_vlm_selected_prompt_template_id = "group_compare_short"
         window.current_manual_vlm_analyze_state = Mock(return_value=window.manual_vlm_analyze_state)
         window.manual_prediction_day_dir = Mock(return_value=Path("/tmp/20260323"))
         window.workspace_dir = Path("/tmp/workspace")
@@ -2412,6 +2447,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 "decision": "cut_after_2",
                 "summary": "Strong costume and performer change across the gap.",
                 "result_text": "Decision: cut_after_2\nSummary: Strong costume and performer change across the gap.",
+                "prompt_template_file": "/tmp/manual-vlm/group_compare_short.txt",
                 "debug_file_paths": ["/tmp/manual-vlm/prompt.txt"],
             },
         ):
@@ -2420,6 +2456,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(window.manual_vlm_analyze_state["status"], "result")
         self.assertIn("Decision: cut_after_2", window.manual_vlm_analyze_state["result_text"])
+        self.assertEqual(window.manual_vlm_analyze_state["prompt_template_file"], "/tmp/manual-vlm/group_compare_short.txt")
         self.assertEqual(window.manual_vlm_analyze_state["debug_file_paths"], ["/tmp/manual-vlm/prompt.txt"])
         self.assertEqual(window.refresh_current_info_dock.call_count, 2)
 
@@ -2700,6 +2737,9 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "VLM_RESPONSE_SCHEMA_MODE": "off",
             "VLM_JSON_VALIDATION_MODE": "strict",
         }
+        error.prompt_template_id = "group_compare_short"
+        error.prompt_template_file = "/tmp/manual-vlm/group_compare_short.txt"
+        error.response_contract_id = "grouped_v1"
         error.attempt_count = 3
         error.succeeded_on_attempt = 2
 
@@ -2727,6 +2767,9 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     "VLM_RESPONSE_SCHEMA_MODE": "off",
                     "VLM_JSON_VALIDATION_MODE": "strict",
                 },
+                "prompt_template_id": "group_compare_short",
+                "prompt_template_file": "/tmp/manual-vlm/group_compare_short.txt",
+                "response_contract_id": "grouped_v1",
                 "attempt_count": 3,
                 "succeeded_on_attempt": 2,
             },
@@ -3185,7 +3228,7 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 [dict(joined_rows[6])],
             ],
         ) as select_rows:
-            window_rows = review_gui.build_manual_vlm_window_rows(
+            window_rows, group_a_count = review_gui.build_manual_vlm_window_rows(
                 joined_rows,
                 anchor_pair={
                     "left_row_index": 3,
@@ -3197,11 +3240,47 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 boundary_gap_seconds=10,
             )
 
+        self.assertEqual(group_a_count, 2)
         self.assertEqual(
             [str(row["relative_path"]) for row in window_rows],
             ["cam/b.jpg", "cam/d.jpg", "cam/f.jpg", "cam/g.jpg"],
         )
         self.assertEqual(select_rows.call_count, 2)
+
+    def test_build_manual_vlm_window_rows_reports_uneven_group_count_near_segment_edge(self):
+        joined_rows = [
+            {"relative_path": "cam/a.jpg", "start_epoch_ms": "1000"},
+            {"relative_path": "cam/b.jpg", "start_epoch_ms": "2000"},
+            {"relative_path": "cam/c.jpg", "start_epoch_ms": "3000"},
+            {"relative_path": "cam/d.jpg", "start_epoch_ms": "4000"},
+            {"relative_path": "cam/e.jpg", "start_epoch_ms": "5000"},
+        ]
+
+        with unittest.mock.patch.object(
+            review_gui.probe_vlm_boundary.window_schema_lib,
+            "select_segment_rows",
+            side_effect=[
+                [],
+                [dict(joined_rows[3]), dict(joined_rows[4])],
+            ],
+        ):
+            window_rows, group_a_count = review_gui.build_manual_vlm_window_rows(
+                joined_rows,
+                anchor_pair={
+                    "left_row_index": 1,
+                    "right_row_index": 2,
+                },
+                window_radius=3,
+                window_schema="random",
+                window_schema_seed=7,
+                boundary_gap_seconds=10,
+            )
+
+        self.assertEqual(group_a_count, 1)
+        self.assertEqual(
+            [str(row["relative_path"]) for row in window_rows],
+            ["cam/b.jpg", "cam/c.jpg", "cam/d.jpg", "cam/e.jpg"],
+        )
 
     def test_run_manual_vlm_request_with_retries_retries_manual_vlm_failures_three_times(self):
         attempts = {"count": 0}
@@ -3290,6 +3369,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 return_value=["ML hints unavailable."],
             ), unittest.mock.patch.object(
                 review_gui.probe_vlm_boundary,
+                "render_runtime_user_prompt",
+                return_value=("rendered prompt", temp_path / "selected_prompt.txt"),
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
                 "build_run_id",
                 return_value="manual-nonretry",
             ), unittest.mock.patch.object(
@@ -3324,6 +3407,9 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             self.assertEqual(str(error), "VLM request model must be non-empty")
             self.assertEqual(error.preset_name, "Preset A")
             self.assertEqual(error.model_config["VLM_NAME"], "Preset A")
+            self.assertEqual(error.prompt_template_id, review_gui.probe_vlm_boundary.DEFAULT_PROMPT_TEMPLATE_ID)
+            self.assertEqual(error.prompt_template_file, str(temp_path / "selected_prompt.txt"))
+            self.assertEqual(error.response_contract_id, review_gui.probe_vlm_boundary.DEFAULT_RESPONSE_CONTRACT_ID)
             self.assertEqual(error.attempt_count, 1)
             self.assertEqual(
                 error.debug_file_paths,
@@ -3399,6 +3485,9 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 response_schema_mode="off",
                 json_validation_mode="strict",
                 window_radius=1,
+                prompt_template_id="group_compare_short",
+                prompt_template_file="",
+                response_contract_id="grouped_v1",
             )
             request_attempts = {"count": 0}
 
@@ -3416,12 +3505,15 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 "resolve_manual_vlm_runtime_args",
                 return_value=runtime_args,
             ), unittest.mock.patch.object(
-                review_gui.probe_vlm_boundary,
-                "_build_ml_candidate_window_rows",
-                return_value=[
-                    {"image_path": str(image_paths[0])},
-                    {"image_path": str(image_paths[1])},
-                ],
+                review_gui,
+                "build_manual_vlm_window_rows",
+                return_value=(
+                    [
+                        {"image_path": str(image_paths[0])},
+                        {"image_path": str(image_paths[1])},
+                    ],
+                    1,
+                ),
             ), unittest.mock.patch.object(
                 review_gui.probe_vlm_boundary,
                 "load_extra_instructions",
@@ -3432,8 +3524,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 return_value=["ML hints unavailable."],
             ), unittest.mock.patch.object(
                 review_gui.probe_vlm_boundary,
-                "build_user_prompt",
-                return_value="prompt",
+                "render_runtime_user_prompt",
+                return_value=("rendered prompt", temp_path / "group_compare_short.txt"),
             ), unittest.mock.patch.object(
                 review_gui.probe_vlm_boundary,
                 "build_vlm_request",
@@ -3498,12 +3590,168 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(result["window_config"], window_config)
         self.assertEqual(result["attempt_count"], 3)
         self.assertEqual(result["succeeded_on_attempt"], 3)
+        self.assertEqual(result["prompt_template_id"], "group_compare_short")
+        self.assertEqual(result["prompt_template_file"], str(temp_path / "group_compare_short.txt"))
         self.assertIn("Model: Preset A", result["result_text"])
         self.assertIn("Model config:", result["result_text"])
         self.assertIn("Window config:", result["result_text"])
+        self.assertIn("Prompt config:", result["result_text"])
         self.assertIn("  VLM_WINDOW_SCHEMA: random", result["result_text"])
         self.assertIn("Attempts: 3", result["result_text"])
         self.assertIn("Succeeded on attempt: 3", result["result_text"])
+
+    def test_compute_manual_vlm_analyze_result_uses_grouped_prompt_template_helpers_when_schema_mode_is_on(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            image_paths = []
+            for name in ("left.jpg", "right.jpg", "tail.jpg"):
+                image_path = temp_path / name
+                image_path.write_bytes(b"jpeg")
+                image_paths.append(image_path)
+
+            joined_rows = [
+                {"relative_path": "cam/left.jpg", "start_epoch_ms": "1000", "image_path": str(image_paths[0])},
+                {"relative_path": "cam/right.jpg", "start_epoch_ms": "2000", "image_path": str(image_paths[1])},
+                {"relative_path": "cam/tail.jpg", "start_epoch_ms": "3000", "image_path": str(image_paths[2])},
+            ]
+            manual_vlm_model = {
+                "VLM_NAME": "Preset A",
+                "VLM_PROVIDER": "ollama",
+                "VLM_BASE_URL": "http://127.0.0.1:11434",
+                "VLM_MODEL": "qwen3.5:9b",
+                "VLM_CONTEXT_TOKENS": 4096,
+                "VLM_MAX_OUTPUT_TOKENS": 512,
+                "VLM_KEEP_ALIVE": "15m",
+                "VLM_TIMEOUT_SECONDS": 30,
+                "VLM_TEMPERATURE": 0,
+                "VLM_REASONING_LEVEL": "low",
+                "VLM_RESPONSE_SCHEMA_MODE": "on",
+                "VLM_JSON_VALIDATION_MODE": "strict",
+            }
+            runtime_args = argparse.Namespace(
+                provider="ollama",
+                model="qwen3.5:9b",
+                image_variant="source",
+                ollama_base_url="http://127.0.0.1:11434",
+                timeout_seconds=30.0,
+                ollama_keep_alive="15m",
+                temperature=0.0,
+                ollama_num_ctx=4096,
+                ollama_num_predict=512,
+                ollama_think="low",
+                response_schema_mode="on",
+                json_validation_mode="strict",
+                window_radius=2,
+                prompt_template_id="group_compare_short",
+                prompt_template_file="",
+                response_contract_id="grouped_v1",
+            )
+
+            with unittest.mock.patch.object(
+                review_gui,
+                "resolve_manual_vlm_runtime_args",
+                return_value=runtime_args,
+            ), unittest.mock.patch.object(
+                review_gui,
+                "build_manual_vlm_window_rows",
+                return_value=(
+                    [
+                        {"image_path": str(image_paths[0]), "relative_path": "cam/left.jpg"},
+                        {"image_path": str(image_paths[1]), "relative_path": "cam/right.jpg"},
+                        {"image_path": str(image_paths[2]), "relative_path": "cam/tail.jpg"},
+                    ],
+                    2,
+                ),
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "load_extra_instructions",
+                return_value="",
+            ), unittest.mock.patch.object(
+                review_gui,
+                "load_manual_vlm_hint_lines",
+                return_value=["ML hints unavailable."],
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "render_runtime_user_prompt",
+                return_value=("rendered prompt", temp_path / "group_compare_short.txt"),
+            ) as render_prompt, unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "build_response_schema",
+                return_value={"type": "json_schema"},
+            ) as build_schema, unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "build_vlm_request",
+                return_value=object(),
+            ) as build_request, unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "build_provider_request_payload",
+                return_value={"request": "payload"},
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "build_run_id",
+                return_value="manual-schema-on",
+            ), unittest.mock.patch.object(
+                review_gui.tempfile,
+                "gettempdir",
+                return_value=temp_dir,
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "run_vlm_request",
+                return_value=Mock(text="response text", raw_response={"response": "ok"}),
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "parse_model_response",
+                return_value={
+                    "response_status": "ok",
+                    "decision": "different_segments",
+                    "reason": "Strong costume and performer change across the gap.",
+                },
+            ) as parse_response, unittest.mock.patch.object(
+                review_gui,
+                "extract_manual_vlm_response_payload",
+                return_value={
+                    "summary": "Strong costume and performer change across the gap.",
+                    "left_segment_type": "performance",
+                    "right_segment_type": "ceremony",
+                },
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "dump_debug_artifacts",
+            ):
+                result = review_gui.compute_manual_vlm_analyze_result(
+                    day_dir=Path("/tmp/20260323"),
+                    workspace_dir=temp_path,
+                    payload={"day": "20260323", "window_radius": 2},
+                    joined_rows=joined_rows,
+                    anchor_pair={
+                        "left_row_index": 0,
+                        "right_row_index": 1,
+                        "left_relative_path": "cam/left.jpg",
+                        "right_relative_path": "cam/right.jpg",
+                    },
+                    window_config={
+                        "window_radius": 2,
+                        "window_schema": "random",
+                        "window_schema_seed": 42,
+                    },
+                    manual_vlm_model=manual_vlm_model,
+                    selected_prompt_template_id="group_compare_short",
+                )
+
+        render_prompt.assert_called_once_with(
+            prompt_template_id="group_compare_short",
+            prompt_template_file="",
+            group_a_ids=["a_01", "a_02"],
+            group_b_ids=["b_01"],
+            ml_hint_lines=["ML hints unavailable."],
+            extra_instructions="",
+        )
+        build_schema.assert_called_once_with(group_a_ids=["a_01", "a_02"], group_b_ids=["b_01"])
+        self.assertEqual(build_request.call_args.kwargs["response_schema"], {"type": "json_schema"})
+        self.assertEqual(parse_response.call_args.kwargs["group_a_ids"], ["a_01", "a_02"])
+        self.assertEqual(parse_response.call_args.kwargs["group_b_ids"], ["b_01"])
+        self.assertEqual(parse_response.call_args.kwargs["response_contract_id"], "grouped_v1")
+        self.assertEqual(result["prompt_template_file"], str(temp_path / "group_compare_short.txt"))
 
     def test_compute_manual_ml_prediction_result_uses_image_paths_for_manual_thumbnail_columns(self):
         joined_rows = [
