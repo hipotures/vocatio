@@ -189,3 +189,15 @@ result = whisperx.align(
 - Revisit how `left_segment_type` and `right_segment_type` should be exposed to the downstream VLM prompt after the extra model exists.
 - For manual single-gap prediction flows, `VLM_OVERLAP` likely has no value; either remove it from that path or document the exact scenario where it still helps.
 - Consider replacing manual-gap `overlap` with a more direct symmetric-context parameter, for example `gap_side_span`, where `1 -> window 2`, `2 -> window 4`, `3 -> window 6`, and the cut is always centered between `L` and `P`.
+
+## Manual VLM Window Config Consistency
+
+- Fix `Manual VLM analyze` so `VLM_WINDOW_RADIUS` is resolved from the current `.vocatio`, not from stale review-index payload metadata.
+- Keep `VLM_WINDOW_SCHEMA` and `VLM_WINDOW_SCHEMA_SEED` on the same resolution model as `VLM_WINDOW_RADIUS`:
+  - GUI dropdown may override schema for the current manual run.
+  - `.vocatio` should remain the default source of truth.
+  - Review-index payload should be fallback-only, not the primary runtime source.
+- Current bug:
+  - changing `VLM_WINDOW_RADIUS` in `.vocatio` may still leave manual GUI on the old window size from payload metadata
+  - this makes the panel show a `Window config` inconsistent with the user’s current config expectations
+  - in practice, `window_radius=3` still yields 6 images even after `.vocatio` was edited to another value if the loaded payload still carries the older radius
