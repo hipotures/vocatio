@@ -1719,6 +1719,23 @@ def build_manual_vlm_model_lines(result: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def build_manual_vlm_window_lines(result: Mapping[str, Any]) -> List[str]:
+    window_config = result.get("window_config")
+    if not isinstance(window_config, Mapping):
+        return []
+    ordered_keys = ("window_radius", "window_schema", "window_schema_seed")
+    items = [
+        (key, format_manual_vlm_metadata_value(window_config.get(key)))
+        for key in ordered_keys
+        if key in window_config
+    ]
+    if not items:
+        return []
+    lines = ["Window config:"]
+    lines.extend([f"  {key}: {value}" for key, value in items])
+    return lines
+
+
 def build_manual_vlm_retry_lines(result: Mapping[str, Any]) -> List[str]:
     attempt_count = parse_manual_vlm_attempt_count(result.get("attempt_count"))
     succeeded_on_attempt = parse_manual_vlm_attempt_count(result.get("succeeded_on_attempt"))
@@ -1789,6 +1806,7 @@ def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
         anchor_lines.append(f"  {format_value(left_anchor)} -> {format_value(right_anchor)}")
     metadata_lines: List[str] = []
     metadata_lines.extend(build_manual_vlm_model_lines(result))
+    metadata_lines.extend(build_manual_vlm_window_lines(result))
     metadata_lines.extend(build_manual_vlm_retry_lines(result))
     lines = list(semantic_lines)
     append_info_block(lines, anchor_lines)
@@ -1886,6 +1904,7 @@ def build_manual_vlm_analyze_section(
         lines.append(f"Error: {format_value(error_text or resolution_error)}")
         metadata_lines: List[str] = []
         metadata_lines.extend(build_manual_vlm_model_lines(state))
+        metadata_lines.extend(build_manual_vlm_window_lines(state))
         metadata_lines.extend(build_manual_vlm_retry_lines(state))
         append_info_block(lines, metadata_lines)
     elif status == "result":

@@ -854,6 +854,11 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                     "VLM_RESPONSE_SCHEMA_MODE": "off",
                     "VLM_JSON_VALIDATION_MODE": "strict",
                 },
+                "window_config": {
+                    "window_radius": 3,
+                    "window_schema": "random",
+                    "window_schema_seed": 42,
+                },
                 "attempt_count": 3,
                 "succeeded_on_attempt": 3,
             }
@@ -873,6 +878,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Model config:", body)
         self.assertIn("  VLM_NAME: Preset A", body)
         self.assertIn("  VLM_TEMPERATURE: 0", body)
+        self.assertIn("Window config:", body)
+        self.assertIn("  window_radius: 3", body)
+        self.assertIn("  window_schema: random", body)
+        self.assertIn("  window_schema_seed: 42", body)
         self.assertIn("Attempts: 3", body)
         self.assertIn("Succeeded on attempt: 3", body)
 
@@ -951,6 +960,27 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             "  VLM_BASE_URL: http://127.0.0.1:11434",
             text,
         )
+
+    def test_manual_vlm_error_section_includes_window_config(self):
+        section = review_gui.build_manual_vlm_analyze_section(
+            {
+                "status": "error",
+                "error": "JSON parse error: JSON object not found in model response",
+                "preset_name": "Preset A",
+                "model_config": {"VLM_NAME": "Preset A"},
+                "window_config": {
+                    "window_radius": 3,
+                    "window_schema": "random",
+                    "window_schema_seed": 42,
+                },
+                "attempt_count": 3,
+            }
+        )
+
+        self.assertIn("Window config:", section["body"])
+        self.assertIn("  window_radius: 3", section["body"])
+        self.assertIn("  window_schema: random", section["body"])
+        self.assertIn("  window_schema_seed: 42", section["body"])
 
     def test_manual_ml_prediction_section_renders_left_right_and_boundary(self):
         state = review_gui.build_manual_ml_prediction_section(
