@@ -731,6 +731,35 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(combos[2].currentText(), "group_compare_long")
         self.assertEqual(combos[2].itemData(0, Qt.ToolTipRole), "Group Compare Long: Default long prompt.")
 
+    def test_manual_vlm_section_disables_analyze_when_prompt_template_registry_is_empty(self) -> None:
+        window = self.build_test_window_with_two_selected_rows()
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        window.manual_vlm_prompt_templates = []
+        window.manual_vlm_prompt_templates_md5 = "loaded-empty"
+        section_config = review_gui.build_manual_vlm_analyze_section_config(window)
+
+        section = review_gui.build_manual_vlm_analyze_section(
+            window.manual_vlm_analyze_state,
+            preset_names=section_config["preset_names"],
+            selected_name=section_config["selected_name"],
+            window_schema_names=section_config["window_schema_names"],
+            selected_window_schema=section_config["selected_window_schema"],
+            prompt_template_ids=section_config["prompt_template_ids"],
+            selected_prompt_template_id=section_config["selected_prompt_template_id"],
+            prompt_template_descriptions=section_config["prompt_template_tooltips"],
+            description=section_config["description"],
+            on_choice_changed=section_config["on_choice_changed"],
+            on_window_schema_changed=section_config["on_window_schema_changed"],
+            on_prompt_template_changed=section_config["on_prompt_template_changed"],
+        )
+
+        self.assertEqual(section["choice_items"], ["Preset A"])
+        self.assertEqual(section["tertiary_choice_items"], [])
+        self.assertIsNone(section["tertiary_choice_value"])
+        self.assertFalse(section["tertiary_choice_enabled"])
+        self.assertFalse(section["action_enabled"])
+        self.assertIn("Prompt templates unavailable", section["description"])
+
     def test_manual_vlm_debug_dir_always_uses_tmp_root(self):
         runtime_args = argparse.Namespace(dump_debug_dir="/tmp/vlm-probe-debug")
         debug_dir = review_gui.resolve_manual_vlm_debug_dir(
@@ -2642,6 +2671,155 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(window.manual_vlm_analyze_state["status"], "error")
         self.assertEqual(window.manual_vlm_analyze_state["error"], "Model config error: bad yaml")
+        window.start_manual_action_worker.assert_not_called()
+        resolve_mock.assert_not_called()
+        compute_mock.assert_not_called()
+
+    def test_run_manual_vlm_analyze_with_loaded_empty_prompt_template_registry_stays_idle(self) -> None:
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.manual_vlm_analyze_state = {
+            "status": "result",
+            "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+            "result_text": "stale result",
+            "resolution_error": "stale resolution error",
+        }
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        window.manual_vlm_models_md5 = "stable"
+        window.manual_vlm_models_error = None
+        window.manual_vlm_selected_name = "Preset A"
+        window.manual_vlm_prompt_templates = []
+        window.manual_vlm_prompt_templates_md5 = "loaded-empty"
+        window.manual_vlm_prompt_templates_error = None
+        window.manual_vlm_status_message = None
+        window.selected_photo_entries = Mock(
+            return_value=[
+                {"relative_path": "cam/a.jpg", "source_path": "/src/a.jpg"},
+                {"relative_path": "cam/b.jpg", "source_path": "/src/b.jpg"},
+            ]
+        )
+        window.refresh_current_info_dock = Mock()
+        window.workspace_dir = Path("/workspace")
+        window.payload = {"day": "20260323"}
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        window.start_manual_action_worker = Mock()
+        bind_manual_action_methods(window)
+
+        with unittest.mock.patch.object(
+            review_gui.manual_vlm_models,
+            "compute_manual_vlm_models_md5",
+            return_value="stable",
+        ), unittest.mock.patch.object(
+            review_gui,
+            "load_prompt_templates_for_gui",
+            return_value=([], "loaded-empty", None),
+        ), unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_vlm_analyze_state",
+        ) as resolve_mock, unittest.mock.patch.object(
+            review_gui,
+            "compute_manual_vlm_analyze_result",
+        ) as compute_mock:
+            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(window, review_gui.MainWindow)
+            window.run_manual_vlm_analyze()
+
+        self.assertEqual(window.manual_vlm_analyze_state["status"], "idle")
+        self.assertNotIn("result_text", window.manual_vlm_analyze_state)
+        self.assertNotIn("resolution_error", window.manual_vlm_analyze_state)
+        self.assertEqual(window.manual_vlm_status_message, "Prompt templates unavailable: conf/vlm_prompt_templates.yaml has no entries.")
+        window.start_manual_action_worker.assert_not_called()
+        resolve_mock.assert_not_called()
+        compute_mock.assert_not_called()
+
+    def test_run_manual_vlm_analyze_changed_prompt_template_md5_resets_stale_state(self) -> None:
+        window = review_gui.MainWindow.__new__(review_gui.MainWindow)
+        window.manual_vlm_analyze_state = {
+            "status": "result",
+            "selected_photo_keys": ["source:/src/left.jpg", "source:/src/right.jpg"],
+            "result_text": "stale result",
+            "resolution_error": "stale resolution error",
+            "debug_file_paths": ["/tmp/stale.txt"],
+        }
+        window.manual_vlm_models = [{"VLM_NAME": "Preset A"}]
+        window.manual_vlm_models_md5 = "stable"
+        window.manual_vlm_models_error = None
+        window.manual_vlm_selected_name = "Preset A"
+        window.manual_vlm_prompt_templates = [
+            {
+                "id": "group_compare_short",
+                "label": "Group Compare Short",
+                "description": "Short prompt.",
+                "file": "conf/vlm_boundary_prompt.group_compare_short.txt",
+            }
+        ]
+        window.manual_vlm_prompt_templates_md5 = "old"
+        window.manual_vlm_prompt_templates_error = None
+        window.manual_vlm_selected_prompt_template_id = "group_compare_short"
+        window.manual_vlm_status_message = None
+        window.selected_photo_entries = Mock(
+            return_value=[
+                {"relative_path": "cam/a.jpg", "source_path": "/src/a.jpg"},
+                {"relative_path": "cam/b.jpg", "source_path": "/src/b.jpg"},
+            ]
+        )
+        window.refresh_current_info_dock = Mock()
+        window.workspace_dir = Path("/workspace")
+        window.payload = {"day": "20260323"}
+        window.source_mode = review_gui.review_index_loader.SOURCE_MODE_IMAGE_ONLY_V1
+        window.start_manual_action_worker = Mock()
+        bind_manual_action_methods(window)
+
+        def fake_reload_prompt_templates(startup: bool = False) -> None:
+            self.assertFalse(startup)
+            window.manual_vlm_prompt_templates = [
+                {
+                    "id": "group_compare_long",
+                    "label": "Group Compare Long",
+                    "description": "Default long prompt.",
+                    "file": "conf/vlm_boundary_prompt.group_compare_long.txt",
+                }
+            ]
+            window.manual_vlm_prompt_templates_md5 = "new"
+            window.manual_vlm_prompt_templates_error = None
+            window.manual_vlm_selected_prompt_template_id = "group_compare_long"
+            window.manual_vlm_status_message = "Prompt templates reloaded from config."
+
+        window.reload_prompt_templates = fake_reload_prompt_templates
+
+        with unittest.mock.patch.object(
+            review_gui.manual_vlm_models,
+            "compute_manual_vlm_models_md5",
+            return_value="stable",
+        ), unittest.mock.patch.object(
+            review_gui,
+            "load_prompt_templates_for_gui",
+            return_value=(
+                [
+                    {
+                        "id": "group_compare_long",
+                        "label": "Group Compare Long",
+                        "description": "Default long prompt.",
+                        "file": "conf/vlm_boundary_prompt.group_compare_long.txt",
+                    }
+                ],
+                "new",
+                None,
+            ),
+        ), unittest.mock.patch.object(
+            review_gui,
+            "resolve_manual_vlm_analyze_state",
+        ) as resolve_mock, unittest.mock.patch.object(
+            review_gui,
+            "compute_manual_vlm_analyze_result",
+        ) as compute_mock:
+            window.run_manual_vlm_analyze = review_gui.MainWindow.run_manual_vlm_analyze.__get__(window, review_gui.MainWindow)
+            window.run_manual_vlm_analyze()
+
+        self.assertEqual(window.manual_vlm_analyze_state["status"], "idle")
+        self.assertNotIn("result_text", window.manual_vlm_analyze_state)
+        self.assertNotIn("resolution_error", window.manual_vlm_analyze_state)
+        self.assertNotIn("debug_file_paths", window.manual_vlm_analyze_state)
+        self.assertEqual(window.manual_vlm_selected_prompt_template_id, "group_compare_long")
+        self.assertEqual(window.manual_vlm_status_message, "Prompt templates reloaded from config.")
         window.start_manual_action_worker.assert_not_called()
         resolve_mock.assert_not_called()
         compute_mock.assert_not_called()

@@ -327,7 +327,9 @@ def apply_reloaded_prompt_templates(
     window.manual_vlm_prompt_templates = normalized_prompt_templates
     window.manual_vlm_prompt_templates_md5 = md5_hex
     window.manual_vlm_prompt_templates_error = None
-    window.manual_vlm_status_message = message
+    window.manual_vlm_status_message = (
+        message if prompt_template_ids else build_manual_vlm_prompt_templates_unavailable_message()
+    )
     if previous_prompt_template_id in prompt_template_ids:
         window.manual_vlm_selected_prompt_template_id = previous_prompt_template_id
     elif fallback_prompt_template_id in prompt_template_ids:
@@ -721,6 +723,8 @@ def resolve_manual_vlm_runtime_args(
     prompt_template_id = str(selected_prompt_template_id or "").strip() or str(
         getattr(args, "prompt_template_id", "") or getattr(probe_vlm_boundary, "DEFAULT_PROMPT_TEMPLATE_ID", "")
     ).strip()
+    if selected_prompt_template_id is not None:
+        prompt_template_id = str(selected_prompt_template_id).strip()
     args.prompt_template_id = prompt_template_id
     args.prompt_template_file = ""
     args.response_contract_id = str(
@@ -2010,20 +2014,26 @@ def resolve_manual_vlm_selected_prompt_template_id(window: object) -> str:
         if isinstance(prompt_template, Mapping) and str(prompt_template.get("id", "") or "").strip()
     ]
     configured_value = str(getattr(window, "manual_vlm_selected_prompt_template_id", "") or "").strip()
-    if configured_value and (not prompt_template_ids or configured_value in prompt_template_ids):
+    if configured_value and configured_value in prompt_template_ids:
         return configured_value
     day_dir_resolver = getattr(window, "manual_prediction_day_dir", None)
+    vocatio_configured_value = ""
     if callable(day_dir_resolver):
         try:
             vocatio_config = load_manual_prediction_vocatio_config(day_dir_resolver())
         except Exception:
             vocatio_config = {}
-        configured_value = str(vocatio_config.get("VLM_PROMPT_TEMPLATE_ID", "") or "").strip()
-        if configured_value and (not prompt_template_ids or configured_value in prompt_template_ids):
-            return configured_value
+        vocatio_configured_value = str(vocatio_config.get("VLM_PROMPT_TEMPLATE_ID", "") or "").strip()
+        if vocatio_configured_value and vocatio_configured_value in prompt_template_ids:
+            return vocatio_configured_value
     if prompt_template_ids:
         return prompt_template_ids[0]
-    return str(getattr(probe_vlm_boundary, "DEFAULT_PROMPT_TEMPLATE_ID", "") or "").strip()
+    if (
+        getattr(window, "manual_vlm_prompt_templates_md5", None) is not None
+        or str(getattr(window, "manual_vlm_prompt_templates_error", "") or "").strip()
+    ):
+        return ""
+    return configured_value or vocatio_configured_value
 
 
 def resolve_manual_vlm_prompt_template_file(
@@ -2038,6 +2048,10 @@ def resolve_manual_vlm_prompt_template_file(
             continue
         return str(prompt_template.get("file", "") or "").strip()
     return ""
+
+
+def build_manual_vlm_prompt_templates_unavailable_message() -> str:
+    return "Prompt templates unavailable: conf/vlm_prompt_templates.yaml has no entries."
 
 
 def build_manual_vlm_analyze_section_config(window: object) -> Dict[str, Any]:
@@ -2072,11 +2086,13 @@ def build_manual_vlm_analyze_section_config(window: object) -> Dict[str, Any]:
     selected_prompt_template_id = resolve_manual_vlm_selected_prompt_template_id(window)
     if prompt_template_ids and selected_prompt_template_id not in prompt_template_ids:
         selected_prompt_template_id = prompt_template_ids[0]
-    if prompt_templates_error:
+    if prompt_templates_error or not prompt_template_ids:
         selected_prompt_template_id = None
+    prompt_templates_unavailable = not prompt_templates_error and not prompt_template_ids
     description = (
         str(getattr(window, "manual_vlm_models_error", "") or "").strip()
         or prompt_templates_error
+        or (build_manual_vlm_prompt_templates_unavailable_message() if prompt_templates_unavailable else "")
         or str(getattr(window, "manual_vlm_status_message", "") or "").strip()
         or "Ephemeral runtime state for manual VLM boundary analysis."
     )
@@ -2172,10 +2188,6 @@ def build_manual_vlm_analyze_section(
     normalized_selected_prompt_template_id = str(selected_prompt_template_id or "").strip() or None
     if normalized_prompt_template_ids and normalized_selected_prompt_template_id not in normalized_prompt_template_ids:
         normalized_selected_prompt_template_id = normalized_prompt_template_ids[0]
-    elif not normalized_prompt_template_ids and not normalized_selected_prompt_template_id:
-        normalized_selected_prompt_template_id = str(
-            getattr(probe_vlm_boundary, "DEFAULT_PROMPT_TEMPLATE_ID", "") or ""
-        ).strip() or None
     normalized_choice_tooltips = {
         preset_name: str((preset_descriptions or {}).get(preset_name, "") or "").strip() or preset_name
         for preset_name in normalized_preset_names
@@ -4236,7 +4248,7 @@ class MainWindow(QMainWindow):
         selected_snapshot = [dict(photo) for photo in selected_photos]
         selected_manual_vlm_model = dict(manual_vlm_model)
         selected_window_schema = str(getattr(self, "manual_vlm_selected_window_schema", "") or "").strip() or None
-        selected_prompt_template_id = resolve_manual_vlm_selected_prompt_template_id(self) or None
+        selected_prompt_template_id = resolve_manual_vlm_selected_prompt_template_id(self)
 
         def work_fn() -> Mapping[str, Any]:
             try:
@@ -4508,6 +4520,10 @@ class MainWindow(QMainWindow):
             self.refresh_current_info_dock()
             return
         if reloaded:
+            self.set_manual_action_state(
+                "run_manual_vlm_analyze",
+                build_idle_manual_vlm_analyze_state(selected_photos),
+            )
             self.refresh_current_info_dock()
             return
         if hasattr(self, "manual_vlm_prompt_templates"):
@@ -4532,6 +4548,18 @@ class MainWindow(QMainWindow):
                 self.refresh_current_info_dock()
                 return
             if prompt_templates_reloaded:
+                self.set_manual_action_state(
+                    "run_manual_vlm_analyze",
+                    build_idle_manual_vlm_analyze_state(selected_photos),
+                )
+                self.refresh_current_info_dock()
+                return
+            if not getattr(self, "manual_vlm_prompt_templates", []):
+                self.manual_vlm_status_message = build_manual_vlm_prompt_templates_unavailable_message()
+                self.set_manual_action_state(
+                    "run_manual_vlm_analyze",
+                    build_idle_manual_vlm_analyze_state(selected_photos),
+                )
                 self.refresh_current_info_dock()
                 return
         try:
