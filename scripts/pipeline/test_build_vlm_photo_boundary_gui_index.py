@@ -34,6 +34,18 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
         args = builder.parse_args(["/tmp/day", "--run-id", "vlm-20260414053012"])
         self.assertEqual(args.run_id, "vlm-20260414053012")
 
+    def test_resolve_runtime_window_schema_reads_metadata_values(self):
+        metadata = {
+            "args": {
+                "window_radius": 3,
+                "window_schema": "random",
+                "window_schema_seed": 42,
+            }
+        }
+
+        self.assertEqual(builder.resolve_runtime_window_schema(metadata), "random")
+        self.assertEqual(builder.resolve_runtime_window_schema_seed(metadata), 42)
+
     def test_select_run_metadata_defaults_to_latest_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_dir = Path(tmp) / "_workspace"
@@ -93,9 +105,18 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
             ml_model_run_id, ml_hint_pairs, error = builder.build_ml_hint_pairs_for_run(
                 day_dir=Path("/tmp/20260323"),
                 workspace_dir=Path("/tmp/workspace"),
-                run_metadata={"args": {"window_radius": 3, "photo_pre_model_dir": "photo-pre"}},
+                run_metadata={
+                    "args": {
+                        "window_radius": 3,
+                        "window_schema": "index_quantile",
+                        "window_schema_seed": 42,
+                        "photo_pre_model_dir": "photo-pre",
+                    }
+                },
                 run_rows=[
                     {
+                        "cut_left_relative_path": "cam/c.hif",
+                        "cut_right_relative_path": "cam/d.hif",
                         "relative_paths_json": json.dumps(
                             [
                                 "cam/a.hif",
@@ -131,6 +152,82 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
         )
         self.assertEqual(len(captured_candidate_rows), 1)
         self.assertEqual(captured_candidate_rows[0]["window_radius"], 3)
+
+    def test_build_ml_hint_pairs_for_run_uses_cut_pair_when_window_is_shorter_than_radius_contract(self):
+        joined_rows = [
+            {
+                "relative_path": f"cam/{name}.hif",
+                "photo_id": f"cam/{name}.hif",
+                "start_epoch_ms": str(index * 1000),
+                "thumb_path": f"/tmp/{name}.jpg",
+            }
+            for index, name in enumerate(("a", "b", "c"), start=1)
+        ]
+        captured_candidate_rows: list[dict[str, object]] = []
+
+        def capture_prediction(**kwargs):
+            captured_candidate_rows.append(dict(kwargs["candidate_row"]))
+            return builder.probe.MlHintPrediction(
+                boundary_prediction=True,
+                boundary_confidence=0.83,
+                left_segment_type_prediction="performance",
+                left_segment_type_confidence=0.80,
+                right_segment_type_prediction="ceremony",
+                right_segment_type_confidence=0.79,
+            )
+
+        with mock.patch.object(
+            builder.probe,
+            "resolve_ml_model_run",
+            return_value=("ml-run-001", Path("/tmp/model-run")),
+        ), mock.patch.object(
+            builder.probe,
+            "load_ml_hint_context",
+            return_value=mock.Mock(window_radius=1),
+        ), mock.patch.object(
+            builder.probe,
+            "read_boundary_scores_by_pair",
+            return_value={},
+        ), mock.patch.object(
+            builder.probe,
+            "resolve_path",
+            return_value=Path("/tmp/photo-pre"),
+        ), mock.patch.object(
+            builder.probe,
+            "predict_ml_hint_for_candidate",
+            side_effect=capture_prediction,
+        ):
+            ml_model_run_id, ml_hint_pairs, error = builder.build_ml_hint_pairs_for_run(
+                day_dir=Path("/tmp/20260323"),
+                workspace_dir=Path("/tmp/workspace"),
+                run_metadata={
+                    "args": {
+                        "window_radius": 1,
+                        "window_schema": "consecutive",
+                        "window_schema_seed": 42,
+                        "boundary_gap_seconds": 10,
+                        "photo_pre_model_dir": "photo-pre",
+                    }
+                },
+                run_rows=[
+                    {
+                        "window_radius": "1",
+                        "cut_left_relative_path": "cam/b.hif",
+                        "cut_right_relative_path": "cam/c.hif",
+                        "relative_paths_json": json.dumps(["cam/b.hif", "cam/c.hif"]),
+                    }
+                ],
+                joined_rows=joined_rows,
+                ml_model_run_id="ml-run-001",
+            )
+
+        self.assertEqual(ml_model_run_id, "ml-run-001")
+        self.assertEqual(error, "")
+        self.assertEqual(len(captured_candidate_rows), 1)
+        self.assertEqual(captured_candidate_rows[0]["center_left_photo_id"], "cam/b.hif")
+        self.assertEqual(captured_candidate_rows[0]["center_right_photo_id"], "cam/c.hif")
+        self.assertEqual(ml_hint_pairs[0]["left_relative_path"], "cam/b.hif")
+        self.assertEqual(ml_hint_pairs[0]["right_relative_path"], "cam/c.hif")
 
     def test_build_ml_hint_pairs_for_run_rejects_model_window_radius_mismatch(self):
         joined_rows = [
