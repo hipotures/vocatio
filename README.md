@@ -453,7 +453,7 @@ Important behavior:
 - `--prompt-template-file` or `.vocatio` `VLM_PROMPT_TEMPLATE_FILE` optionally overrides the registry entry with a repo-relative or absolute template file; any non-empty file override wins over the selected template id
 - supported window schemas are `consecutive`, `random`, `index_quantile`, `time_quantile`, `time_max_min`, and `time_boundary_spread`
 - grouped prompt runs use the `grouped_v1` response contract
-- `vlm_boundary_results.csv`, VLM run metadata, and downstream GUI artifacts persist `window_radius`, `window_schema`, `window_schema_seed`, `prompt_template_id`, optional `prompt_template_file`, and `response_contract_id`
+- `vlm_boundary_results.csv` persists `window_radius` and `response_contract_id`; VLM run metadata and downstream GUI artifacts also persist `window_schema`, `window_schema_seed`, `prompt_template_id`, and optional `prompt_template_file`
 - only gaps larger than `--boundary-gap-seconds` are probed
 - default `--max-batches` is `10`, so use a larger explicit value for real runs and rerun the same command or continue with `--run-id`
 - `--new-run` starts a fresh VLM run
@@ -530,7 +530,7 @@ GUI behavior:
 - if the current selection is not preserved, the first preset becomes the default selection
 - if the current prompt template selection is not preserved, the first template becomes the default selection
 - when you click `Analyze` in `Manual VLM analyze`, the GUI recomputes both config-file MD5 values
-- if either MD5 changed, the GUI reloads that config and refreshes the affected dropdown before running the analyze action
+- if either MD5 changed, that click reloads the changed config and refreshes the affected dropdown, then stops without starting analysis; click `Analyze` again to run with the refreshed selection
 - manual result and error diagnostics include `VLM_PROMPT_TEMPLATE_ID`, optional `VLM_PROMPT_TEMPLATE_FILE`, and `response_contract_id`
 
 ### ML Boundary Verifier
