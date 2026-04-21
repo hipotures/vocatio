@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,13 @@ class PromptTemplatesConfig:
     md5_hex: str
 
 
+REQUIRED_TEMPLATE_PLACEHOLDERS = (
+    "{{GROUP_MAPPING}}",
+    "{{ML_HINTS_BLOCK}}",
+    "{{FRAME_NOTES_JSON_EXAMPLE}}",
+)
+
+
 def _validate_required_string_field(item: dict[str, Any], index: int, field_name: str) -> str:
     if field_name not in item:
         raise ValueError(f"templates[{index}] is missing {field_name}")
@@ -32,6 +40,52 @@ def _validate_required_string_field(item: dict[str, Any], index: int, field_name
     if not normalized:
         raise ValueError(f"templates[{index}] is missing {field_name}")
     return normalized
+
+
+def build_group_mapping_lines(group_a_ids: list[str], group_b_ids: list[str]) -> list[str]:
+    ordered_ids = [*group_a_ids, *group_b_ids]
+    return [
+        f"{frame_id} = attached image {index}"
+        for index, frame_id in enumerate(ordered_ids, start=1)
+    ]
+
+
+def build_frame_notes_json_example(group_a_ids: list[str], group_b_ids: list[str]) -> str:
+    records = [
+        {"frame_id": frame_id, "group": "group_a", "note": "<short note>"}
+        for frame_id in group_a_ids
+    ] + [
+        {"frame_id": frame_id, "group": "group_b", "note": "<short note>"}
+        for frame_id in group_b_ids
+    ]
+    return json.dumps(records, ensure_ascii=True, indent=2)
+
+
+def render_prompt_template(
+    *,
+    template_text: str,
+    group_a_ids: list[str],
+    group_b_ids: list[str],
+    ml_hint_lines: list[str],
+) -> str:
+    replacements = {
+        "{{WINDOW_SIZE}}": str(len(group_a_ids) + len(group_b_ids)),
+        "{{WINDOW_RADIUS}}": str(len(group_a_ids)),
+        "{{GROUP_A_COUNT}}": str(len(group_a_ids)),
+        "{{GROUP_B_COUNT}}": str(len(group_b_ids)),
+        "{{GROUP_A_IDS}}": ", ".join(group_a_ids),
+        "{{GROUP_B_IDS}}": ", ".join(group_b_ids),
+        "{{GROUP_MAPPING}}": "\n".join(build_group_mapping_lines(group_a_ids, group_b_ids)),
+        "{{ML_HINTS_BLOCK}}": "\n".join(ml_hint_lines)
+        if ml_hint_lines
+        else "ML hints are unavailable for this pair of groups.",
+        "{{FRAME_NOTES_JSON_EXAMPLE}}": build_frame_notes_json_example(group_a_ids, group_b_ids),
+        "{{SEGMENT_TYPES_INLINE}}": "dance|ceremony|audience|rehearsal|other",
+    }
+    rendered = template_text
+    for key, value in replacements.items():
+        rendered = rendered.replace(key, value)
+    return rendered
 
 
 def load_prompt_templates_config(path: Path) -> PromptTemplatesConfig:

@@ -1,0 +1,72 @@
+You will receive {{WINDOW_SIZE}} stage-event photos divided into two groups around one suspected segment boundary.
+
+Group sizes:
+- group_a: {{GROUP_A_COUNT}} photos
+- group_b: {{GROUP_B_COUNT}} photos
+
+Group IDs:
+- group_a: {{GROUP_A_IDS}}
+- group_b: {{GROUP_B_IDS}}
+
+Group mapping:
+{{GROUP_MAPPING}}
+
+Important:
+- The photos are attached in the order shown above.
+- group_a and group_b come from opposite sides of one already suspected boundary.
+- Photos inside each group may be non-consecutive.
+- The two groups may still belong to the same segment.
+- Do not assume that a real boundary exists only because the groups were sampled around a candidate split.
+- Do not search for another internal boundary inside the groups.
+
+Task:
+Decide whether group_a and group_b belong to the same segment or to different segments.
+
+Allowed decision values:
+- same_segment
+- different_segments
+
+Possible segment type labels:
+- dance = active staged dance performance
+- ceremony = awards, medals, result reading, host speaking, or formal presentation
+- audience = viewers, crowd, or audience-facing non-performance shots
+- rehearsal = floor test, stage test, or non-performance rehearsal
+- other = does not clearly fit the categories above
+
+Always assign group_a_segment_type and group_b_segment_type using only:
+{{SEGMENT_TYPES_INLINE}}
+
+Use visual evidence first.
+ML hints are secondary and may be incomplete or wrong.
+
+ML hints:
+{{ML_HINTS_BLOCK}}
+
+Decision guidance:
+- Choose same_segment when performer identity, costume identity, and segment context remain consistent across the two groups.
+- Choose different_segments when there is clear evidence that the groups belong to different acts, different dancer groups, or clearly different segment types.
+- A pose change, movement phrase change, framing change, crop change, zoom change, lighting change alone, or background change alone is not enough to justify different_segments.
+- A solo image and a wider group image can still be the same segment if performer identity and costume identity remain consistent.
+- If the evidence is ambiguous, prefer same_segment.
+
+Return exactly one JSON object with this structure:
+{
+  "decision": "<same_segment|different_segments>",
+  "group_a_segment_type": "<{{SEGMENT_TYPES_INLINE}}>",
+  "group_b_segment_type": "<{{SEGMENT_TYPES_INLINE}}>",
+  "frame_notes": {{FRAME_NOTES_JSON_EXAMPLE}},
+  "primary_evidence": [
+    "<short evidence item>",
+    "<short evidence item>"
+  ],
+  "summary": "<one short sentence>"
+}
+
+Rules:
+- Output only valid JSON.
+- Do not output markdown.
+- Do not output any text before or after JSON.
+- frame_notes must include every runtime frame_id exactly once.
+- Keep frame notes short and concrete.
+- primary_evidence must contain at least one non-empty item.
+- summary must be one short sentence.

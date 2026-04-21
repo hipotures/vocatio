@@ -74,3 +74,36 @@ def test_load_prompt_templates_rejects_non_string_field_values(tmp_path: Path) -
         assert "string" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_render_prompt_template_renders_group_mapping_and_frame_notes(tmp_path: Path) -> None:
+    template_path = tmp_path / "prompt.txt"
+    template_path.write_text(
+        "Group mapping:\n{{GROUP_MAPPING}}\n\n"
+        "Hints:\n{{ML_HINTS_BLOCK}}\n\n"
+        "{{FRAME_NOTES_JSON_EXAMPLE}}\n",
+        encoding="utf-8",
+    )
+
+    rendered = vlm_prompt_templates.render_prompt_template(
+        template_text=template_path.read_text(encoding="utf-8"),
+        group_a_ids=["a_01", "a_02"],
+        group_b_ids=["b_01", "b_02"],
+        ml_hint_lines=["overall hint: same_segment"],
+    )
+
+    assert "a_01 = attached image 1" in rendered
+    assert "b_02 = attached image 4" in rendered
+    assert '"frame_id": "a_01"' in rendered
+    assert "overall hint: same_segment" in rendered
+
+
+def test_render_prompt_template_uses_unavailable_hints_fallback() -> None:
+    rendered = vlm_prompt_templates.render_prompt_template(
+        template_text="Hints:\n{{ML_HINTS_BLOCK}}\n",
+        group_a_ids=["a_01"],
+        group_b_ids=["b_01"],
+        ml_hint_lines=[],
+    )
+
+    assert "ML hints are unavailable for this pair of groups." in rendered
