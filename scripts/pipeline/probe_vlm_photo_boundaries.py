@@ -267,19 +267,13 @@ def _validate_ml_hint_feature_columns_contract(
 
 SYSTEM_PROMPT = (
     "You analyze consecutive stage performance photos. "
-    "Choose at most one boundary between consecutive frames. "
-    "Return only valid JSON with keys decision, frame_notes, primary_evidence, and summary."
+    "Decide whether the candidate gap between group_a and group_b is a real segment boundary. "
+    "Return only valid JSON with keys decision, group_a_segment_type, group_b_segment_type, "
+    "frame_notes, primary_evidence, and summary."
 )
 
 
 def build_system_prompt(response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE) -> str:
-    if response_schema_mode == "on":
-        return (
-            "You analyze consecutive stage performance photos. "
-            "Choose at most one boundary between consecutive frames. "
-            "Return only valid JSON with keys boundary_after_frame, left_segment_type, right_segment_type, "
-            "frame_notes, primary_evidence, and summary."
-        )
     return SYSTEM_PROMPT
 
 
@@ -814,7 +808,7 @@ def build_window_rows_for_cut_index(
     window_schema: str,
     window_schema_seed: int,
     boundary_gap_seconds: int,
-) -> list[Mapping[str, str]]:
+) -> tuple[list[Mapping[str, str]], int]:
     left_bounds, right_bounds = segment_bounds_for_cut_index(
         joined_rows,
         cut_index=cut_index,
@@ -834,7 +828,7 @@ def build_window_rows_for_cut_index(
         gap_side="right",
         schema_seed=window_schema_seed,
     )
-    return [*left_rows, *right_rows]
+    return [*left_rows, *right_rows], len(left_rows)
 
 
 def build_manual_vlm_window_rows(
@@ -1384,33 +1378,45 @@ def build_valid_decisions(window_size: int) -> tuple[str, ...]:
     return tuple(["no_cut"] + [f"cut_after_{index}" for index in range(1, window_size)])
 
 
-def build_boundary_after_frame_values(window_size: int) -> List[Optional[str]]:
-    return [None] + [f"frame_{index:02d}" for index in range(1, window_size)]
+def build_group_frame_ids(window_size: int, group_a_count: Optional[int] = None) -> tuple[List[str], List[str]]:
+    if window_size < 1:
+        raise ValueError("window_size must be at least 1")
+    frame_ids = [f"frame_{index:02d}" for index in range(1, window_size + 1)]
+    resolved_group_a_count = max(1, window_size // 2) if group_a_count is None else int(group_a_count)
+    if resolved_group_a_count < 1 or resolved_group_a_count > window_size:
+        raise ValueError("group_a_count must be between 1 and window_size")
+    return frame_ids[:resolved_group_a_count], frame_ids[resolved_group_a_count:]
 
 
-def build_response_schema(window_size: int) -> Dict[str, Any]:
-    frame_properties = {f"frame_{index:02d}": {"type": "string"} for index in range(1, window_size + 1)}
+def build_response_schema(*, group_a_ids: Sequence[str], group_b_ids: Sequence[str]) -> Dict[str, Any]:
+    frame_note_items = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "frame_id": {"type": "string"},
+            "group": {"type": "string", "enum": ["group_a", "group_b"]},
+            "note": {"type": "string"},
+        },
+        "required": ["frame_id", "group", "note"],
+    }
     return {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "boundary_after_frame": {
-                "type": ["string", "null"],
-                "enum": build_boundary_after_frame_values(window_size),
-            },
-            "left_segment_type": {
+            "decision": {"type": "string", "enum": ["same_segment", "different_segments"]},
+            "group_a_segment_type": {
                 "type": "string",
                 "enum": list(SEGMENT_TYPES),
             },
-            "right_segment_type": {
+            "group_b_segment_type": {
                 "type": "string",
                 "enum": list(SEGMENT_TYPES),
             },
             "frame_notes": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": frame_properties,
-                "required": list(frame_properties.keys()),
+                "type": "array",
+                "items": frame_note_items,
+                "minItems": len(group_a_ids) + len(group_b_ids),
+                "maxItems": len(group_a_ids) + len(group_b_ids),
             },
             "primary_evidence": {
                 "type": "array",
@@ -1421,9 +1427,9 @@ def build_response_schema(window_size: int) -> Dict[str, Any]:
             "summary": {"type": "string"},
         },
         "required": [
-            "boundary_after_frame",
-            "left_segment_type",
-            "right_segment_type",
+            "decision",
+            "group_a_segment_type",
+            "group_b_segment_type",
             "frame_notes",
             "primary_evidence",
             "summary",
@@ -1436,27 +1442,55 @@ def build_user_prompt(
     ml_hint_lines: Sequence[str],
     extra_instructions: str = "",
     response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
+    window_schema: str = DEFAULT_WINDOW_SCHEMA,
+    group_a_count: Optional[int] = None,
 ) -> str:
-    frames_block = "\n".join([f"frame_{index:02d} = attached image {index}" for index in range(1, window_size + 1)])
+    group_a_ids, group_b_ids = build_group_frame_ids(window_size, group_a_count=group_a_count)
+    ordered_frame_ids = [*group_a_ids, *group_b_ids]
+    frames_block = "\n".join(
+        [f"{frame_id} = attached image {index}" for index, frame_id in enumerate(ordered_frame_ids, start=1)]
+    )
     hints_block = "\n".join(ml_hint_lines) if ml_hint_lines else "ML hints are unavailable for this window."
-    if response_schema_mode == "on":
-        decisions_block = "\n".join([f'- {value!r}' if value is not None else "- null" for value in build_boundary_after_frame_values(window_size)])
-        response_header = "Allowed boundary_after_frame values:\n"
-        response_rules = (
-            '- Use null if there is no boundary in the window.\n'
-            '- Use "frame_NN" only if the boundary is between frame_NN and the next frame.\n'
+    normalized_window_schema = window_schema_lib.parse_window_schema(window_schema)
+    if normalized_window_schema == "consecutive":
+        window_selection_block = (
+            f"You will receive {window_size} consecutive stage-event photos.\n\n"
+            "Important:\n"
+            "The frames are consecutive photos from one chronological sequence.\n"
+            "They are not random examples.\n"
         )
-        response_schema_hint = f'<one of: {", ".join(["null"] + [f"frame_{index:02d}" for index in range(1, window_size)])}>'
+    else:
+        window_selection_block = (
+            f"You will receive {window_size} stage-event photos in chronological order.\n\n"
+            "Important:\n"
+            "The frames are shown in chronological order from left to right.\n"
+            "The frames come from the left and right segments around one candidate gap.\n"
+            "They do not have to be consecutive photos.\n"
+        )
+    if response_schema_mode == "on":
+        decisions_block = '\n'.join(['- "same_segment"', '- "different_segments"'])
+        response_header = "Allowed decision values:\n"
+        response_rules = (
+            '- Use "same_segment" if group_a and group_b most likely belong to the same segment.\n'
+            '- Use "different_segments" only if group_a and group_b most likely belong to different segments.\n'
+        )
         response_object = (
             '{\n'
-            f'  "boundary_after_frame": "{response_schema_hint}",\n'
-            f'  "left_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
-            f'  "right_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
-            '  "frame_notes": {\n'
+            '  "decision": "<one of: same_segment, different_segments>",\n'
+            f'  "group_a_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
+            f'  "group_b_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
+            '  "frame_notes": [\n'
             + ",\n".join(
-                [f'    "frame_{index:02d}": "<short note>"' for index in range(1, window_size + 1)]
+                [
+                    f'    {{"frame_id":"{frame_id}","group":"group_a","note":"<short note>"}}'
+                    for frame_id in group_a_ids
+                ]
+                + [
+                    f'    {{"frame_id":"{frame_id}","group":"group_b","note":"<short note>"}}'
+                    for frame_id in group_b_ids
+                ]
             )
-            + '\n  },\n'
+            + '\n  ],\n'
             '  "primary_evidence": [\n'
             '    "<short evidence item>",\n'
             '    "<short evidence item>"\n'
@@ -1465,21 +1499,30 @@ def build_user_prompt(
             '}'
         )
     else:
-        decisions_block = "\n".join([f'- "{decision}"' for decision in build_valid_decisions(window_size)])
+        decisions_block = '\n'.join(['- "same_segment"', '- "different_segments"'])
         response_header = "Allowed decisions:\n"
         response_rules = (
-            f'- Choose "no_cut" if all {window_size} frames most likely belong to the same segment.\n'
-            '- If there is no clear evidence for a boundary, choose "no_cut".\n'
-            f'- Choose "cut_after_N" only if frames 1..N and frames N+1..{window_size} most likely belong to different segments.\n'
+            '- Choose "same_segment" if group_a and group_b most likely belong to the same segment.\n'
+            '- If there is no clear evidence for a boundary, choose "same_segment".\n'
+            '- Choose "different_segments" only if the left group and right group most likely belong to different segments.\n'
         )
         response_object = (
             '{\n'
-            f'  "decision": "<one of: {", ".join(build_valid_decisions(window_size))}>",\n'
-            '  "frame_notes": {\n'
+            '  "decision": "<one of: same_segment, different_segments>",\n'
+            f'  "group_a_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
+            f'  "group_b_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
+            '  "frame_notes": [\n'
             + ",\n".join(
-                [f'    "frame_{index:02d}": "<short note>"' for index in range(1, window_size + 1)]
+                [
+                    f'    {{"frame_id":"{frame_id}","group":"group_a","note":"<short note>"}}'
+                    for frame_id in group_a_ids
+                ]
+                + [
+                    f'    {{"frame_id":"{frame_id}","group":"group_b","note":"<short note>"}}'
+                    for frame_id in group_b_ids
+                ]
             )
-            + '\n  },\n'
+            + '\n  ],\n'
             '  "primary_evidence": [\n'
             '    "<short evidence item>",\n'
             '    "<short evidence item>"\n'
@@ -1488,12 +1531,9 @@ def build_user_prompt(
             '}'
         )
     prompt = (
-        f"You will receive {window_size} consecutive stage-event photos.\n\n"
+        f"{window_selection_block}"
         "Order:\n"
         f"{frames_block}\n\n"
-        "Important:\n"
-        "The frames are consecutive photos from one chronological sequence.\n"
-        "They are not random examples.\n"
         "Reason about continuity from left to right:\n"
         f"frame_01 -> frame_02 -> ... -> frame_{window_size:02d}\n\n"
         "Task:\n"
@@ -1510,8 +1550,8 @@ def build_user_prompt(
         "- audience = viewers, crowd, or audience-facing non-performance shots\n"
         "- rehearsal = floor test, stage test, or non-performance rehearsal\n"
         "- other = does not clearly fit the categories above\n\n"
-        "Create a boundary only if at least one positive boundary condition below is clearly true.\n"
-        "If none of the positive boundary conditions is clearly true, return null.\n\n"
+        'Return "different_segments" only if at least one positive boundary condition below is clearly true.\n'
+        'If none of the positive boundary conditions is clearly true, return "same_segment".\n\n'
         "Positive boundary conditions:\n"
         "- the person on the left and the person on the right are not the same dancer\n"
         "- the dancers on the left and the dancers on the right do not belong to the same group\n"
@@ -1541,7 +1581,7 @@ def build_user_prompt(
         "- Single dancer -> wider group view can still be the same segment.\n"
         "- If costume identity and act identity still match, do not create a boundary only because fewer or more dancers are visible.\n"
         "- Ignore background differences if they can be explained by camera direction, framing, crop, zoom, or a different shooting angle on the same stage.\n\n"
-        "If the change is only a new pose, new movement phrase, or another choreography moment within the same act, you must return null.\n\n"
+        'If the change is only a new pose, new movement phrase, or another choreography moment within the same act, you must return "same_segment".\n\n'
         "Decision priority:\n"
         "1. images\n"
         "2. ML hints\n\n"
@@ -1552,12 +1592,13 @@ def build_user_prompt(
         f"{decisions_block}\n\n"
         "Rules:\n"
         f"{response_rules}"
-        f"- If more than one real boundary appears inside the {window_size}-frame window, choose the single strongest and clearest boundary.\n"
-        f"- Always assign left_segment_type and right_segment_type using only these values: {'|'.join(SEGMENT_TYPES)}.\n"
+        "- Always assign group_a_segment_type and group_b_segment_type using only these values: "
+        f"{'|'.join(SEGMENT_TYPES)}.\n"
         "- Background change and lighting change, whether alone or together, never justify a boundary.\n"
         "- Background change and lighting change, whether alone or together, never justify a segment-type change.\n"
+        "- Include every frame_id exactly once in frame_notes.\n"
         "- Keep frame notes short and concrete.\n"
-        '- If there is no boundary, primary_evidence should describe continuity evidence.\n'
+        '- If the answer is "same_segment", primary_evidence should describe continuity evidence.\n'
         "- Output only valid JSON.\n"
         "- Do not output markdown.\n"
         "- Do not output any text before or after JSON.\n\n"
@@ -1660,13 +1701,13 @@ def extract_segment_types(raw_response: str) -> tuple[str, str]:
         payload = json.loads(extract_json_object_text(raw_response))
     except Exception:
         return "", ""
-    left_segment_type = str(payload.get("left_segment_type", "") or "").strip()
-    right_segment_type = str(payload.get("right_segment_type", "") or "").strip()
-    if left_segment_type not in SEGMENT_TYPES:
-        left_segment_type = ""
-    if right_segment_type not in SEGMENT_TYPES:
-        right_segment_type = ""
-    return left_segment_type, right_segment_type
+    group_a_segment_type = str(payload.get("group_a_segment_type", "") or "").strip()
+    group_b_segment_type = str(payload.get("group_b_segment_type", "") or "").strip()
+    if group_a_segment_type not in SEGMENT_TYPES:
+        group_a_segment_type = ""
+    if group_b_segment_type not in SEGMENT_TYPES:
+        group_b_segment_type = ""
+    return group_a_segment_type, group_b_segment_type
 
 
 def choose_segment_type(candidates: Sequence[str]) -> str:
@@ -1686,101 +1727,97 @@ def segment_type_to_code(segment_type: str) -> str:
     return GUI_TYPE_CODE_BY_SEGMENT_TYPE.get(segment_type.strip().lower(), "?")
 
 
+def invalid_response(reason: str) -> Dict[str, str]:
+    return {
+        "decision": "invalid_response",
+        "reason": reason,
+        "response_status": "invalid_response",
+    }
+
+
 def parse_model_response(
     raw_response: str,
     *,
-    window_size: int,
+    group_a_ids: Sequence[str],
+    group_b_ids: Sequence[str],
+    response_contract_id: str,
     json_validation_mode: str = DEFAULT_JSON_VALIDATION_MODE,
 ) -> Dict[str, str]:
-    valid_decisions = build_valid_decisions(window_size)
+    if response_contract_id != "grouped_v1":
+        raise ValueError(f"unsupported response_contract_id: {response_contract_id}")
     try:
         payload = json.loads(extract_json_object_text(raw_response))
     except Exception as error:
-        return {
-            "decision": "invalid_response",
-            "reason": f"JSON parse error: {error}",
-            "response_status": "invalid_response",
-        }
-    boundary_after_frame = payload.get("boundary_after_frame", "__missing__")
-    if boundary_after_frame != "__missing__":
-        if boundary_after_frame is None:
-            decision = "no_cut"
-        else:
-            boundary_text = str(boundary_after_frame).strip()
-            if boundary_text.lower() == "null":
-                boundary_text = ""
-            valid_frames = {f"frame_{index:02d}": f"cut_after_{index}" for index in range(1, window_size)}
-            decision = "no_cut" if not boundary_text else valid_frames.get(boundary_text, "")
-    else:
-        decision = str(payload.get("decision", "") or "").strip()
-    if decision not in valid_decisions:
-        return {
-            "decision": "invalid_response",
-            "reason": f"Invalid decision value: {decision}",
-            "response_status": "invalid_response",
-        }
-    left_segment_type = str(payload.get("left_segment_type", "") or "").strip()
-    right_segment_type = str(payload.get("right_segment_type", "") or "").strip()
-    if boundary_after_frame != "__missing__":
-        if json_validation_mode == "strict" and (
-            left_segment_type not in SEGMENT_TYPES or right_segment_type not in SEGMENT_TYPES
-        ):
-            return {
-                "decision": "invalid_response",
-                "reason": "Missing or invalid segment type value",
-                "response_status": "invalid_response",
-            }
+        return invalid_response(f"JSON parse error: {error}")
+    decision = str(payload.get("decision", "") or "").strip()
+    if decision not in {"same_segment", "different_segments"}:
+        return invalid_response(f"Invalid decision value: {decision}")
+    group_a_segment_type = str(payload.get("group_a_segment_type", "") or "").strip()
+    group_b_segment_type = str(payload.get("group_b_segment_type", "") or "").strip()
+    if json_validation_mode == "strict" and (
+        group_a_segment_type not in SEGMENT_TYPES or group_b_segment_type not in SEGMENT_TYPES
+    ):
+        return invalid_response("Missing or invalid group segment type value")
+    if group_a_segment_type not in SEGMENT_TYPES:
+        group_a_segment_type = ""
+    if group_b_segment_type not in SEGMENT_TYPES:
+        group_b_segment_type = ""
     frame_notes = payload.get("frame_notes")
-    if not isinstance(frame_notes, Mapping):
-        return {
-            "decision": "invalid_response",
-            "reason": "Missing frame_notes object",
-            "response_status": "invalid_response",
-        }
-    expected_keys = [f"frame_{index:02d}" for index in range(1, window_size + 1)]
+    if not isinstance(frame_notes, list):
+        return invalid_response("Missing frame_notes array")
+    expected_frame_groups = {frame_id: "group_a" for frame_id in group_a_ids}
+    expected_frame_groups.update({frame_id: "group_b" for frame_id in group_b_ids})
+    ordered_frame_ids = [*group_a_ids, *group_b_ids]
+    seen_frame_ids: set[str] = set()
     normalized_frame_notes: List[str] = []
-    for key in expected_keys:
-        value = str(frame_notes.get(key, "") or "").strip()
-        if not value:
-            return {
-                "decision": "invalid_response",
-                "reason": f"Missing frame_notes value for {key}",
-                "response_status": "invalid_response",
-            }
-        normalized_frame_notes.append(f"{key}={value}")
+    for note_item in frame_notes:
+        if not isinstance(note_item, Mapping):
+            return invalid_response("Invalid frame_notes item")
+        frame_id = str(note_item.get("frame_id", "") or "").strip()
+        if not frame_id:
+            return invalid_response("Missing frame_id value in frame_notes")
+        if frame_id not in expected_frame_groups:
+            return invalid_response(f"Invalid frame_id value: {frame_id}")
+        if frame_id in seen_frame_ids:
+            return invalid_response(f"duplicate frame_id: {frame_id}")
+        group = str(note_item.get("group", "") or "").strip()
+        expected_group = expected_frame_groups[frame_id]
+        if group != expected_group:
+            return invalid_response(f"Invalid group for {frame_id}: expected {expected_group}, got {group}")
+        note = str(note_item.get("note", "") or "").strip()
+        if not note:
+            return invalid_response(f"Missing frame_notes value for {frame_id}")
+        seen_frame_ids.add(frame_id)
+        normalized_frame_notes.append(f"{frame_id}({group})={note}")
+    for frame_id in ordered_frame_ids:
+        if frame_id not in seen_frame_ids:
+            return invalid_response(f"Missing frame_notes value for {frame_id}")
     primary_evidence = payload.get("primary_evidence")
     if not isinstance(primary_evidence, list):
-        return {
-            "decision": "invalid_response",
-            "reason": "Missing primary_evidence list",
-            "response_status": "invalid_response",
-        }
+        return invalid_response("Missing primary_evidence list")
     normalized_evidence = [str(item).strip() for item in primary_evidence if str(item).strip()]
     if not normalized_evidence:
-        return {
-            "decision": "invalid_response",
-            "reason": "Missing primary_evidence values",
-            "response_status": "invalid_response",
-        }
+        return invalid_response("Missing primary_evidence values")
     summary = str(payload.get("summary", "") or "").strip()
     if not summary:
-        return {
-            "decision": "invalid_response",
-            "reason": "Missing summary value",
-            "response_status": "invalid_response",
-        }
-    segment_type_reason = ""
-    if boundary_after_frame != "__missing__" and left_segment_type in SEGMENT_TYPES and right_segment_type in SEGMENT_TYPES:
-        segment_type_reason = (
-            f"Left segment type: {left_segment_type} | Right segment type: {right_segment_type} | "
-        )
+        return invalid_response("Missing summary value")
     reason = (
-        f"{segment_type_reason}"
+        f"Group A segment type: {group_a_segment_type or '?'} | "
+        f"Group B segment type: {group_b_segment_type or '?'} | "
         f"Frame notes: {'; '.join(normalized_frame_notes)} | "
         f"Primary evidence: {'; '.join(normalized_evidence)} | "
         f"Summary: {summary}"
     )
-    return {"decision": decision, "reason": reason, "response_status": "ok"}
+    compatibility_decision = "no_cut" if decision == "same_segment" else f"cut_after_{len(group_a_ids)}"
+    return {
+        "decision": compatibility_decision,
+        "semantic_decision": decision,
+        "semantic_group_a_segment_type": group_a_segment_type,
+        "semantic_group_b_segment_type": group_b_segment_type,
+        "response_contract_id": response_contract_id,
+        "reason": reason,
+        "response_status": "ok",
+    }
 
 
 def build_result_row(
@@ -1887,6 +1924,8 @@ def build_user_prompt_template(
     window_size: int,
     extra_instructions: str = "",
     response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
+    window_schema: str = DEFAULT_WINDOW_SCHEMA,
+    group_a_count: Optional[int] = None,
 ) -> str:
     ml_hint_lines = [
         "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
@@ -1898,6 +1937,8 @@ def build_user_prompt_template(
         ml_hint_lines=ml_hint_lines,
         extra_instructions=extra_instructions,
         response_schema_mode=response_schema_mode,
+        window_schema=window_schema,
+        group_a_count=group_a_count,
     )
 
 
@@ -2244,7 +2285,10 @@ def build_batch_result_message(
 def run_vlm_window_analysis(
     *,
     window_rows: Sequence[Mapping[str, str]],
+    group_a_count: Optional[int] = None,
     ml_hint_lines: Sequence[str],
+    window_schema: str = DEFAULT_WINDOW_SCHEMA,
+    response_contract_id: str = "grouped_v1",
     provider: str,
     base_url: str,
     model: str,
@@ -2262,12 +2306,20 @@ def run_vlm_window_analysis(
     debug_batch_index: int = 1,
 ) -> Dict[str, Any]:
     window_size = len(window_rows)
-    response_schema = build_response_schema(window_size) if response_schema_mode == "on" else None
+    resolved_group_a_count = group_a_count if group_a_count is not None else max(1, window_size // 2)
+    group_a_ids, group_b_ids = build_group_frame_ids(window_size, group_a_count=resolved_group_a_count)
+    response_schema = (
+        build_response_schema(group_a_ids=group_a_ids, group_b_ids=group_b_ids)
+        if response_schema_mode == "on"
+        else None
+    )
     prompt = build_user_prompt(
         window_size=window_size,
         ml_hint_lines=ml_hint_lines,
         extra_instructions=extra_instructions,
         response_schema_mode=response_schema_mode,
+        window_schema=window_schema,
+        group_a_count=resolved_group_a_count,
     )
     request = build_vlm_request(
         provider=provider,
@@ -2312,15 +2364,74 @@ def run_vlm_window_analysis(
     raw_response = response.text
     parsed_response = parse_model_response(
         raw_response,
-        window_size=window_size,
+        group_a_ids=group_a_ids,
+        group_b_ids=group_b_ids,
+        response_contract_id=response_contract_id,
         json_validation_mode=json_validation_mode,
     )
+    if parsed_response["response_status"] == "invalid_response" and should_retry_structural_response_error(
+        parsed_response["reason"]
+    ):
+        repair_prompt = (
+            prompt
+            + "\n\nRepair instruction:\n"
+            + "Your previous answer violated the JSON structure. Return the same analysis again, but include every frame_id exactly once."
+        )
+        repair_request = build_vlm_request(
+            provider=provider,
+            base_url=base_url,
+            response_schema_mode=response_schema_mode,
+            prompt=repair_prompt,
+            image_paths=[Path(str(row["image_path"])) for row in window_rows],
+            model=model,
+            timeout_seconds=timeout_seconds,
+            keep_alive=keep_alive,
+            temperature=temperature,
+            context_tokens=context_tokens,
+            max_output_tokens=max_output_tokens,
+            reasoning_level=reasoning_level,
+            response_schema=response_schema,
+        )
+        request = repair_request
+        prompt = repair_prompt
+        request_payload = build_provider_request_payload(request) if debug_dir is not None else None
+        response = run_vlm_request(repair_request)
+        raw_response = response.text
+        parsed_response = parse_model_response(
+            raw_response,
+            group_a_ids=group_a_ids,
+            group_b_ids=group_b_ids,
+            response_contract_id=response_contract_id,
+            json_validation_mode=json_validation_mode,
+        )
+    if debug_dir is not None and str(parsed_response.get("response_status", "") or "") != "ok":
+        dump_debug_artifacts(
+            debug_dir=debug_dir,
+            run_id=debug_run_id,
+            batch_index=debug_batch_index,
+            prompt=prompt,
+            request_payload=request_payload or {},
+            response_payload=response.raw_response,
+            error_text=str(parsed_response.get("reason", "") or "invalid VLM response"),
+        )
     return {
         "prompt": prompt,
         "request": request,
         "raw_response": raw_response,
         "parsed_response": parsed_response,
     }
+
+
+def should_retry_structural_response_error(reason: str) -> bool:
+    return any(
+        token in reason
+        for token in (
+            "frame_notes",
+            "frame_id",
+            "duplicate",
+            "Missing",
+        )
+    )
 
 
 def build_manual_vlm_debug_run_id(anchor_pair: Mapping[str, Any]) -> str:
@@ -2373,7 +2484,9 @@ def run_manual_vlm_anchor_analysis(
     )
     analysis = run_vlm_window_analysis(
         window_rows=window_rows,
+        group_a_count=window_radius,
         ml_hint_lines=ml_hint_lines,
+        window_schema=DEFAULT_WINDOW_SCHEMA,
         provider=provider,
         base_url=base_url,
         model=model,
@@ -2478,8 +2591,12 @@ def probe_vlm_photo_boundaries(
     run_id = str(run_state["run_id"] or "")
     if not run_id:
         run_id = build_run_id(generated_at)
+        schema_group_a_ids, schema_group_b_ids = build_group_frame_ids(
+            window_radius_to_window_size(window_radius),
+            group_a_count=window_radius,
+        )
         response_schema = (
-            build_response_schema(window_radius_to_window_size(window_radius))
+            build_response_schema(group_a_ids=schema_group_a_ids, group_b_ids=schema_group_b_ids)
             if str(args_payload.get("response_schema_mode", "off")) == "on"
             else None
         )
@@ -2497,6 +2614,8 @@ def probe_vlm_photo_boundaries(
                 window_size=window_radius_to_window_size(window_radius),
                 extra_instructions=extra_instructions,
                 response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
+                window_schema=window_schema,
+                group_a_count=window_radius,
             ),
             response_schema=response_schema,
         )
@@ -2535,7 +2654,7 @@ def probe_vlm_photo_boundaries(
             batch_index = completed_batches + batch_offset
             cut_index = int(candidate["cut_index"])
             time_gap_seconds = int(candidate["time_gap_seconds"])
-            window_rows = build_window_rows_for_cut_index(
+            window_rows, group_a_count = build_window_rows_for_cut_index(
                 joined_rows=joined_rows,
                 cut_index=cut_index,
                 window_radius=window_radius,
@@ -2560,7 +2679,9 @@ def probe_vlm_photo_boundaries(
             window_size = len(window_rows)
             analysis = run_vlm_window_analysis(
                 window_rows=window_rows,
+                group_a_count=group_a_count,
                 ml_hint_lines=ml_hint_lines,
+                window_schema=window_schema,
                 provider=provider,
                 base_url=ollama_base_url,
                 model=model,
