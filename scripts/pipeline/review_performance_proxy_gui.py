@@ -1260,6 +1260,7 @@ def compute_manual_vlm_analyze_result(
         "model": str(runtime_args.model),
         "preset_name": preset_name,
         "model_config": dict(model_config),
+        "window_config": dict(window_config),
         "attempt_count": attempt_count,
         "run_id": run_id,
         "decision": str(parsed_response.get("decision", "") or "").strip(),
@@ -1723,16 +1724,20 @@ def build_manual_vlm_window_lines(result: Mapping[str, Any]) -> List[str]:
     window_config = result.get("window_config")
     if not isinstance(window_config, Mapping):
         return []
-    ordered_keys = ("window_radius", "window_schema", "window_schema_seed")
+    ordered_keys = (
+        ("VLM_WINDOW_RADIUS", "window_radius"),
+        ("VLM_WINDOW_SCHEMA", "window_schema"),
+        ("VLM_WINDOW_SCHEMA_SEED", "window_schema_seed"),
+    )
     items = [
-        (key, format_manual_vlm_metadata_value(window_config.get(key)))
-        for key in ordered_keys
+        (label, format_manual_vlm_metadata_value(window_config.get(key)))
+        for label, key in ordered_keys
         if key in window_config
     ]
     if not items:
         return []
     lines = ["Window config:"]
-    lines.extend([f"  {key}: {value}" for key, value in items])
+    lines.extend([f"  {label}: {value}" for label, value in items])
     return lines
 
 

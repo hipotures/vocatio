@@ -879,9 +879,9 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("  VLM_NAME: Preset A", body)
         self.assertIn("  VLM_TEMPERATURE: 0", body)
         self.assertIn("Window config:", body)
-        self.assertIn("  window_radius: 3", body)
-        self.assertIn("  window_schema: random", body)
-        self.assertIn("  window_schema_seed: 42", body)
+        self.assertIn("  VLM_WINDOW_RADIUS: 3", body)
+        self.assertIn("  VLM_WINDOW_SCHEMA: random", body)
+        self.assertIn("  VLM_WINDOW_SCHEMA_SEED: 42", body)
         self.assertIn("Attempts: 3", body)
         self.assertIn("Succeeded on attempt: 3", body)
 
@@ -978,9 +978,9 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         )
 
         self.assertIn("Window config:", section["body"])
-        self.assertIn("  window_radius: 3", section["body"])
-        self.assertIn("  window_schema: random", section["body"])
-        self.assertIn("  window_schema_seed: 42", section["body"])
+        self.assertIn("  VLM_WINDOW_RADIUS: 3", section["body"])
+        self.assertIn("  VLM_WINDOW_SCHEMA: random", section["body"])
+        self.assertIn("  VLM_WINDOW_SCHEMA_SEED: 42", section["body"])
 
     def test_manual_ml_prediction_section_renders_left_right_and_boundary(self):
         state = review_gui.build_manual_ml_prediction_section(
@@ -3110,6 +3110,11 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 "VLM_RESPONSE_SCHEMA_MODE": "off",
                 "VLM_JSON_VALIDATION_MODE": "strict",
             }
+            window_config = {
+                "window_radius": 1,
+                "window_schema": "random",
+                "window_schema_seed": 42,
+            }
             runtime_args = argparse.Namespace(
                 provider="ollama",
                 model="qwen3.5:9b",
@@ -3213,17 +3218,20 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                         "left_relative_path": "cam/left.jpg",
                         "right_relative_path": "cam/right.jpg",
                     },
-                    window_config={"window_radius": 1},
+                    window_config=window_config,
                     manual_vlm_model=manual_vlm_model,
                 )
 
         self.assertEqual(request_attempts["count"], 3)
         self.assertEqual(result["preset_name"], "Preset A")
         self.assertEqual(result["model_config"]["VLM_NAME"], "Preset A")
+        self.assertEqual(result["window_config"], window_config)
         self.assertEqual(result["attempt_count"], 3)
         self.assertEqual(result["succeeded_on_attempt"], 3)
         self.assertIn("Model: Preset A", result["result_text"])
         self.assertIn("Model config:", result["result_text"])
+        self.assertIn("Window config:", result["result_text"])
+        self.assertIn("  VLM_WINDOW_SCHEMA: random", result["result_text"])
         self.assertIn("Attempts: 3", result["result_text"])
         self.assertIn("Succeeded on attempt: 3", result["result_text"])
 
