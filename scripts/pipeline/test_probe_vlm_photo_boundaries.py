@@ -968,6 +968,26 @@ models:
             ["ML hints are unavailable for this window."],
         )
 
+    def test_build_ml_hint_lines_preserves_unknown_segment_label_fallback(self):
+        lines = probe.build_ml_hint_lines(
+            probe.MlHintPrediction(
+                boundary_prediction=False,
+                boundary_confidence=0.61,
+                left_segment_type_prediction="backstage",
+                left_segment_type_confidence=0.58,
+                right_segment_type_prediction="performance",
+                right_segment_type_confidence=0.72,
+            )
+        )
+        self.assertEqual(
+            lines,
+            [
+                "ML hint for the main candidate gap in this window: likely no cut (confidence 0.61).",
+                "ML hint for the left side of the candidate gap: likely backstage (confidence 0.58).",
+                "ML hint for the right side of the candidate gap: likely dance (confidence 0.72).",
+            ],
+        )
+
     def test_build_user_prompt_mentions_ml_hints_and_not_raw_heuristics(self):
         prompt = probe.build_user_prompt(
             window_size=2,

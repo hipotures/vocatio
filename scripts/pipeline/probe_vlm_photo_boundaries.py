@@ -320,7 +320,9 @@ def non_negative_float_arg(value: str) -> float:
 
 def map_ml_segment_label_to_prompt_label(value: str) -> str:
     normalized = str(value or "").strip()
-    return ML_SEGMENT_TYPE_TO_PROMPT_LABEL.get(normalized, "")
+    if normalized == "":
+        return "other"
+    return ML_SEGMENT_TYPE_TO_PROMPT_LABEL.get(normalized, normalized)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
