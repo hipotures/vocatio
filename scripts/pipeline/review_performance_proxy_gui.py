@@ -1430,6 +1430,12 @@ def compute_manual_vlm_analyze_result(
         ).strip(),
         "left_anchor": str(anchor_pair.get("left_relative_path", "") or "").strip(),
         "right_anchor": str(anchor_pair.get("right_relative_path", "") or "").strip(),
+        "group_a_relative_paths": [
+            str(row.get("relative_path", "") or "").strip() for row in candidate_rows[:group_a_count] if str(row.get("relative_path", "") or "").strip()
+        ],
+        "group_b_relative_paths": [
+            str(row.get("relative_path", "") or "").strip() for row in candidate_rows[group_a_count:] if str(row.get("relative_path", "") or "").strip()
+        ],
         "raw_response": raw_response,
         "debug_file_paths": build_manual_vlm_debug_file_paths(
             debug_dir,
@@ -1983,10 +1989,22 @@ def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
         semantic_lines.extend(format_manual_vlm_reason_lines(reason, summary))
     left_anchor = str(result.get("left_anchor", "") or "").strip()
     right_anchor = str(result.get("right_anchor", "") or "").strip()
+    group_a_relative_paths = [
+        str(value).strip() for value in list(result.get("group_a_relative_paths", []) or []) if str(value).strip()
+    ]
+    group_b_relative_paths = [
+        str(value).strip() for value in list(result.get("group_b_relative_paths", []) or []) if str(value).strip()
+    ]
     anchor_lines: List[str] = []
     if left_anchor or right_anchor:
         anchor_lines.append("Anchors:")
         anchor_lines.append(f"  {format_value(left_anchor)} -> {format_value(right_anchor)}")
+    if group_a_relative_paths:
+        anchor_lines.append("Group A segment photos:")
+        anchor_lines.extend([f"  {value}" for value in group_a_relative_paths])
+    if group_b_relative_paths:
+        anchor_lines.append("Group B segment photos:")
+        anchor_lines.extend([f"  {value}" for value in group_b_relative_paths])
     metadata_lines: List[str] = []
     metadata_lines.extend(build_manual_vlm_model_lines(result))
     metadata_lines.extend(build_manual_vlm_window_lines(result))

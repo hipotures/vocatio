@@ -540,6 +540,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 "summary": "Strong costume and performer change across the gap.",
                 "left_anchor": "cam/left.jpg",
                 "right_anchor": "cam/right.jpg",
+                "group_a_relative_paths": ["cam/a1.jpg", "cam/a2.jpg", "cam/a3.jpg"],
+                "group_b_relative_paths": ["cam/b1.jpg", "cam/b2.jpg", "cam/b3.jpg"],
                 "preset_name": "Preset A",
                 "model_config": {
                     "VLM_NAME": "Preset A",
@@ -1061,6 +1063,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 ),
                 "left_anchor": "cam/left.jpg",
                 "right_anchor": "cam/right.jpg",
+                "group_a_relative_paths": ["cam/a1.jpg", "cam/a2.jpg", "cam/a3.jpg"],
+                "group_b_relative_paths": ["cam/b1.jpg", "cam/b2.jpg", "cam/b3.jpg"],
                 "preset_name": "Preset A",
                 "model_config": {
                     "VLM_NAME": "Preset A",
@@ -1100,7 +1104,10 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("Primary evidence:", body)
         self.assertIn("  Transition occurs between frame_03 and frame_04.", body)
         self.assertNotIn("Reason: Left segment type: dance | Right segment type: rehearsal", body)
-        self.assertIn("\n\nAnchors:\n  cam/left.jpg -> cam/right.jpg\n\nModel: Preset A", body)
+        self.assertIn("\n\nAnchors:\n  cam/left.jpg -> cam/right.jpg", body)
+        self.assertIn("Group A segment photos:\n  cam/a1.jpg\n  cam/a2.jpg\n  cam/a3.jpg", body)
+        self.assertIn("Group B segment photos:\n  cam/b1.jpg\n  cam/b2.jpg\n  cam/b3.jpg", body)
+        self.assertIn("\n\nModel: Preset A", body)
         self.assertIn("Model config:", body)
         self.assertIn("  VLM_NAME: Preset A", body)
         self.assertIn("  VLM_TEMPERATURE: 0", body)
@@ -1176,8 +1183,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
                 "build_manual_vlm_window_rows",
                 return_value=(
                     [
-                        {"image_path": str(image_paths[0])},
-                        {"image_path": str(image_paths[1])},
+                        {"image_path": str(image_paths[0]), "relative_path": "cam/left.jpg"},
+                        {"image_path": str(image_paths[1]), "relative_path": "cam/right.jpg"},
                     ],
                     1,
                 ),
@@ -1255,8 +1262,12 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertEqual(result["decision"], "different_segments")
         self.assertEqual(result["semantic_decision"], "different_segments")
         self.assertEqual(result["compatibility_decision"], "cut_after_1")
+        self.assertEqual(result["group_a_relative_paths"], ["cam/left.jpg"])
+        self.assertEqual(result["group_b_relative_paths"], ["cam/right.jpg"])
         self.assertIn("Decision: different_segments", result["result_text"])
         self.assertNotIn("Compatibility decision:", result["result_text"])
+        self.assertIn("Group A segment photos:\n  cam/left.jpg", result["result_text"])
+        self.assertIn("Group B segment photos:\n  cam/right.jpg", result["result_text"])
         self.assertIn("  response_contract_id: grouped_v1", result["result_text"])
 
     def test_format_manual_vlm_analyze_result_text_preserves_model_config_order(self):
