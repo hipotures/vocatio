@@ -1390,6 +1390,15 @@ def compute_manual_vlm_analyze_result(
             setattr(exc, "attempt_count", attempt_count)
         raise
     response_json = extract_manual_vlm_response_payload(raw_response)
+    compatibility_decision = str(parsed_response.get("decision", "") or "").strip()
+    semantic_decision = str(
+        parsed_response.get("semantic_decision", "")
+        or response_json.get("decision", "")
+        or ""
+    ).strip()
+    if semantic_decision not in {"same_segment", "different_segments"}:
+        semantic_decision = ""
+    display_decision = semantic_decision or compatibility_decision
     result = {
         "provider": str(runtime_args.provider),
         "model": str(runtime_args.model),
@@ -1401,7 +1410,9 @@ def compute_manual_vlm_analyze_result(
         "response_contract_id": response_contract_id,
         "attempt_count": attempt_count,
         "run_id": run_id,
-        "decision": str(parsed_response.get("decision", "") or "").strip(),
+        "decision": display_decision,
+        "semantic_decision": semantic_decision,
+        "compatibility_decision": compatibility_decision,
         "reason": str(parsed_response.get("reason", "") or "").strip(),
         "response_status": str(parsed_response.get("response_status", "") or "").strip(),
         "summary": str(response_json.get("summary", "") or "").strip(),
@@ -1953,9 +1964,13 @@ def format_manual_vlm_reason_lines(reason: str, summary: str) -> List[str]:
 
 
 def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
+    decision = str(result.get("decision", "") or "").strip()
+    compatibility_decision = str(result.get("compatibility_decision", "") or "").strip()
     semantic_lines = [
-        f"Decision: {format_value(result.get('decision'))}",
+        f"Decision: {format_value(decision)}",
     ]
+    if compatibility_decision and compatibility_decision != decision:
+        semantic_lines.append(f"Compatibility decision: {compatibility_decision}")
     left_segment_type = str(result.get("left_segment_type", "") or "").strip()
     right_segment_type = str(result.get("right_segment_type", "") or "").strip()
     if left_segment_type or right_segment_type:

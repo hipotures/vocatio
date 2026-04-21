@@ -1046,7 +1046,9 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
     def test_format_manual_vlm_analyze_result_text_splits_reason_into_blocks(self):
         body = review_gui.format_manual_vlm_analyze_result_text(
             {
-                "decision": "cut_after_3",
+                "decision": "different_segments",
+                "semantic_decision": "different_segments",
+                "compatibility_decision": "cut_after_3",
                 "left_segment_type": "dance",
                 "right_segment_type": "rehearsal",
                 "summary": "Boundary after frame_03 marks transition from standing performance pose to floor split rehearsal.",
@@ -1087,7 +1089,8 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("Decision: cut_after_3", body)
+        self.assertIn("Decision: different_segments", body)
+        self.assertIn("Compatibility decision: cut_after_3", body)
         self.assertIn("Segments: dance -> rehearsal", body)
         self.assertIn("Reasoning:", body)
         self.assertIn("  Left segment type: dance", body)
@@ -1111,6 +1114,150 @@ class ReviewGuiImageOnlyDiagnosticsTests(unittest.TestCase):
         self.assertIn("  response_contract_id: grouped_v1", body)
         self.assertIn("Attempts: 3", body)
         self.assertIn("Succeeded on attempt: 3", body)
+
+    def test_compute_manual_vlm_analyze_result_prefers_semantic_decision_for_grouped_contract(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            image_paths = []
+            for name in ("left.jpg", "right.jpg", "tail.jpg"):
+                image_path = temp_path / name
+                image_path.write_bytes(b"jpeg")
+                image_paths.append(image_path)
+
+            joined_rows = [
+                {"relative_path": "cam/left.jpg", "start_epoch_ms": "1000", "image_path": str(image_paths[0])},
+                {"relative_path": "cam/right.jpg", "start_epoch_ms": "2000", "image_path": str(image_paths[1])},
+                {"relative_path": "cam/tail.jpg", "start_epoch_ms": "3000", "image_path": str(image_paths[2])},
+            ]
+            manual_vlm_model = {
+                "VLM_NAME": "Preset A",
+                "VLM_PROVIDER": "ollama",
+                "VLM_BASE_URL": "http://127.0.0.1:11434",
+                "VLM_MODEL": "qwen3.5:9b",
+                "VLM_CONTEXT_TOKENS": 4096,
+                "VLM_MAX_OUTPUT_TOKENS": 512,
+                "VLM_KEEP_ALIVE": "15m",
+                "VLM_TIMEOUT_SECONDS": 30,
+                "VLM_TEMPERATURE": 0,
+                "VLM_REASONING_LEVEL": "low",
+                "VLM_RESPONSE_SCHEMA_MODE": "off",
+                "VLM_JSON_VALIDATION_MODE": "strict",
+            }
+            window_config = {
+                "window_radius": 1,
+                "window_schema": "random",
+                "window_schema_seed": 42,
+            }
+            runtime_args = argparse.Namespace(
+                provider="ollama",
+                model="qwen3.5:9b",
+                image_variant="source",
+                ollama_base_url="http://127.0.0.1:11434",
+                timeout_seconds=30.0,
+                ollama_keep_alive="15m",
+                temperature=0.0,
+                ollama_num_ctx=4096,
+                ollama_num_predict=512,
+                ollama_think="low",
+                response_schema_mode="off",
+                json_validation_mode="strict",
+                window_radius=1,
+                prompt_template_id="group_compare_short",
+                prompt_template_file="",
+                response_contract_id="grouped_v1",
+            )
+
+            with unittest.mock.patch.object(
+                review_gui,
+                "resolve_manual_vlm_runtime_args",
+                return_value=runtime_args,
+            ), unittest.mock.patch.object(
+                review_gui,
+                "build_manual_vlm_window_rows",
+                return_value=(
+                    [
+                        {"image_path": str(image_paths[0])},
+                        {"image_path": str(image_paths[1])},
+                    ],
+                    1,
+                ),
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "load_extra_instructions",
+                return_value="",
+            ), unittest.mock.patch.object(
+                review_gui,
+                "load_manual_vlm_hint_lines",
+                return_value=["ML hints unavailable."],
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "render_runtime_user_prompt",
+                return_value=("rendered prompt", temp_path / "group_compare_short.txt"),
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "build_vlm_request",
+                return_value=object(),
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "build_provider_request_payload",
+                return_value={"request": "payload"},
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "build_run_id",
+                return_value="manual-grouped",
+            ), unittest.mock.patch.object(
+                review_gui.tempfile,
+                "gettempdir",
+                return_value=temp_dir,
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "run_vlm_request",
+                return_value=Mock(text="response text", raw_response={"response": "ok"}),
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "parse_model_response",
+                return_value={
+                    "response_status": "ok",
+                    "decision": "cut_after_1",
+                    "semantic_decision": "different_segments",
+                    "semantic_group_a_segment_type": "dance",
+                    "semantic_group_b_segment_type": "ceremony",
+                    "reason": "Group A segment type: dance | Group B segment type: ceremony",
+                },
+            ), unittest.mock.patch.object(
+                review_gui,
+                "extract_manual_vlm_response_payload",
+                return_value={
+                    "decision": "different_segments",
+                    "summary": "The groups likely belong to different segments.",
+                    "group_a_segment_type": "dance",
+                    "group_b_segment_type": "ceremony",
+                },
+            ), unittest.mock.patch.object(
+                review_gui.probe_vlm_boundary,
+                "dump_debug_artifacts",
+            ):
+                result = review_gui.compute_manual_vlm_analyze_result(
+                    day_dir=Path("/tmp/20260323"),
+                    workspace_dir=temp_path,
+                    payload={"day": "20260323", "window_radius": 1},
+                    joined_rows=joined_rows,
+                    anchor_pair={
+                        "left_row_index": 0,
+                        "right_row_index": 1,
+                        "left_relative_path": "cam/left.jpg",
+                        "right_relative_path": "cam/right.jpg",
+                    },
+                    window_config=window_config,
+                    manual_vlm_model=manual_vlm_model,
+                )
+
+        self.assertEqual(result["decision"], "different_segments")
+        self.assertEqual(result["semantic_decision"], "different_segments")
+        self.assertEqual(result["compatibility_decision"], "cut_after_1")
+        self.assertIn("Decision: different_segments", result["result_text"])
+        self.assertIn("Compatibility decision: cut_after_1", result["result_text"])
+        self.assertIn("  response_contract_id: grouped_v1", result["result_text"])
 
     def test_format_manual_vlm_analyze_result_text_preserves_model_config_order(self):
         body = review_gui.format_manual_vlm_analyze_result_text(
