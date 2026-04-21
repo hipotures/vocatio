@@ -1389,16 +1389,22 @@ def build_group_frame_ids(window_size: int, group_a_count: Optional[int] = None)
 
 
 def build_response_schema(*, group_a_ids: Sequence[str], group_b_ids: Sequence[str]) -> Dict[str, Any]:
-    frame_note_items = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "frame_id": {"type": "string"},
-            "group": {"type": "string", "enum": ["group_a", "group_b"]},
-            "note": {"type": "string"},
-        },
-        "required": ["frame_id", "group", "note"],
-    }
+    frame_note_variants = [
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "frame_id": {"type": "string", "enum": [frame_id]},
+                "group": {"type": "string", "enum": [group_name]},
+                "note": {"type": "string"},
+            },
+            "required": ["frame_id", "group", "note"],
+        }
+        for frame_id, group_name in (
+            [(frame_id, "group_a") for frame_id in group_a_ids]
+            + [(frame_id, "group_b") for frame_id in group_b_ids]
+        )
+    ]
     return {
         "type": "object",
         "additionalProperties": False,
@@ -1414,9 +1420,17 @@ def build_response_schema(*, group_a_ids: Sequence[str], group_b_ids: Sequence[s
             },
             "frame_notes": {
                 "type": "array",
-                "items": frame_note_items,
+                "items": {"oneOf": frame_note_variants},
                 "minItems": len(group_a_ids) + len(group_b_ids),
                 "maxItems": len(group_a_ids) + len(group_b_ids),
+                "allOf": [
+                    {
+                        "contains": frame_note_variant,
+                        "minContains": 1,
+                        "maxContains": 1,
+                    }
+                    for frame_note_variant in frame_note_variants
+                ],
             },
             "primary_evidence": {
                 "type": "array",
@@ -2424,12 +2438,15 @@ def run_vlm_window_analysis(
 
 def should_retry_structural_response_error(reason: str) -> bool:
     return any(
-        token in reason
-        for token in (
-            "frame_notes",
-            "frame_id",
-            "duplicate",
-            "Missing",
+        reason.startswith(prefix)
+        for prefix in (
+            "Missing frame_notes array",
+            "Invalid frame_notes item",
+            "Missing frame_id value in frame_notes",
+            "Invalid frame_id value:",
+            "duplicate frame_id:",
+            "Invalid group for ",
+            "Missing frame_notes value for ",
         )
     )
 

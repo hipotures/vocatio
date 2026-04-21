@@ -553,6 +553,42 @@ models:
         self.assertEqual(schema["properties"]["frame_notes"]["minItems"], 3)
         self.assertEqual(schema["properties"]["frame_notes"]["maxItems"], 3)
         self.assertEqual(
+            schema["properties"]["frame_notes"]["items"]["oneOf"],
+            [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "frame_id": {"type": "string", "enum": ["frame_01"]},
+                        "group": {"type": "string", "enum": ["group_a"]},
+                        "note": {"type": "string"},
+                    },
+                    "required": ["frame_id", "group", "note"],
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "frame_id": {"type": "string", "enum": ["frame_02"]},
+                        "group": {"type": "string", "enum": ["group_b"]},
+                        "note": {"type": "string"},
+                    },
+                    "required": ["frame_id", "group", "note"],
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "frame_id": {"type": "string", "enum": ["frame_03"]},
+                        "group": {"type": "string", "enum": ["group_b"]},
+                        "note": {"type": "string"},
+                    },
+                    "required": ["frame_id", "group", "note"],
+                },
+            ],
+        )
+        self.assertEqual(len(schema["properties"]["frame_notes"]["allOf"]), 3)
+        self.assertEqual(
             schema["required"],
             [
                 "decision",
@@ -3338,10 +3374,16 @@ models:
                     json_validation_mode="strict",
                 )
 
-            self.assertEqual(len(requests), 2)
-            self.assertIn("Repair instruction", requests[1].messages[1]["content"])
-            self.assertEqual(analysis["parsed_response"]["decision"], "no_cut")
-            self.assertEqual(analysis["parsed_response"]["response_status"], "ok")
+        self.assertEqual(len(requests), 2)
+        self.assertIn("Repair instruction", requests[1].messages[1]["content"])
+        self.assertEqual(analysis["parsed_response"]["decision"], "no_cut")
+        self.assertEqual(analysis["parsed_response"]["response_status"], "ok")
+
+    def test_should_retry_structural_response_error_matches_structural_contract_failures(self):
+        self.assertTrue(probe.should_retry_structural_response_error("Invalid group for frame_02: expected group_b, got group_a"))
+        self.assertTrue(probe.should_retry_structural_response_error("Missing frame_notes value for frame_02"))
+        self.assertFalse(probe.should_retry_structural_response_error("Missing summary value"))
+        self.assertFalse(probe.should_retry_structural_response_error("Invalid decision value: cut_after_1"))
 
     def test_build_gui_index_payload_builds_global_sets_from_unique_cuts(self):
         payload = probe.build_gui_index_payload(
