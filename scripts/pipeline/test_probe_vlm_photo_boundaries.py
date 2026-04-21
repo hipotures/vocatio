@@ -2042,6 +2042,30 @@ models:
         self.assertEqual(metadata["response_contract_id"], "grouped_v1")
         self.assertEqual(metadata["rendered_user_prompt"], "rendered prompt")
 
+    def test_write_run_metadata_persists_default_prompt_template_id_when_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            metadata = probe.write_run_metadata(
+                workspace_dir=workspace_dir,
+                run_id="vlm-20260421103100",
+                generated_at="2026-04-21T10:31:00+02:00",
+                config_hash="abc",
+                embedded_manifest_csv=workspace_dir / "embedded.csv",
+                photo_manifest_csv=workspace_dir / "manifest.csv",
+                output_csv=workspace_dir / "out.csv",
+                args_payload={},
+                system_prompt="system",
+                rendered_user_prompt="rendered prompt",
+                response_schema={"type": "object"},
+                response_contract_id="grouped_v1",
+            )
+            stored = json.loads((workspace_dir / "vlm_runs" / "vlm-20260421103100.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(metadata["prompt_template_id"], probe.DEFAULT_PROMPT_TEMPLATE_ID)
+        self.assertEqual(metadata["args"]["prompt_template_id"], probe.DEFAULT_PROMPT_TEMPLATE_ID)
+        self.assertEqual(stored["prompt_template_id"], probe.DEFAULT_PROMPT_TEMPLATE_ID)
+        self.assertEqual(stored["args"]["prompt_template_id"], probe.DEFAULT_PROMPT_TEMPLATE_ID)
+
     def test_read_result_rows_rejects_pre_follow_up_headers(self):
         with tempfile.TemporaryDirectory() as tmp:
             base_row = {

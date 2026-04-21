@@ -55,6 +55,14 @@ class BuildVlmPhotoBoundaryGuiIndexTests(unittest.TestCase):
         self.assertEqual(builder.resolve_runtime_prompt_template_id(metadata), "group_compare_short")
         self.assertEqual(builder.resolve_response_contract_id(metadata), "grouped_v1")
 
+    def test_resolve_runtime_prompt_template_id_defaults_when_metadata_omits_key(self) -> None:
+        metadata = {
+            "args": {},
+            "response_contract_id": "grouped_v1",
+        }
+
+        self.assertEqual(builder.resolve_runtime_prompt_template_id(metadata), builder.probe.DEFAULT_PROMPT_TEMPLATE_ID)
+
     def test_select_run_metadata_defaults_to_latest_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_dir = Path(tmp) / "_workspace"

@@ -147,7 +147,11 @@ def resolve_runtime_prompt_template_id(run_metadata: Mapping[str, Any]) -> str:
     args = run_metadata.get("args")
     if not isinstance(args, Mapping):
         raise ValueError("run metadata args are unavailable")
-    return str(args.get("prompt_template_id", "") or "").strip()
+    return (
+        str(run_metadata.get("prompt_template_id", "") or "").strip()
+        or str(args.get("prompt_template_id", "") or "").strip()
+        or probe.DEFAULT_PROMPT_TEMPLATE_ID
+    )
 
 
 def resolve_response_contract_id(run_metadata: Mapping[str, Any]) -> str:

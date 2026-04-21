@@ -2058,7 +2058,9 @@ def write_run_metadata(
     runs_dir = workspace_dir / RUN_METADATA_DIRNAME
     runs_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = runs_dir / f"{run_id}.json"
-    prompt_template_id = str(args_payload.get("prompt_template_id", "") or "").strip()
+    prompt_template_id = str(args_payload.get("prompt_template_id", "") or "").strip() or DEFAULT_PROMPT_TEMPLATE_ID
+    resolved_args_payload = dict(args_payload)
+    resolved_args_payload["prompt_template_id"] = prompt_template_id
     metadata = {
         "run_id": run_id,
         "generated_at": generated_at,
@@ -2076,7 +2078,7 @@ def write_run_metadata(
         "rendered_user_prompt": rendered_user_prompt,
         "response_schema": dict(response_schema) if response_schema is not None else None,
         "response_contract_id": response_contract_id,
-        "args": dict(args_payload),
+        "args": resolved_args_payload,
     }
     atomic_write_json(metadata_path, metadata)
     return metadata
