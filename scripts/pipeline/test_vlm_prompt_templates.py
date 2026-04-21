@@ -163,3 +163,27 @@ def test_render_prompt_template_consumes_placeholders_in_built_in_templates() ->
         assert "{{" not in rendered
         assert "}}" not in rendered
         assert "a_01 = attached image 1" in rendered
+
+
+def test_built_in_templates_include_false_positive_guardrails() -> None:
+    long_rendered = vlm_prompt_templates.render_prompt_template(
+        template_text=(REPO_ROOT / "conf" / "vlm_boundary_prompt.group_compare_long.txt").read_text(encoding="utf-8"),
+        group_a_ids=["a_01", "a_02"],
+        group_b_ids=["b_01", "b_02"],
+        ml_hint_lines=["overall hint: same_segment"],
+    )
+    short_rendered = vlm_prompt_templates.render_prompt_template(
+        template_text=(REPO_ROOT / "conf" / "vlm_boundary_prompt.group_compare_short.txt").read_text(encoding="utf-8"),
+        group_a_ids=["a_01", "a_02"],
+        group_b_ids=["b_01", "b_02"],
+        ml_hint_lines=["overall hint: same_segment"],
+    )
+
+    assert "Costume identity can remain consistent even if jackets are opened" in long_rendered
+    assert "Do not infer different_segments from opened jackets" in long_rendered
+    assert "If one group is blurry, distant, partially occluded, or visually ambiguous" in long_rendered
+    assert "Do not speculate about hidden garments" in long_rendered
+
+    assert "Do not treat opened jackets, revealed inner costume layers" in short_rendered
+    assert "avoid speculative costume interpretation" in short_rendered
+    assert "prefer same_segment unless multiple strong cues indicate a real transition" in short_rendered

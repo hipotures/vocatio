@@ -44,10 +44,20 @@ ML hints:
 
 Decision guidance:
 - Choose same_segment when performer identity, costume identity, and segment context remain consistent across the two groups.
-- Choose different_segments when there is clear evidence that the groups belong to different acts, different dancer groups, or clearly different segment types.
+- Costume identity can remain consistent even if jackets are opened, outer layers are removed, inner garments become visible, or choreography changes the apparent coverage or silhouette.
+- Choose different_segments only when multiple independent cues support a true transition, such as different cast identity, clearly different costume system, clearly different segment type, or a strong scene reset.
 - A pose change, movement phrase change, framing change, crop change, zoom change, lighting change alone, or background change alone is not enough to justify different_segments.
 - A solo image and a wider group image can still be the same segment if performer identity and costume identity remain consistent.
+- Formation changes, spacing changes, or a shift to another choreography phrase are common within the same dance act.
+- If one group is blurry, distant, partially occluded, or visually ambiguous, do not make a strong segment-change claim from fine-grained costume details.
+- Use coarse visible continuity over speculative fine detail.
 - If the evidence is ambiguous, prefer same_segment.
+
+False-positive guards:
+- Do not infer different_segments from opened jackets, removed outer layers, partially revealed inner garments, or costume progression within the same choreography.
+- A newly visible top, shirt, sequined layer, or underlayer is not sufficient evidence of a new segment.
+- The same segment may include costume reveal, jacket opening, outer-layer removal, solo-to-group transitions, or large changes in body pose and choreography phase.
+- Treat "outer layer removed or revealed" as weak evidence unless it is supported by multiple independent cues.
 
 Return exactly one JSON object with this structure:
 {
@@ -68,5 +78,7 @@ Rules:
 - Do not output any text before or after JSON.
 - frame_notes must include every runtime frame_id exactly once.
 - Keep frame notes short and concrete.
+- primary_evidence must be concrete, observable, and conservative.
+- Do not speculate about hidden garments, unseen cast continuity, or implied act changes.
 - primary_evidence must contain at least one non-empty item.
 - summary must be one short sentence.

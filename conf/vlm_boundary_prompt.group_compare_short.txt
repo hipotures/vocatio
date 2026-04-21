@@ -19,6 +19,11 @@ Allowed segment type labels:
 ML hints:
 {{ML_HINTS_BLOCK}}
 
+Guardrails:
+- Do not treat opened jackets, revealed inner costume layers, or choreography and formation changes as sufficient evidence of different_segments.
+- Use only clearly visible evidence and avoid speculative costume interpretation.
+- If one group is blurry or visually ambiguous, prefer same_segment unless multiple strong cues indicate a real transition.
+
 Return only valid JSON:
 {
   "decision": "<same_segment|different_segments>",
