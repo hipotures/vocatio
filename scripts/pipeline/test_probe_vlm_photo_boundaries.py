@@ -172,6 +172,16 @@ models:
             self.assertEqual(args.ml_model_run_id, "day-20260323-best")
             self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
 
+    def test_apply_vocatio_defaults_reads_prompt_template_id(self) -> None:
+        args = probe.parse_args(["DAY"])
+        with mock.patch.object(
+            probe,
+            "load_vocatio_config",
+            return_value={"VLM_PROMPT_TEMPLATE_ID": "group_compare_short"},
+        ):
+            resolved = probe.apply_vocatio_defaults(args, Path("/tmp/day"))
+        self.assertEqual(resolved.prompt_template_id, "group_compare_short")
+
     def test_apply_vocatio_defaults_preserves_explicit_cli_vlm_values(self):
         day_dir = self.make_day_dir(
             "\n".join(
@@ -1655,6 +1665,47 @@ models:
         self.assertNotIn("window_size", row)
         self.assertNotIn("overlap", row)
 
+    def test_build_result_row_keeps_semantic_fields_and_compat_projection(self) -> None:
+        row = probe.build_result_row(
+            generated_at="2026-04-21T10:00:00+02:00",
+            run_id="vlm-20260421100000",
+            config_hash="abc",
+            image_variant="preview",
+            batch_index=1,
+            start_row=10,
+            end_row=15,
+            rows=[
+                {
+                    "relative_path": "cam/a.jpg",
+                    "filename": "a.jpg",
+                    "image_path": "/tmp/a.jpg",
+                    "start_epoch_ms": "1000",
+                },
+                {
+                    "relative_path": "cam/b.jpg",
+                    "filename": "b.jpg",
+                    "image_path": "/tmp/b.jpg",
+                    "start_epoch_ms": "2000",
+                },
+            ],
+            window_radius=3,
+            raw_response='{"decision":"different_segments"}',
+            parsed_response={
+                "decision": "cut_after_1",
+                "semantic_decision": "different_segments",
+                "semantic_group_a_segment_type": "dance",
+                "semantic_group_b_segment_type": "ceremony",
+                "response_contract_id": "grouped_v1",
+                "reason": "Summary: mismatch",
+                "response_status": "ok",
+            },
+        )
+        self.assertEqual(row["decision"], "cut_after_1")
+        self.assertEqual(row["semantic_decision"], "different_segments")
+        self.assertEqual(row["semantic_group_a_segment_type"], "dance")
+        self.assertEqual(row["semantic_group_b_segment_type"], "ceremony")
+        self.assertEqual(row["response_contract_id"], "grouped_v1")
+
     def test_build_vlm_request_maps_ollama_fields_to_transport_request(self):
         schema = probe.build_response_schema(group_a_ids=["frame_01"], group_b_ids=["frame_02"])
         with tempfile.TemporaryDirectory() as tmp:
@@ -1930,19 +1981,23 @@ models:
                     "window_radius": 2,
                     "max_batches": 100,
                     "model": "qwen3.5:9b",
+                    "response_contract_id": "grouped_v1",
                     "response_schema_mode": "on",
                 },
                 system_prompt="system",
-                user_prompt_template="user-template",
+                rendered_user_prompt="user-template",
                 response_schema={"type": "object"},
+                response_contract_id="grouped_v1",
             )
             metadata_path = workspace_dir / "vlm_runs" / "vlm-20260414053012.json"
             self.assertEqual(metadata["run_id"], "vlm-20260414053012")
             self.assertEqual(metadata["config_hash"], "abc123")
             self.assertTrue(metadata_path.exists())
             stored = json.loads(metadata_path.read_text(encoding="utf-8"))
-            self.assertEqual(stored["user_prompt_template"], "user-template")
+            self.assertEqual(stored["rendered_user_prompt"], "user-template")
+            self.assertEqual(stored["response_contract_id"], "grouped_v1")
             self.assertEqual(stored["args"]["window_radius"], 2)
+            self.assertEqual(stored["args"]["response_contract_id"], "grouped_v1")
             self.assertEqual(stored["args"]["response_schema_mode"], "on")
             self.assertEqual(stored["response_schema"], {"type": "object"})
 

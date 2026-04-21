@@ -77,6 +77,8 @@ DEFAULT_TEMPERATURE = 0.0
 DEFAULT_OLLAMA_THINK = "inherit"
 DEFAULT_RESPONSE_SCHEMA_MODE = "off"
 DEFAULT_JSON_VALIDATION_MODE = "strict"
+DEFAULT_PROMPT_TEMPLATE_ID = "group_compare_long"
+DEFAULT_RESPONSE_CONTRACT_ID = "grouped_v1"
 DEFAULT_PHOTO_PRE_MODEL_DIR = DEFAULT_PHOTO_PRE_MODEL_DIRNAME
 DEFAULT_PROVIDER = "ollama"
 DEFAULT_ML_MODEL_RUN_ID = ""
@@ -94,6 +96,8 @@ VLM_WORKFLOW_CONFIG_KEYS = frozenset(
         "VLM_BOUNDARY_GAP_SECONDS",
         "VLM_MAX_BATCHES",
         "VLM_PHOTO_PRE_MODEL_DIR",
+        "VLM_PROMPT_TEMPLATE_ID",
+        "VLM_PROMPT_TEMPLATE_FILE",
         "VLM_ML_MODEL_RUN_ID",
         "VLM_DUMP_DEBUG_DIR",
     }
@@ -155,6 +159,10 @@ OUTPUT_HEADERS = [
     "delta_from_first_seconds_json",
     "delta_from_previous_seconds_json",
     "decision",
+    "semantic_decision",
+    "semantic_group_a_segment_type",
+    "semantic_group_b_segment_type",
+    "response_contract_id",
     "cut_after_local_index",
     "cut_after_global_row",
     "cut_left_relative_path",
@@ -182,6 +190,9 @@ RESUME_CONFIG_KEYS = (
     "ollama_think",
     "response_schema_mode",
     "json_validation_mode",
+    "prompt_template_id",
+    "prompt_template_file",
+    "response_contract_id",
     "photo_pre_model_dir",
     "effective_ml_model_run_id",
     "effective_extra_instructions",
@@ -305,6 +316,11 @@ def non_negative_float_arg(value: str) -> float:
     if parsed < 0.0:
         raise argparse.ArgumentTypeError("must be a non-negative number")
     return parsed
+
+
+def map_ml_segment_label_to_prompt_label(value: str) -> str:
+    normalized = str(value or "").strip()
+    return ML_SEGMENT_TYPE_TO_PROMPT_LABEL.get(normalized, "")
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -441,6 +457,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         choices=("strict", "relaxed"),
         default=DEFAULT_JSON_VALIDATION_MODE,
         help=f"Parser validation strictness for JSON responses. Default: {DEFAULT_JSON_VALIDATION_MODE}",
+    )
+    parser.add_argument(
+        "--prompt-template-id",
+        default=DEFAULT_PROMPT_TEMPLATE_ID,
+        help=f"Prompt template identifier reserved for grouped prompt variants. Default: {DEFAULT_PROMPT_TEMPLATE_ID}",
+    )
+    parser.add_argument(
+        "--prompt-template-file",
+        default="",
+        help="Optional prompt template file override reserved for grouped prompt variants.",
     )
     parser.add_argument(
         "--photo-pre-model-dir",
@@ -672,6 +698,8 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
         non_negative_int_arg,
     )
     apply_int("max_batches", DEFAULT_MAX_BATCHES, "VLM_MAX_BATCHES", max_batches_arg)
+    apply_string("prompt_template_id", DEFAULT_PROMPT_TEMPLATE_ID, "VLM_PROMPT_TEMPLATE_ID")
+    apply_string("prompt_template_file", "", "VLM_PROMPT_TEMPLATE_FILE")
     apply_string("photo_pre_model_dir", DEFAULT_PHOTO_PRE_MODEL_DIR, "VLM_PHOTO_PRE_MODEL_DIR")
     apply_string("ml_model_run_id", DEFAULT_ML_MODEL_RUN_ID, "VLM_ML_MODEL_RUN_ID")
     if args.dump_debug_dir is None:
@@ -1291,14 +1319,8 @@ def build_ml_hint_lines(
     if prediction is None:
         return ["ML hints are unavailable for this window."]
     boundary_label = "cut" if prediction.boundary_prediction else "no cut"
-    left_segment_label = ML_SEGMENT_TYPE_TO_PROMPT_LABEL.get(
-        prediction.left_segment_type_prediction,
-        prediction.left_segment_type_prediction,
-    )
-    right_segment_label = ML_SEGMENT_TYPE_TO_PROMPT_LABEL.get(
-        prediction.right_segment_type_prediction,
-        prediction.right_segment_type_prediction,
-    )
+    left_segment_label = map_ml_segment_label_to_prompt_label(prediction.left_segment_type_prediction)
+    right_segment_label = map_ml_segment_label_to_prompt_label(prediction.right_segment_type_prediction)
     return [
         f"ML hint for the main candidate gap in this window: likely {boundary_label} (confidence {prediction.boundary_confidence:.2f}).",
         f"ML hint for the left side of the candidate gap: likely {left_segment_label} (confidence {prediction.left_segment_type_confidence:.2f}).",
@@ -1757,7 +1779,7 @@ def parse_model_response(
     response_contract_id: str,
     json_validation_mode: str = DEFAULT_JSON_VALIDATION_MODE,
 ) -> Dict[str, str]:
-    if response_contract_id != "grouped_v1":
+    if response_contract_id != DEFAULT_RESPONSE_CONTRACT_ID:
         raise ValueError(f"unsupported response_contract_id: {response_contract_id}")
     try:
         payload = json.loads(extract_json_object_text(raw_response))
@@ -1891,6 +1913,10 @@ def build_result_row(
         "delta_from_first_seconds_json": json.dumps(delta_from_first_seconds, ensure_ascii=True),
         "delta_from_previous_seconds_json": json.dumps(delta_from_previous_seconds, ensure_ascii=True),
         "decision": decision,
+        "semantic_decision": str(parsed_response.get("semantic_decision", "")),
+        "semantic_group_a_segment_type": str(parsed_response.get("semantic_group_a_segment_type", "")),
+        "semantic_group_b_segment_type": str(parsed_response.get("semantic_group_b_segment_type", "")),
+        "response_contract_id": str(parsed_response.get("response_contract_id", DEFAULT_RESPONSE_CONTRACT_ID)),
         "cut_after_local_index": cut_after_local_index,
         "cut_after_global_row": cut_after_global_row,
         "cut_left_relative_path": cut_left_relative_path,
@@ -1967,8 +1993,9 @@ def write_run_metadata(
     output_csv: Path,
     args_payload: Mapping[str, Any],
     system_prompt: str,
-    user_prompt_template: str,
+    rendered_user_prompt: str,
     response_schema: Optional[Mapping[str, Any]],
+    response_contract_id: str,
 ) -> Dict[str, Any]:
     runs_dir = workspace_dir / RUN_METADATA_DIRNAME
     runs_dir.mkdir(parents=True, exist_ok=True)
@@ -1981,8 +2008,9 @@ def write_run_metadata(
         "photo_manifest_csv": str(photo_manifest_csv),
         "output_csv": str(output_csv),
         "system_prompt": system_prompt,
-        "user_prompt_template": user_prompt_template,
+        "rendered_user_prompt": rendered_user_prompt,
         "response_schema": dict(response_schema) if response_schema is not None else None,
+        "response_contract_id": response_contract_id,
         "args": dict(args_payload),
     }
     atomic_write_json(metadata_path, metadata)
@@ -2302,7 +2330,7 @@ def run_vlm_window_analysis(
     group_a_count: Optional[int] = None,
     ml_hint_lines: Sequence[str],
     window_schema: str = DEFAULT_WINDOW_SCHEMA,
-    response_contract_id: str = "grouped_v1",
+    response_contract_id: str = DEFAULT_RESPONSE_CONTRACT_ID,
     provider: str,
     base_url: str,
     model: str,
@@ -2558,6 +2586,7 @@ def probe_vlm_photo_boundaries(
     new_run: bool,
     window_schema: str = DEFAULT_WINDOW_SCHEMA,
     window_schema_seed: int = DEFAULT_WINDOW_SCHEMA_SEED,
+    response_contract_id: str = DEFAULT_RESPONSE_CONTRACT_ID,
 ) -> int:
     config_hash = build_config_hash(args_payload)
     joined_rows = read_joined_rows(
@@ -2627,7 +2656,7 @@ def probe_vlm_photo_boundaries(
             output_csv=output_csv,
             args_payload=args_payload,
             system_prompt=build_system_prompt(str(args_payload.get("response_schema_mode", "off"))),
-            user_prompt_template=build_user_prompt_template(
+            rendered_user_prompt=build_user_prompt_template(
                 window_size=window_radius_to_window_size(window_radius),
                 extra_instructions=extra_instructions,
                 response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
@@ -2635,6 +2664,7 @@ def probe_vlm_photo_boundaries(
                 group_a_count=window_radius,
             ),
             response_schema=response_schema,
+            response_contract_id=response_contract_id,
         )
         console.print(
             build_run_start_message(
@@ -2711,6 +2741,7 @@ def probe_vlm_photo_boundaries(
                 extra_instructions=extra_instructions,
                 response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
                 json_validation_mode=json_validation_mode,
+                response_contract_id=response_contract_id,
                 debug_dir=dump_debug_dir,
                 debug_run_id=run_id,
                 debug_batch_index=batch_index,
@@ -2801,6 +2832,9 @@ def main() -> int:
         "ollama_think": args.ollama_think,
         "response_schema_mode": args.response_schema_mode,
         "json_validation_mode": args.json_validation_mode,
+        "prompt_template_id": args.prompt_template_id,
+        "prompt_template_file": args.prompt_template_file,
+        "response_contract_id": DEFAULT_RESPONSE_CONTRACT_ID,
         "photo_pre_model_dir": str(resolve_path(workspace_dir, args.photo_pre_model_dir)),
         "requested_ml_model_run_id": args.ml_model_run_id,
         "effective_ml_model_run_id": effective_ml_model_run_id,
@@ -2843,6 +2877,7 @@ def main() -> int:
         json_validation_mode=args.json_validation_mode,
         args_payload=args_payload,
         new_run=bool(args.new_run),
+        response_contract_id=str(args_payload["response_contract_id"]),
     )
     console.print(f"Wrote {row_count} VLM probe rows to {output_csv}")
     return 0
