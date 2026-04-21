@@ -100,10 +100,28 @@ def test_render_prompt_template_renders_group_mapping_and_frame_notes(tmp_path: 
 
 def test_render_prompt_template_uses_unavailable_hints_fallback() -> None:
     rendered = vlm_prompt_templates.render_prompt_template(
-        template_text="Hints:\n{{ML_HINTS_BLOCK}}\n",
+        template_text=(
+            "Group mapping:\n{{GROUP_MAPPING}}\n\n"
+            "Hints:\n{{ML_HINTS_BLOCK}}\n\n"
+            "{{FRAME_NOTES_JSON_EXAMPLE}}\n"
+        ),
         group_a_ids=["a_01"],
         group_b_ids=["b_01"],
         ml_hint_lines=[],
     )
 
     assert "ML hints are unavailable for this pair of groups." in rendered
+
+
+def test_render_prompt_template_rejects_missing_required_placeholder() -> None:
+    try:
+        vlm_prompt_templates.render_prompt_template(
+            template_text="Group mapping:\n{{GROUP_MAPPING}}\n",
+            group_a_ids=["a_01"],
+            group_b_ids=["b_01"],
+            ml_hint_lines=[],
+        )
+    except ValueError as exc:
+        assert "{{ML_HINTS_BLOCK}}" in str(exc) or "{{FRAME_NOTES_JSON_EXAMPLE}}" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")

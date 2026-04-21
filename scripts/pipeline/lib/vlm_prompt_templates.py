@@ -68,6 +68,9 @@ def render_prompt_template(
     group_b_ids: list[str],
     ml_hint_lines: list[str],
 ) -> str:
+    for placeholder in REQUIRED_TEMPLATE_PLACEHOLDERS:
+        if placeholder not in template_text:
+            raise ValueError(f"template is missing required placeholder {placeholder}")
     replacements = {
         "{{WINDOW_SIZE}}": str(len(group_a_ids) + len(group_b_ids)),
         "{{WINDOW_RADIUS}}": str(len(group_a_ids)),
