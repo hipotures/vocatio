@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -21,8 +22,22 @@ class PromptTemplatesConfig:
     md5_hex: str
 
 
+def _validate_required_string_field(item: dict[str, Any], index: int, field_name: str) -> str:
+    if field_name not in item:
+        raise ValueError(f"templates[{index}] is missing {field_name}")
+    value = item[field_name]
+    if not isinstance(value, str):
+        raise ValueError(f"templates[{index}] {field_name} must be a string")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"templates[{index}] is missing {field_name}")
+    return normalized
+
+
 def load_prompt_templates_config(path: Path) -> PromptTemplatesConfig:
     payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise ValueError("prompt template registry root must be a mapping")
     raw_templates = payload.get("templates")
     if not isinstance(raw_templates, list):
         raise ValueError("templates must be a list")
@@ -32,19 +47,10 @@ def load_prompt_templates_config(path: Path) -> PromptTemplatesConfig:
         if not isinstance(item, dict):
             raise ValueError(f"templates[{index}] must be a mapping")
 
-        entry_id = str(item.get("id", "") or "").strip()
-        label = str(item.get("label", "") or "").strip()
-        file_value = str(item.get("file", "") or "").strip()
-        description = str(item.get("description", "") or "").strip()
-
-        if not entry_id:
-            raise ValueError(f"templates[{index}] is missing id")
-        if not label:
-            raise ValueError(f'templates[{index}] "{entry_id}" is missing label')
-        if not file_value:
-            raise ValueError(f'templates[{index}] "{entry_id}" is missing file')
-        if not description:
-            raise ValueError(f'templates[{index}] "{entry_id}" is missing description')
+        entry_id = _validate_required_string_field(item, index, "id")
+        label = _validate_required_string_field(item, index, "label")
+        file_value = _validate_required_string_field(item, index, "file")
+        description = _validate_required_string_field(item, index, "description")
 
         templates.append(
             PromptTemplateEntry(
