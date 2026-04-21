@@ -54,6 +54,10 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "thumb",
                 "--window-radius",
                 "4",
+                "--window-schema",
+                "index_quantile",
+                "--window-schema-seed",
+                "99",
                 "--boundary-gap-seconds",
                 "12",
                 "--temperature",
@@ -73,6 +77,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(args.run_id, "vlm-20260414053012")
         self.assertEqual(args.image_variant, "thumb")
         self.assertEqual(args.window_radius, 4)
+        self.assertEqual(args.window_schema, "index_quantile")
+        self.assertEqual(args.window_schema_seed, 99)
         self.assertEqual(args.boundary_gap_seconds, 12)
         self.assertEqual(args.temperature, 0.25)
         self.assertEqual(args.response_schema_mode, "on")
@@ -86,6 +92,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
     def test_parse_args_defaults_boundary_gap_seconds_to_10(self):
         args = probe.parse_args(["/tmp/day"])
         self.assertEqual(args.window_radius, probe.DEFAULT_WINDOW_RADIUS)
+        self.assertEqual(args.window_schema, probe.DEFAULT_WINDOW_SCHEMA)
+        self.assertEqual(args.window_schema_seed, probe.DEFAULT_WINDOW_SCHEMA_SEED)
         self.assertEqual(args.boundary_gap_seconds, 10)
         self.assertEqual(args.json_validation_mode, "strict")
         self.assertEqual(args.photo_manifest_csv, "media_manifest.csv")
@@ -111,6 +119,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     "VLM_EMBEDDED_MANIFEST_CSV=photo_embedded_manifest.csv",
                     "VLM_IMAGE_VARIANT=thumb",
                     "VLM_WINDOW_RADIUS=4",
+                    "VLM_WINDOW_SCHEMA=index_quantile",
+                    "VLM_WINDOW_SCHEMA_SEED=17",
                     "VLM_BOUNDARY_GAP_SECONDS=20",
                     "VLM_MAX_BATCHES=0",
                     "VLM_PHOTO_PRE_MODEL_DIR=custom_pre_model",
@@ -146,6 +156,8 @@ models:
             self.assertEqual(args.embedded_manifest_csv, "photo_embedded_manifest.csv")
             self.assertEqual(args.image_variant, "thumb")
             self.assertEqual(args.window_radius, 4)
+            self.assertEqual(args.window_schema, "index_quantile")
+            self.assertEqual(args.window_schema_seed, 17)
             self.assertEqual(args.boundary_gap_seconds, 20)
             self.assertEqual(args.max_batches, 0)
             self.assertEqual(args.ollama_num_ctx, 8192)
@@ -616,6 +628,57 @@ models:
                 boundary_gap_seconds=10,
             ),
             [{"start_index": 2, "cut_index": 3, "time_gap_seconds": 17}],
+        )
+
+    def test_segment_bounds_for_cut_index_use_neighboring_large_gaps(self):
+        rows = [
+            {"start_epoch_ms": "0"},
+            {"start_epoch_ms": "1000"},
+            {"start_epoch_ms": "2000"},
+            {"start_epoch_ms": "20000"},
+            {"start_epoch_ms": "21000"},
+            {"start_epoch_ms": "22000"},
+            {"start_epoch_ms": "40000"},
+            {"start_epoch_ms": "41000"},
+        ]
+
+        self.assertEqual(
+            probe.segment_bounds_for_cut_index(
+                rows,
+                cut_index=4,
+                boundary_gap_seconds=10,
+            ),
+            ((3, 5), (5, 6)),
+        )
+
+    def test_build_window_rows_for_cut_index_uses_segment_schema_selection(self):
+        joined_rows = [
+            {
+                "relative_path": f"cam/{index}.jpg",
+                "start_epoch_ms": str(index * 1000),
+            }
+            for index in range(1, 11)
+        ]
+
+        rows = probe.build_window_rows_for_cut_index(
+            joined_rows=joined_rows,
+            cut_index=4,
+            window_radius=3,
+            window_schema="index_quantile",
+            window_schema_seed=42,
+            boundary_gap_seconds=100,
+        )
+
+        self.assertEqual(
+            [str(row["relative_path"]) for row in rows],
+            [
+                "cam/1.jpg",
+                "cam/3.jpg",
+                "cam/5.jpg",
+                "cam/6.jpg",
+                "cam/8.jpg",
+                "cam/10.jpg",
+            ],
         )
 
     def test_build_temporal_lines_uses_rounded_second_deltas(self):
@@ -2956,9 +3019,8 @@ models:
                 provider="vllm",
                 model="Qwen/Qwen2.5-VL-7B-Instruct",
                 text=(
-                    '{"boundary_after_frame":"frame_03","left_segment_type":"dance","right_segment_type":"ceremony",'
-                    '"frame_notes":{"frame_01":"same dancer","frame_02":"same dancer","frame_03":"same dancer",'
-                    '"frame_04":"host on stage"},'
+                    '{"boundary_after_frame":"frame_02","left_segment_type":"dance","right_segment_type":"ceremony",'
+                    '"frame_notes":{"frame_01":"same dancer","frame_02":"same dancer","frame_03":"host on stage"},'
                     '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 3."}'
                 ),
                 json_payload=None,
@@ -2969,9 +3031,8 @@ models:
                         {
                             "message": {
                                 "content": (
-                                    '{"boundary_after_frame":"frame_03","left_segment_type":"dance","right_segment_type":"ceremony",'
-                                    '"frame_notes":{"frame_01":"same dancer","frame_02":"same dancer","frame_03":"same dancer",'
-                                    '"frame_04":"host on stage"},'
+                                    '{"boundary_after_frame":"frame_02","left_segment_type":"dance","right_segment_type":"ceremony",'
+                                    '"frame_notes":{"frame_01":"same dancer","frame_02":"same dancer","frame_03":"host on stage"},'
                                     '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 3."}'
                                 )
                             },
@@ -2983,7 +3044,7 @@ models:
 
             with mock.patch.object(
                 probe,
-                "build_ml_hint_lines_for_candidate",
+                "build_ml_hint_lines_for_window_rows",
                 return_value=[
                     "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
                     "ML hint for the left side of the candidate gap: likely dance (confidence 0.76).",
@@ -3033,7 +3094,7 @@ models:
                     "type": "json_schema",
                     "json_schema": {
                         "name": "photo_boundary_probe",
-                        "schema": probe.build_response_schema(window_size=4),
+                        "schema": probe.build_response_schema(window_size=3),
                     },
                 },
             )
@@ -3042,7 +3103,7 @@ models:
             self.assertNotIn("Optional pre-model per-image annotations", request.messages[1]["content"])
             rows = probe.read_result_rows(output_csv)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["decision"], "cut_after_3")
+            self.assertEqual(rows[0]["decision"], "cut_after_2")
 
     def test_dump_debug_artifacts_writes_prompt_request_and_response(self):
         with tempfile.TemporaryDirectory() as tmp:

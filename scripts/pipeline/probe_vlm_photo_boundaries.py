@@ -25,6 +25,7 @@ from rich.progress import (
 )
 
 from lib import manual_vlm_models
+from lib import window_schema as window_schema_lib
 from lib.image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1
 from lib.ml_boundary_dataset import normalize_timestamp
 from lib.ml_boundary_features import build_candidate_feature_row
@@ -79,6 +80,8 @@ DEFAULT_JSON_VALIDATION_MODE = "strict"
 DEFAULT_PHOTO_PRE_MODEL_DIR = DEFAULT_PHOTO_PRE_MODEL_DIRNAME
 DEFAULT_PROVIDER = "ollama"
 DEFAULT_ML_MODEL_RUN_ID = ""
+DEFAULT_WINDOW_SCHEMA = window_schema_lib.DEFAULT_WINDOW_SCHEMA
+DEFAULT_WINDOW_SCHEMA_SEED = window_schema_lib.DEFAULT_WINDOW_SCHEMA_SEED
 VLM_MODELS_CONFIG_PATH = Path(__file__).resolve().parents[2] / "conf" / "vlm_models.yaml"
 VLM_WORKFLOW_CONFIG_KEYS = frozenset(
     {
@@ -86,6 +89,8 @@ VLM_WORKFLOW_CONFIG_KEYS = frozenset(
         "VLM_PHOTO_MANIFEST_CSV",
         "VLM_IMAGE_VARIANT",
         "VLM_WINDOW_RADIUS",
+        "VLM_WINDOW_SCHEMA",
+        "VLM_WINDOW_SCHEMA_SEED",
         "VLM_BOUNDARY_GAP_SECONDS",
         "VLM_MAX_BATCHES",
         "VLM_PHOTO_PRE_MODEL_DIR",
@@ -164,6 +169,8 @@ RESUME_CONFIG_KEYS = (
     "provider",
     "image_variant",
     "window_radius",
+    "window_schema",
+    "window_schema_seed",
     "boundary_gap_seconds",
     "model",
     "ollama_base_url",
@@ -349,6 +356,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "Number of photos to include on each side of the main candidate cut. "
             f"Internal window size is 2 * radius. Default: {DEFAULT_WINDOW_RADIUS}"
         ),
+    )
+    parser.add_argument(
+        "--window-schema",
+        choices=window_schema_lib.WINDOW_SCHEMA_VALUES,
+        default=DEFAULT_WINDOW_SCHEMA,
+        help=f"Photo selection schema inside each segment. Default: {DEFAULT_WINDOW_SCHEMA}",
+    )
+    parser.add_argument(
+        "--window-schema-seed",
+        type=int,
+        default=DEFAULT_WINDOW_SCHEMA_SEED,
+        help=f"Deterministic seed for schema-based selection. Default: {DEFAULT_WINDOW_SCHEMA_SEED}",
     )
     parser.add_argument(
         "--boundary-gap-seconds",
@@ -617,6 +636,12 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
             if configured:
                 setattr(args, attr, parser(configured))
 
+    def apply_window_schema(attr: str, default_value: str, config_key: str) -> None:
+        if _arg_is_inheritable(args, cli_provided, attr, default_value):
+            configured = str(config.get(config_key, "") or "").strip()
+            if configured:
+                setattr(args, attr, window_schema_lib.parse_window_schema(configured))
+
     if _needs_vlm_preset_resolution(args, config):
         preset_config = _resolve_vlm_preset_config(config)
         apply_preset_string("provider", DEFAULT_PROVIDER, preset_config["VLM_PROVIDER"])
@@ -644,6 +669,8 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
     apply_string("photo_manifest_csv", PHOTO_MANIFEST_FILENAME, "VLM_PHOTO_MANIFEST_CSV")
     apply_string("image_variant", DEFAULT_IMAGE_VARIANT, "VLM_IMAGE_VARIANT")
     apply_int("window_radius", DEFAULT_WINDOW_RADIUS, "VLM_WINDOW_RADIUS", positive_window_radius_arg)
+    apply_window_schema("window_schema", DEFAULT_WINDOW_SCHEMA, "VLM_WINDOW_SCHEMA")
+    apply_int("window_schema_seed", DEFAULT_WINDOW_SCHEMA_SEED, "VLM_WINDOW_SCHEMA_SEED", int)
     apply_int(
         "boundary_gap_seconds",
         DEFAULT_BOUNDARY_GAP_SECONDS,
@@ -710,6 +737,32 @@ def read_joined_rows(
         raise ValueError(f"{embedded_manifest_csv.name} contains no rows")
     return joined_rows
 
+
+def segment_bounds_for_cut_index(
+    rows: Sequence[Mapping[str, str]],
+    *,
+    cut_index: int,
+    boundary_gap_seconds: int,
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    if cut_index < 0 or cut_index >= len(rows) - 1:
+        raise ValueError("cut_index must reference a boundary between consecutive rows")
+    left_start = 0
+    for index in range(cut_index - 1, -1, -1):
+        left_epoch_ms = int(str(rows[index]["start_epoch_ms"]))
+        right_epoch_ms = int(str(rows[index + 1]["start_epoch_ms"]))
+        if rounded_seconds(right_epoch_ms - left_epoch_ms) >= boundary_gap_seconds:
+            left_start = index + 1
+            break
+    right_end = len(rows)
+    for index in range(cut_index + 1, len(rows) - 1):
+        left_epoch_ms = int(str(rows[index]["start_epoch_ms"]))
+        right_epoch_ms = int(str(rows[index + 1]["start_epoch_ms"]))
+        if rounded_seconds(right_epoch_ms - left_epoch_ms) >= boundary_gap_seconds:
+            right_end = index + 1
+            break
+    return (left_start, cut_index + 1), (cut_index + 1, right_end)
+
+
 def build_candidate_windows(
     rows: Sequence[Mapping[str, str]],
     window_radius: int,
@@ -751,6 +804,37 @@ def build_candidate_window_start_indexes(
             boundary_gap_seconds=boundary_gap_seconds,
         )
     ]
+
+
+def build_window_rows_for_cut_index(
+    *,
+    joined_rows: Sequence[Mapping[str, str]],
+    cut_index: int,
+    window_radius: int,
+    window_schema: str,
+    window_schema_seed: int,
+    boundary_gap_seconds: int,
+) -> list[Mapping[str, str]]:
+    left_bounds, right_bounds = segment_bounds_for_cut_index(
+        joined_rows,
+        cut_index=cut_index,
+        boundary_gap_seconds=boundary_gap_seconds,
+    )
+    left_rows = window_schema_lib.select_segment_rows(
+        joined_rows[left_bounds[0] : left_bounds[1]],
+        radius=window_radius,
+        schema=window_schema,
+        gap_side="left",
+        schema_seed=window_schema_seed,
+    )
+    right_rows = window_schema_lib.select_segment_rows(
+        joined_rows[right_bounds[0] : right_bounds[1]],
+        radius=window_radius,
+        schema=window_schema,
+        gap_side="right",
+        schema_seed=window_schema_seed,
+    )
+    return [*left_rows, *right_rows]
 
 
 def build_manual_vlm_window_rows(
@@ -1714,16 +1798,20 @@ def build_result_row(
     parsed_response: Mapping[str, str],
     model: str = DEFAULT_MODEL_NAME,
     temperature: float = DEFAULT_TEMPERATURE,
+    global_row_numbers: Optional[Sequence[int]] = None,
 ) -> Dict[str, str]:
     decision = str(parsed_response["decision"])
     cut_after_local_index = ""
     cut_after_global_row = ""
     cut_left_relative_path = ""
     cut_right_relative_path = ""
+    resolved_global_row_numbers = list(global_row_numbers) if global_row_numbers is not None else list(
+        range(start_row, start_row + len(rows))
+    )
     if decision.startswith("cut_after_"):
         cut_after_local_index = decision.removeprefix("cut_after_")
         local_index = int(cut_after_local_index)
-        cut_after_global_row = str(start_row + local_index - 1)
+        cut_after_global_row = str(resolved_global_row_numbers[local_index - 1])
         cut_left_relative_path = str(rows[local_index - 1]["relative_path"])
         cut_right_relative_path = str(rows[local_index]["relative_path"])
     first_epoch_ms = int(str(rows[0]["start_epoch_ms"]))
@@ -2338,8 +2426,9 @@ def probe_vlm_photo_boundaries(
     json_validation_mode: str = DEFAULT_JSON_VALIDATION_MODE,
     args_payload: Mapping[str, Any],
     new_run: bool,
+    window_schema: str = DEFAULT_WINDOW_SCHEMA,
+    window_schema_seed: int = DEFAULT_WINDOW_SCHEMA_SEED,
 ) -> int:
-    window_size = window_radius_to_window_size(window_radius)
     config_hash = build_config_hash(args_payload)
     joined_rows = read_joined_rows(
         workspace_dir=workspace_dir,
@@ -2389,7 +2478,11 @@ def probe_vlm_photo_boundaries(
     run_id = str(run_state["run_id"] or "")
     if not run_id:
         run_id = build_run_id(generated_at)
-        response_schema = build_response_schema(window_size) if str(args_payload.get("response_schema_mode", "off")) == "on" else None
+        response_schema = (
+            build_response_schema(window_radius_to_window_size(window_radius))
+            if str(args_payload.get("response_schema_mode", "off")) == "on"
+            else None
+        )
         write_run_metadata(
             workspace_dir=workspace_dir,
             run_id=run_id,
@@ -2401,7 +2494,7 @@ def probe_vlm_photo_boundaries(
             args_payload=args_payload,
             system_prompt=build_system_prompt(str(args_payload.get("response_schema_mode", "off"))),
             user_prompt_template=build_user_prompt_template(
-                window_size=window_size,
+                window_size=window_radius_to_window_size(window_radius),
                 extra_instructions=extra_instructions,
                 response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
             ),
@@ -2434,22 +2527,37 @@ def probe_vlm_photo_boundaries(
         console=console,
     ) as progress:
         task = progress.add_task("Probe VLM candidate gaps".ljust(25), total=len(candidate_windows))
+        global_row_by_relative_path = {
+            str(row.get("relative_path", "") or "").strip(): index
+            for index, row in enumerate(joined_rows, start=1)
+        }
         for batch_offset, candidate in enumerate(candidate_windows, start=1):
             batch_index = completed_batches + batch_offset
-            start_index = int(candidate["start_index"])
             cut_index = int(candidate["cut_index"])
             time_gap_seconds = int(candidate["time_gap_seconds"])
-            end_index = start_index + window_size
-            window_rows = joined_rows[start_index:end_index]
-            ml_hint_lines = build_ml_hint_lines_for_candidate(
-                day_id=day_id,
+            window_rows = build_window_rows_for_cut_index(
                 joined_rows=joined_rows,
                 cut_index=cut_index,
+                window_radius=window_radius,
+                window_schema=window_schema,
+                window_schema_seed=window_schema_seed,
+                boundary_gap_seconds=boundary_gap_seconds,
+            )
+            if not window_rows:
+                raise ValueError(f"candidate window at cut_index={cut_index} produced no rows")
+            global_row_numbers = [
+                global_row_by_relative_path[str(row.get("relative_path", "") or "").strip()]
+                for row in window_rows
+            ]
+            ml_hint_lines = build_ml_hint_lines_for_window_rows(
+                day_id=day_id,
+                window_rows=window_rows,
                 boundary_rows_by_pair=boundary_rows_by_pair,
                 photo_pre_model_dir=photo_pre_model_dir,
                 ml_hint_context=ml_hint_context,
                 runtime_window_radius=window_radius,
             )
+            window_size = len(window_rows)
             analysis = run_vlm_window_analysis(
                 window_rows=window_rows,
                 ml_hint_lines=ml_hint_lines,
@@ -2477,14 +2585,15 @@ def probe_vlm_photo_boundaries(
                 config_hash=config_hash,
                 image_variant=image_variant,
                 batch_index=batch_index,
-                start_row=start_index + 1,
-                end_row=end_index,
+                start_row=min(global_row_numbers),
+                end_row=max(global_row_numbers),
                 rows=window_rows,
                 window_radius=window_radius,
                 raw_response=raw_response,
                 parsed_response=parsed_response,
                 model=model,
                 temperature=temperature,
+                global_row_numbers=global_row_numbers,
             )
             append_result_rows(output_csv, [result_row])
             if str(result_row["decision"]).startswith("cut_after_"):
@@ -2493,16 +2602,16 @@ def probe_vlm_photo_boundaries(
                 no_cut_count += 1
             else:
                 invalid_count += 1
-            progress.console.print(
-                build_batch_result_message(
-                    batch_index=batch_index,
-                    total_batches=len(all_candidates),
-                    time_gap_seconds=time_gap_seconds,
-                    start_row=start_index + 1,
-                    end_row=end_index,
-                    decision=str(result_row["decision"]),
-                    cuts=cut_count,
-                    no_cut=no_cut_count,
+                progress.console.print(
+                    build_batch_result_message(
+                        batch_index=batch_index,
+                        total_batches=len(all_candidates),
+                        time_gap_seconds=time_gap_seconds,
+                        start_row=min(global_row_numbers),
+                        end_row=max(global_row_numbers),
+                        decision=str(result_row["decision"]),
+                        cuts=cut_count,
+                        no_cut=no_cut_count,
                     invalid=invalid_count,
                 )
             )
@@ -2540,6 +2649,8 @@ def main() -> int:
         "output_csv": str(output_csv),
         "image_variant": args.image_variant,
         "window_radius": args.window_radius,
+        "window_schema": args.window_schema,
+        "window_schema_seed": args.window_schema_seed,
         "boundary_gap_seconds": args.boundary_gap_seconds,
         "max_batches": args.max_batches,
         "model": args.model,
@@ -2570,6 +2681,8 @@ def main() -> int:
         provider=args.provider,
         image_variant=args.image_variant,
         window_radius=args.window_radius,
+        window_schema=args.window_schema,
+        window_schema_seed=args.window_schema_seed,
         boundary_gap_seconds=args.boundary_gap_seconds,
         max_batches=args.max_batches,
         model=args.model,
