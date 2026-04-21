@@ -2389,6 +2389,62 @@ def build_batch_result_message(
     )
 
 
+def build_run_prompt_snapshot(
+    *,
+    day_id: str,
+    joined_rows: Sequence[Mapping[str, str]],
+    candidate: Mapping[str, Any],
+    window_radius: int,
+    window_schema: str,
+    window_schema_seed: int,
+    boundary_gap_seconds: int,
+    boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
+    photo_pre_model_dir: Optional[Path],
+    ml_hint_context: Optional[MlHintContext],
+    prompt_template_id: str,
+    prompt_template_file: str,
+    extra_instructions: str,
+    response_schema_mode: str,
+) -> tuple[str, Path, Optional[Dict[str, Any]]]:
+    cut_index = int(candidate["cut_index"])
+    window_rows, group_a_count = build_window_rows_for_cut_index(
+        joined_rows=joined_rows,
+        cut_index=cut_index,
+        window_radius=window_radius,
+        window_schema=window_schema,
+        window_schema_seed=window_schema_seed,
+        boundary_gap_seconds=boundary_gap_seconds,
+    )
+    if not window_rows:
+        raise ValueError(f"candidate window at cut_index={cut_index} produced no rows")
+    ml_hint_lines = build_ml_hint_lines_for_window_rows(
+        day_id=day_id,
+        window_rows=window_rows,
+        boundary_rows_by_pair=boundary_rows_by_pair,
+        photo_pre_model_dir=photo_pre_model_dir,
+        ml_hint_context=ml_hint_context,
+        runtime_window_radius=window_radius,
+    )
+    group_a_ids, group_b_ids = build_runtime_group_ids(
+        group_a_count,
+        max(0, len(window_rows) - group_a_count),
+    )
+    rendered_user_prompt, prompt_template_path = render_runtime_user_prompt(
+        prompt_template_id=prompt_template_id,
+        prompt_template_file=prompt_template_file,
+        group_a_ids=group_a_ids,
+        group_b_ids=group_b_ids,
+        ml_hint_lines=ml_hint_lines,
+        extra_instructions=extra_instructions,
+    )
+    response_schema = (
+        build_response_schema(group_a_ids=group_a_ids, group_b_ids=group_b_ids)
+        if response_schema_mode == "on"
+        else None
+    )
+    return rendered_user_prompt, prompt_template_path, response_schema
+
+
 def run_vlm_window_analysis(
     *,
     window_rows: Sequence[Mapping[str, str]],
@@ -2707,23 +2763,21 @@ def probe_vlm_photo_boundaries(
     run_id = str(run_state["run_id"] or "")
     if not run_id:
         run_id = build_run_id(generated_at)
-        window_size = window_radius_to_window_size(window_radius)
-        schema_group_a_ids, schema_group_b_ids = build_runtime_group_ids(
-            window_radius,
-            max(0, window_size - window_radius),
-        )
-        response_schema = (
-            build_response_schema(group_a_ids=schema_group_a_ids, group_b_ids=schema_group_b_ids)
-            if str(args_payload.get("response_schema_mode", "off")) == "on"
-            else None
-        )
-        rendered_user_prompt, prompt_template_path = render_runtime_user_prompt(
+        rendered_user_prompt, prompt_template_path, response_schema = build_run_prompt_snapshot(
+            day_id=day_id,
+            joined_rows=joined_rows,
+            candidate=candidate_windows[0],
+            window_radius=window_radius,
+            window_schema=window_schema,
+            window_schema_seed=window_schema_seed,
+            boundary_gap_seconds=boundary_gap_seconds,
+            boundary_rows_by_pair=boundary_rows_by_pair,
+            photo_pre_model_dir=photo_pre_model_dir,
+            ml_hint_context=ml_hint_context,
             prompt_template_id=str(args_payload.get("prompt_template_id", DEFAULT_PROMPT_TEMPLATE_ID)),
             prompt_template_file=str(args_payload.get("prompt_template_file", "") or ""),
-            group_a_ids=schema_group_a_ids,
-            group_b_ids=schema_group_b_ids,
-            ml_hint_lines=build_example_ml_hint_lines(),
             extra_instructions=extra_instructions,
+            response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
         )
         write_run_metadata(
             workspace_dir=workspace_dir,

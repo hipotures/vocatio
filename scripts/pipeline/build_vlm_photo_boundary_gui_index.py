@@ -82,12 +82,8 @@ def extract_segment_types(raw_response: str) -> tuple[str, str]:
         payload = json.loads(probe.extract_json_object_text(raw_response))
     except Exception:
         return "", ""
-    left_segment_type = str(
-        payload.get("group_a_segment_type", payload.get("left_segment_type", "")) or ""
-    ).strip()
-    right_segment_type = str(
-        payload.get("group_b_segment_type", payload.get("right_segment_type", "")) or ""
-    ).strip()
+    left_segment_type = str(payload.get("group_a_segment_type", "") or "").strip()
+    right_segment_type = str(payload.get("group_b_segment_type", "") or "").strip()
     if left_segment_type not in probe.SEGMENT_TYPES:
         left_segment_type = ""
     if right_segment_type not in probe.SEGMENT_TYPES:
