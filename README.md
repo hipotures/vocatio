@@ -405,7 +405,7 @@ Use a dedicated `--state` file for image-only review so you do not mix it with t
 
 The VLM flow starts from the same image-only artifacts as the deterministic flow. It optionally adds a lightweight per-photo pre-model pass, then probes only candidate time gaps with a local VLM.
 
-`build_photo_pre_model_annotations.py` and `probe_vlm_photo_boundaries.py` both run through the shared VLM transport layer and resolve model transport settings from shared `conf/vlm_models.yaml` presets plus exact-name `.vocatio` inheritance. You can select `ollama`, `llamacpp`, or `vllm`, subject to backend capability support. When you explicitly provide a CLI model flag, that CLI value wins over `.vocatio`; workflow-only fields remain local to the day config.
+`build_photo_pre_model_annotations.py` and `probe_vlm_photo_boundaries.py` both run through the shared VLM transport layer and resolve model transport settings from shared `conf/vlm_models.yaml` presets plus exact-name `.vocatio` inheritance. Grouped prompt templates are registered separately in `conf/vlm_prompt_templates.yaml`. You can select `ollama`, `llamacpp`, or `vllm`, subject to backend capability support. When you explicitly provide a CLI model flag, that CLI value wins over `.vocatio`; workflow-only fields remain local to the day config.
 
 #### Optional: build per-photo pre-model annotations
 
@@ -445,9 +445,15 @@ Important behavior:
 - `.vocatio` may override these shared preset fields locally: `VLM_PROVIDER`, `VLM_BASE_URL`, `VLM_MODEL`, `VLM_MAX_OUTPUT_TOKENS`, `VLM_TIMEOUT_SECONDS`, `VLM_TEMPERATURE`, `VLM_RESPONSE_SCHEMA_MODE`, `VLM_JSON_VALIDATION_MODE`
 - `.vocatio` may override `VLM_CONTEXT_TOKENS`, `VLM_KEEP_ALIVE`, and `VLM_REASONING_LEVEL` only when the resolved VLM provider is `ollama`; `llamacpp` and `vllm` presets must omit those fields
 - explicitly provided CLI model flags override the inherited preset values for that run
-- symmetric VLM context is configured only through `--window-radius` or `.vocatio` `VLM_WINDOW_RADIUS`
-- `vlm_boundary_results.csv`, VLM run metadata, and downstream GUI/review artifacts persist `window_radius` only
-- legacy probe CSVs with `window_size` / `overlap` are not resumable; start a fresh run with `--new-run`
+- symmetric VLM context sample count is configured only through `--window-radius` or `.vocatio` `VLM_WINDOW_RADIUS`
+- VLM frame selection inside each side segment is configured through `--window-schema` or `.vocatio` `VLM_WINDOW_SCHEMA`
+- deterministic schema sampling is configured through `--window-schema-seed` or `.vocatio` `VLM_WINDOW_SCHEMA_SEED`
+- grouped prompt template selection is configured through `--prompt-template-id` or `.vocatio` `VLM_PROMPT_TEMPLATE_ID`; the built-in default is `group_compare_long`
+- grouped prompt templates are loaded from `conf/vlm_prompt_templates.yaml`
+- `--prompt-template-file` or `.vocatio` `VLM_PROMPT_TEMPLATE_FILE` optionally overrides the registry entry with a repo-relative or absolute template file; any non-empty file override wins over the selected template id
+- supported window schemas are `consecutive`, `random`, `index_quantile`, `time_quantile`, `time_max_min`, and `time_boundary_spread`
+- grouped prompt runs use the `grouped_v1` response contract
+- `vlm_boundary_results.csv` persists `window_radius` and `response_contract_id`; VLM run metadata persists `window_schema`, `window_schema_seed`, `prompt_template_id`, and optional `prompt_template_file`; downstream GUI artifact payloads persist `prompt_template_id`, optional `prompt_template_file`, and `response_contract_id`
 - only gaps larger than `--boundary-gap-seconds` are probed
 - default `--max-batches` is `10`, so use a larger explicit value for real runs and rerun the same command or continue with `--run-id`
 - `--new-run` starts a fresh VLM run
@@ -492,11 +498,11 @@ python3 scripts/pipeline/review_performance_proxy_gui.py DAY \
 
 Use a dedicated VLM review-state file so you do not mix VLM review decisions with the heuristic image-only or audio-assisted states.
 
-#### Manual VLM model presets
+#### Manual VLM runtime controls
 
-The GUI `Manual VLM analyze` action loads presets from `conf/vlm_models.yaml`, but its dropdown only includes entries that define `VLM_NAME`.
+The GUI `Manual VLM analyze` action loads model presets from `conf/vlm_models.yaml` and grouped prompt templates from `conf/vlm_prompt_templates.yaml`. The section exposes three runtime dropdowns: model preset, window schema, and prompt template. The prompt-template dropdown uses registered template ids, and its startup default comes from day-level `.vocatio` `VLM_PROMPT_TEMPLATE_ID` when that id is present in the registry; otherwise the first available template is selected. The window-schema dropdown still defaults from `.vocatio` `VLM_WINDOW_SCHEMA`, or falls back to `consecutive`.
 
-This shared preset file contains one `models:` list and may mix `VLM_*` and `PREMODEL_*` entries. Day-level `.vocatio` must select an existing preset by exact `VLM_NAME` or `PREMODEL_NAME`; it does not define full models from scratch. Workflow fields such as `VLM_WINDOW_RADIUS`, `VLM_IMAGE_VARIANT`, `VLM_ML_MODEL_RUN_ID`, and `VLM_PHOTO_PRE_MODEL_DIR` remain local to `.vocatio` or explicit CLI flags rather than the shared preset file.
+This shared preset file contains one `models:` list and may mix `VLM_*` and `PREMODEL_*` entries. Day-level `.vocatio` must select an existing preset by exact `VLM_NAME` or `PREMODEL_NAME`; it does not define full models from scratch. Workflow fields such as `VLM_WINDOW_RADIUS`, `VLM_WINDOW_SCHEMA`, `VLM_WINDOW_SCHEMA_SEED`, `VLM_PROMPT_TEMPLATE_ID`, `VLM_PROMPT_TEMPLATE_FILE`, `VLM_IMAGE_VARIANT`, `VLM_ML_MODEL_RUN_ID`, and `VLM_PHOTO_PRE_MODEL_DIR` remain local to `.vocatio` or explicit CLI flags rather than the shared preset file.
 
 Each VLM preset must define these shared fields:
 
@@ -520,10 +526,12 @@ Ollama presets may additionally define these optional fields:
 
 GUI behavior:
 
-- the GUI loads `conf/vlm_models.yaml` at startup
+- the GUI loads `conf/vlm_models.yaml` and `conf/vlm_prompt_templates.yaml` at startup
 - if the current selection is not preserved, the first preset becomes the default selection
-- when you click `Analyze` in `Manual VLM analyze`, the GUI recomputes the preset file MD5
-- if the MD5 changed, the GUI reloads the preset file and refreshes the dropdown before running the analyze action
+- if the current prompt template selection is not preserved, the first template becomes the default selection
+- when you click `Analyze` in `Manual VLM analyze`, the GUI recomputes both config-file MD5 values
+- if either MD5 changed, that click reloads the changed config and refreshes the affected dropdown, then stops without starting analysis; click `Analyze` again to run with the refreshed selection
+- manual result and error diagnostics include `VLM_PROMPT_TEMPLATE_ID`, optional `VLM_PROMPT_TEMPLATE_FILE`, and `response_contract_id`
 
 ### ML Boundary Verifier
 

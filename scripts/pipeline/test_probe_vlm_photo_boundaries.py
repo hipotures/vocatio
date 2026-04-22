@@ -54,6 +54,10 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                 "thumb",
                 "--window-radius",
                 "4",
+                "--window-schema",
+                "index_quantile",
+                "--window-schema-seed",
+                "99",
                 "--boundary-gap-seconds",
                 "12",
                 "--temperature",
@@ -73,6 +77,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
         self.assertEqual(args.run_id, "vlm-20260414053012")
         self.assertEqual(args.image_variant, "thumb")
         self.assertEqual(args.window_radius, 4)
+        self.assertEqual(args.window_schema, "index_quantile")
+        self.assertEqual(args.window_schema_seed, 99)
         self.assertEqual(args.boundary_gap_seconds, 12)
         self.assertEqual(args.temperature, 0.25)
         self.assertEqual(args.response_schema_mode, "on")
@@ -86,6 +92,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
     def test_parse_args_defaults_boundary_gap_seconds_to_10(self):
         args = probe.parse_args(["/tmp/day"])
         self.assertEqual(args.window_radius, probe.DEFAULT_WINDOW_RADIUS)
+        self.assertEqual(args.window_schema, probe.DEFAULT_WINDOW_SCHEMA)
+        self.assertEqual(args.window_schema_seed, probe.DEFAULT_WINDOW_SCHEMA_SEED)
         self.assertEqual(args.boundary_gap_seconds, 10)
         self.assertEqual(args.json_validation_mode, "strict")
         self.assertEqual(args.photo_manifest_csv, "media_manifest.csv")
@@ -111,6 +119,8 @@ class ProbeVlmPhotoBoundariesTests(unittest.TestCase):
                     "VLM_EMBEDDED_MANIFEST_CSV=photo_embedded_manifest.csv",
                     "VLM_IMAGE_VARIANT=thumb",
                     "VLM_WINDOW_RADIUS=4",
+                    "VLM_WINDOW_SCHEMA=index_quantile",
+                    "VLM_WINDOW_SCHEMA_SEED=17",
                     "VLM_BOUNDARY_GAP_SECONDS=20",
                     "VLM_MAX_BATCHES=0",
                     "VLM_PHOTO_PRE_MODEL_DIR=custom_pre_model",
@@ -146,6 +156,8 @@ models:
             self.assertEqual(args.embedded_manifest_csv, "photo_embedded_manifest.csv")
             self.assertEqual(args.image_variant, "thumb")
             self.assertEqual(args.window_radius, 4)
+            self.assertEqual(args.window_schema, "index_quantile")
+            self.assertEqual(args.window_schema_seed, 17)
             self.assertEqual(args.boundary_gap_seconds, 20)
             self.assertEqual(args.max_batches, 0)
             self.assertEqual(args.ollama_num_ctx, 8192)
@@ -159,6 +171,16 @@ models:
             self.assertEqual(args.photo_pre_model_dir, "custom_pre_model")
             self.assertEqual(args.ml_model_run_id, "day-20260323-best")
             self.assertEqual(args.dump_debug_dir, "/tmp/vlm-debug")
+
+    def test_apply_vocatio_defaults_reads_prompt_template_id(self) -> None:
+        args = probe.parse_args(["DAY"])
+        with mock.patch.object(
+            probe,
+            "load_vocatio_config",
+            return_value={"VLM_PROMPT_TEMPLATE_ID": "group_compare_short"},
+        ):
+            resolved = probe.apply_vocatio_defaults(args, Path("/tmp/day"))
+        self.assertEqual(resolved.prompt_template_id, "group_compare_short")
 
     def test_apply_vocatio_defaults_preserves_explicit_cli_vlm_values(self):
         day_dir = self.make_day_dir(
@@ -523,30 +545,65 @@ models:
             (4, 8),
         )
 
-    def test_build_response_schema_uses_boundary_after_frame_and_dynamic_notes(self):
-        schema = probe.build_response_schema(window_size=3)
+    def test_build_response_schema_uses_grouped_contract_and_dynamic_notes(self):
+        schema = probe.build_response_schema(group_a_ids=["frame_01"], group_b_ids=["frame_02", "frame_03"])
         self.assertEqual(
-            schema["properties"]["boundary_after_frame"]["enum"],
-            [None, "frame_01", "frame_02"],
+            schema["properties"]["decision"]["enum"],
+            ["same_segment", "different_segments"],
         )
         self.assertEqual(
-            schema["properties"]["left_segment_type"]["enum"],
+            schema["properties"]["group_a_segment_type"]["enum"],
             ["dance", "ceremony", "audience", "rehearsal", "other"],
         )
         self.assertEqual(
-            schema["properties"]["right_segment_type"]["enum"],
+            schema["properties"]["group_b_segment_type"]["enum"],
             ["dance", "ceremony", "audience", "rehearsal", "other"],
         )
+        self.assertEqual(schema["properties"]["frame_notes"]["type"], "array")
+        self.assertEqual(schema["properties"]["frame_notes"]["minItems"], 3)
+        self.assertEqual(schema["properties"]["frame_notes"]["maxItems"], 3)
         self.assertEqual(
-            list(schema["properties"]["frame_notes"]["properties"].keys()),
-            ["frame_01", "frame_02", "frame_03"],
+            schema["properties"]["frame_notes"]["items"]["oneOf"],
+            [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "frame_id": {"type": "string", "enum": ["frame_01"]},
+                        "group": {"type": "string", "enum": ["group_a"]},
+                        "note": {"type": "string"},
+                    },
+                    "required": ["frame_id", "group", "note"],
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "frame_id": {"type": "string", "enum": ["frame_02"]},
+                        "group": {"type": "string", "enum": ["group_b"]},
+                        "note": {"type": "string"},
+                    },
+                    "required": ["frame_id", "group", "note"],
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "frame_id": {"type": "string", "enum": ["frame_03"]},
+                        "group": {"type": "string", "enum": ["group_b"]},
+                        "note": {"type": "string"},
+                    },
+                    "required": ["frame_id", "group", "note"],
+                },
+            ],
         )
+        self.assertEqual(len(schema["properties"]["frame_notes"]["allOf"]), 3)
         self.assertEqual(
             schema["required"],
             [
-                "boundary_after_frame",
-                "left_segment_type",
-                "right_segment_type",
+                "decision",
+                "group_a_segment_type",
+                "group_b_segment_type",
                 "frame_notes",
                 "primary_evidence",
                 "summary",
@@ -617,6 +674,58 @@ models:
             ),
             [{"start_index": 2, "cut_index": 3, "time_gap_seconds": 17}],
         )
+
+    def test_segment_bounds_for_cut_index_use_neighboring_large_gaps(self):
+        rows = [
+            {"start_epoch_ms": "0"},
+            {"start_epoch_ms": "1000"},
+            {"start_epoch_ms": "2000"},
+            {"start_epoch_ms": "20000"},
+            {"start_epoch_ms": "21000"},
+            {"start_epoch_ms": "22000"},
+            {"start_epoch_ms": "40000"},
+            {"start_epoch_ms": "41000"},
+        ]
+
+        self.assertEqual(
+            probe.segment_bounds_for_cut_index(
+                rows,
+                cut_index=4,
+                boundary_gap_seconds=10,
+            ),
+            ((3, 5), (5, 6)),
+        )
+
+    def test_build_window_rows_for_cut_index_uses_segment_schema_selection(self):
+        joined_rows = [
+            {
+                "relative_path": f"cam/{index}.jpg",
+                "start_epoch_ms": str(index * 1000),
+            }
+            for index in range(1, 11)
+        ]
+
+        rows, group_a_count = probe.build_window_rows_for_cut_index(
+            joined_rows=joined_rows,
+            cut_index=4,
+            window_radius=3,
+            window_schema="index_quantile",
+            window_schema_seed=42,
+            boundary_gap_seconds=100,
+        )
+
+        self.assertEqual(
+            [str(row["relative_path"]) for row in rows],
+            [
+                "cam/1.jpg",
+                "cam/3.jpg",
+                "cam/5.jpg",
+                "cam/6.jpg",
+                "cam/8.jpg",
+                "cam/10.jpg",
+            ],
+        )
+        self.assertEqual(group_a_count, 3)
 
     def test_build_temporal_lines_uses_rounded_second_deltas(self):
         rows = [
@@ -859,6 +968,26 @@ models:
             ["ML hints are unavailable for this window."],
         )
 
+    def test_build_ml_hint_lines_preserves_unknown_segment_label_fallback(self):
+        lines = probe.build_ml_hint_lines(
+            probe.MlHintPrediction(
+                boundary_prediction=False,
+                boundary_confidence=0.61,
+                left_segment_type_prediction="backstage",
+                left_segment_type_confidence=0.58,
+                right_segment_type_prediction="performance",
+                right_segment_type_confidence=0.72,
+            )
+        )
+        self.assertEqual(
+            lines,
+            [
+                "ML hint for the main candidate gap in this window: likely no cut (confidence 0.61).",
+                "ML hint for the left side of the candidate gap: likely backstage (confidence 0.58).",
+                "ML hint for the right side of the candidate gap: likely dance (confidence 0.72).",
+            ],
+        )
+
     def test_build_user_prompt_mentions_ml_hints_and_not_raw_heuristics(self):
         prompt = probe.build_user_prompt(
             window_size=2,
@@ -867,10 +996,10 @@ models:
                 "ML hint for the left side of the candidate gap: likely dance (confidence 0.73).",
                 "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.74).",
             ],
+            window_schema="consecutive",
         )
-        self.assertIn('"no_cut"', prompt)
-        self.assertIn('"cut_after_1"', prompt)
-        self.assertNotIn('"cut_after_2"', prompt)
+        self.assertIn('"same_segment"', prompt)
+        self.assertIn('"different_segments"', prompt)
         self.assertIn("You will receive 2 consecutive stage-event photos", prompt)
         self.assertIn("The frames are consecutive photos from one chronological sequence", prompt)
         self.assertIn("They are not random examples", prompt)
@@ -887,8 +1016,8 @@ models:
         self.assertIn("audience or backstage insert", prompt)
         self.assertIn("floor rehearsal / floor test / stage test", prompt)
         self.assertIn("ceremony / award / host / result reading", prompt)
-        self.assertIn("Create a boundary only if at least one positive boundary condition below is clearly true", prompt)
-        self.assertIn("If none of the positive boundary conditions is clearly true, return null", prompt)
+        self.assertIn('Return "different_segments" only if at least one positive boundary condition below is clearly true', prompt)
+        self.assertIn('If none of the positive boundary conditions is clearly true, return "same_segment"', prompt)
         self.assertIn("the person on the left and the person on the right are not the same dancer", prompt)
         self.assertIn("the dancers on the left and the dancers on the right do not belong to the same group", prompt)
         self.assertIn("the costume on the left and the costume on the right do not belong to the same costume set", prompt)
@@ -896,14 +1025,31 @@ models:
         self.assertIn("a new movement phrase inside the same act", prompt)
         self.assertIn("group shot followed by a solo shot of one dancer from the same group", prompt)
         self.assertIn("do not create a boundary only because fewer or more dancers are visible", prompt)
-        self.assertIn("you must return null", prompt)
-        self.assertIn("If more than one real boundary appears", prompt)
-        self.assertIn('If there is no clear evidence for a boundary, choose "no_cut"', prompt)
+        self.assertIn('you must return "same_segment"', prompt)
+        self.assertIn('If there is no clear evidence for a boundary, choose "same_segment"', prompt)
+        self.assertIn('"group_a_segment_type"', prompt)
+        self.assertIn('"group_b_segment_type"', prompt)
+        self.assertIn('"frame_id"', prompt)
         self.assertIn("Keep frame notes short and concrete", prompt)
         self.assertIn('"frame_notes"', prompt)
         self.assertIn('"primary_evidence"', prompt)
         self.assertIn('"summary"', prompt)
         self.assertIn("confidence", prompt.lower())
+
+    def test_build_user_prompt_for_segment_schema_mentions_chronological_segment_sampling(self):
+        prompt = probe.build_user_prompt(
+            window_size=6,
+            ml_hint_lines=[],
+            window_schema="random",
+        )
+
+        self.assertIn("You will receive 6 stage-event photos in chronological order", prompt)
+        self.assertIn("The frames are shown in chronological order from left to right", prompt)
+        self.assertIn("The frames come from the left and right segments around one candidate gap", prompt)
+        self.assertIn("They do not have to be consecutive photos", prompt)
+        self.assertNotIn("You will receive 6 consecutive stage-event photos", prompt)
+        self.assertNotIn("The frames are consecutive photos from one chronological sequence", prompt)
+        self.assertNotIn("They are not random examples", prompt)
 
     def test_build_user_prompt_appends_extra_instructions(self):
         prompt = probe.build_user_prompt(
@@ -914,19 +1060,21 @@ models:
         self.assertIn("Additional instructions", prompt)
         self.assertIn("Prefer strong performer identity changes", prompt)
 
-    def test_build_user_prompt_schema_mode_mentions_boundary_after_frame(self):
+    def test_build_user_prompt_schema_mode_mentions_grouped_contract(self):
         prompt = probe.build_user_prompt(
             window_size=3,
             ml_hint_lines=["ML hint for the main candidate gap in this window: likely cut (confidence 0.82)."],
             extra_instructions="",
             response_schema_mode="on",
         )
-        self.assertIn('"boundary_after_frame"', prompt)
-        self.assertIn('"left_segment_type"', prompt)
-        self.assertIn('"right_segment_type"', prompt)
+        self.assertIn('"decision"', prompt)
+        self.assertIn('"group_a_segment_type"', prompt)
+        self.assertIn('"group_b_segment_type"', prompt)
         self.assertIn("dance|ceremony|audience|rehearsal|other", prompt)
-        self.assertNotIn('"decision"', prompt)
-        self.assertIn("<one of: null, frame_01, frame_02>", prompt)
+        self.assertNotIn('"boundary_after_frame"', prompt)
+        self.assertIn("<one of: same_segment, different_segments>", prompt)
+        self.assertIn('"group":"group_a"', prompt)
+        self.assertIn('"group":"group_b"', prompt)
 
     def test_build_user_prompt_forbids_background_and_lighting_for_boundary_and_segment_change(self):
         prompt = probe.build_user_prompt(
@@ -1310,9 +1458,13 @@ models:
                 captured_request["request"] = request
                 return mock.Mock(
                     text=(
-                        '{"boundary_after_frame":"frame_03","left_segment_type":"dance",'
-                        '"right_segment_type":"ceremony","frame_notes":{"frame_01":"a","frame_02":"b",'
-                        '"frame_03":"c","frame_04":"f","frame_05":"g","frame_06":"h"},'
+                        '{"decision":"different_segments","group_a_segment_type":"dance","group_b_segment_type":"ceremony",'
+                        '"frame_notes":[{"frame_id":"a_01","group":"group_a","note":"a"},'
+                        '{"frame_id":"a_02","group":"group_a","note":"b"},'
+                        '{"frame_id":"a_03","group":"group_a","note":"c"},'
+                        '{"frame_id":"b_01","group":"group_b","note":"f"},'
+                        '{"frame_id":"b_02","group":"group_b","note":"g"},'
+                        '{"frame_id":"b_03","group":"group_b","note":"h"}],'
                         '"primary_evidence":["different performers"],"summary":"Boundary after left anchor."}'
                     ),
                     raw_response={"message": {"content": "ok"}},
@@ -1362,77 +1514,124 @@ models:
         dump_debug.assert_called_once()
         self.assertEqual(dump_debug.call_args.kwargs["debug_dir"], Path("/tmp"))
 
-    def test_build_system_prompt_mentions_boundary_after_frame_in_schema_mode(self):
-        self.assertIn("boundary_after_frame", probe.build_system_prompt("on"))
-        self.assertIn("left_segment_type", probe.build_system_prompt("on"))
+    def test_build_system_prompt_mentions_grouped_contract(self):
+        self.assertIn("group_a_segment_type", probe.build_system_prompt("on"))
+        self.assertIn("group_b_segment_type", probe.build_system_prompt("on"))
         self.assertIn("decision", probe.build_system_prompt("off"))
 
     def test_parse_model_response_accepts_structured_json_response(self):
         parsed = probe.parse_model_response(
-            '{"decision":"cut_after_1","frame_notes":{"frame_01":"black-white solo","frame_02":"red-black solo"},"primary_evidence":["different performer","different costume identity"],"summary":"Frames 1 and 2 belong to different segments."}',
-            window_size=2,
+            '{"decision":"different_segments","group_a_segment_type":"dance","group_b_segment_type":"ceremony",'
+            '"frame_notes":[{"frame_id":"frame_01","group":"group_a","note":"black-white solo"},'
+            '{"frame_id":"frame_02","group":"group_b","note":"red-black solo"}],'
+            '"primary_evidence":["different performer","different costume identity"],'
+            '"summary":"Frames 1 and 2 belong to different segments."}',
+            group_a_ids=["frame_01"],
+            group_b_ids=["frame_02"],
+            response_contract_id="grouped_v1",
         )
         self.assertEqual(parsed["decision"], "cut_after_1")
-        self.assertIn("frame_01=black-white solo", parsed["reason"])
+        self.assertEqual(parsed["semantic_decision"], "different_segments")
+        self.assertEqual(parsed["semantic_group_a_segment_type"], "dance")
+        self.assertEqual(parsed["semantic_group_b_segment_type"], "ceremony")
+        self.assertEqual(parsed["response_contract_id"], "grouped_v1")
+        self.assertIn("frame_01(group_a)=black-white solo", parsed["reason"])
         self.assertIn("different performer", parsed["reason"])
         self.assertIn("Frames 1 and 2 belong to different segments.", parsed["reason"])
         self.assertEqual(parsed["response_status"], "ok")
 
-    def test_parse_model_response_accepts_boundary_after_frame_schema_response(self):
+    def test_parse_model_response_projects_different_segments_to_group_a_cut(self):
         parsed = probe.parse_model_response(
-            '{"boundary_after_frame":"frame_01","left_segment_type":"dance","right_segment_type":"ceremony","frame_notes":{"frame_01":"black-white solo","frame_02":"red-black solo"},"primary_evidence":["different performer"],"summary":"Boundary after frame 1."}',
-            window_size=2,
+            '{"decision":"different_segments","group_a_segment_type":"dance","group_b_segment_type":"ceremony",'
+            '"frame_notes":[{"frame_id":"frame_01","group":"group_a","note":"left group"},'
+            '{"frame_id":"frame_02","group":"group_a","note":"left anchor"},'
+            '{"frame_id":"frame_03","group":"group_b","note":"right anchor"}],'
+            '"primary_evidence":["segment type changes"],"summary":"Boundary between grouped samples."}',
+            group_a_ids=["frame_01", "frame_02"],
+            group_b_ids=["frame_03"],
+            response_contract_id="grouped_v1",
         )
-        self.assertEqual(parsed["decision"], "cut_after_1")
-        self.assertIn("Left segment type: dance", parsed["reason"])
-        self.assertIn("Right segment type: ceremony", parsed["reason"])
-        self.assertIn("Boundary after frame 1.", parsed["reason"])
-        self.assertEqual(parsed["response_status"], "ok")
-
-    def test_parse_model_response_accepts_boundary_after_frame_null_as_no_cut(self):
-        parsed = probe.parse_model_response(
-            '{"boundary_after_frame":null,"left_segment_type":"dance","right_segment_type":"dance","frame_notes":{"frame_01":"same solo","frame_02":"same solo"},"primary_evidence":["same performer"],"summary":"Same segment."}',
-            window_size=2,
-        )
-        self.assertEqual(parsed["decision"], "no_cut")
-        self.assertEqual(parsed["response_status"], "ok")
-
-    def test_parse_model_response_accepts_boundary_after_frame_string_null_as_no_cut(self):
-        parsed = probe.parse_model_response(
-            '{"boundary_after_frame":"null","left_segment_type":"dance","right_segment_type":"dance","frame_notes":{"frame_01":"same solo","frame_02":"same solo"},"primary_evidence":["same performer"],"summary":"Same segment."}',
-            window_size=2,
-        )
-        self.assertEqual(parsed["decision"], "no_cut")
+        self.assertEqual(parsed["decision"], "cut_after_2")
+        self.assertEqual(parsed["semantic_decision"], "different_segments")
+        self.assertIn("Group A segment type: dance", parsed["reason"])
+        self.assertIn("Group B segment type: ceremony", parsed["reason"])
+        self.assertIn("Boundary between grouped samples.", parsed["reason"])
         self.assertEqual(parsed["response_status"], "ok")
 
     def test_parse_model_response_rejects_missing_segment_type(self):
         parsed = probe.parse_model_response(
-            '{"boundary_after_frame":"frame_01","frame_notes":{"frame_01":"black-white solo","frame_02":"red-black solo"},"primary_evidence":["different performer"],"summary":"Boundary after frame 1."}',
-            window_size=2,
+            '{"decision":"different_segments","group_a_segment_type":"dance",'
+            '"frame_notes":[{"frame_id":"frame_01","group":"group_a","note":"black-white solo"},'
+            '{"frame_id":"frame_02","group":"group_b","note":"red-black solo"}],'
+            '"primary_evidence":["different performer"],"summary":"Boundary after frame 1."}',
+            group_a_ids=["frame_01"],
+            group_b_ids=["frame_02"],
+            response_contract_id="grouped_v1",
         )
         self.assertEqual(parsed["decision"], "invalid_response")
         self.assertIn("segment type", parsed["reason"])
 
     def test_parse_model_response_relaxed_mode_ignores_invalid_segment_type_value(self):
         parsed = probe.parse_model_response(
-            '{"boundary_after_frame":"frame_01","left_segment_type":"dance","right_segment_type":"contemporary","frame_notes":{"frame_01":"white tutu solo","frame_02":"blue dress solo"},"primary_evidence":["costume change"],"summary":"Boundary after frame 1."}',
-            window_size=2,
+            '{"decision":"different_segments","group_a_segment_type":"dance","group_b_segment_type":"contemporary",'
+            '"frame_notes":[{"frame_id":"frame_01","group":"group_a","note":"white tutu solo"},'
+            '{"frame_id":"frame_02","group":"group_b","note":"blue dress solo"}],'
+            '"primary_evidence":["costume change"],"summary":"Boundary after frame 1."}',
+            group_a_ids=["frame_01"],
+            group_b_ids=["frame_02"],
+            response_contract_id="grouped_v1",
             json_validation_mode="relaxed",
         )
         self.assertEqual(parsed["decision"], "cut_after_1")
-        self.assertNotIn("Right segment type:", parsed["reason"])
+        self.assertEqual(parsed["semantic_group_b_segment_type"], "")
+        self.assertIn("Group B segment type: ?", parsed["reason"])
         self.assertEqual(parsed["response_status"], "ok")
 
     def test_parse_model_response_marks_invalid_json(self):
-        parsed = probe.parse_model_response("not json", window_size=2)
+        parsed = probe.parse_model_response(
+            "not json",
+            group_a_ids=["frame_01"],
+            group_b_ids=["frame_02"],
+            response_contract_id="grouped_v1",
+        )
         self.assertEqual(parsed["decision"], "invalid_response")
         self.assertEqual(parsed["response_status"], "invalid_response")
         self.assertIn("JSON", parsed["reason"])
 
+    def test_parse_grouped_response_maps_same_segment_to_no_cut(self) -> None:
+        parsed = probe.parse_model_response(
+            '{"decision":"same_segment","group_a_segment_type":"dance","group_b_segment_type":"dance",'
+            '"frame_notes":[{"frame_id":"a_01","group":"group_a","note":"same dancer"},'
+            '{"frame_id":"b_01","group":"group_b","note":"same dancer"}],'
+            '"primary_evidence":["same costume"],"summary":"Same segment."}',
+            group_a_ids=["a_01"],
+            group_b_ids=["b_01"],
+            response_contract_id="grouped_v1",
+            json_validation_mode="strict",
+        )
+
+        self.assertEqual(parsed["semantic_decision"], "same_segment")
+        self.assertEqual(parsed["decision"], "no_cut")
+
+    def test_parse_grouped_response_rejects_legacy_cut_after_shape(self) -> None:
+        parsed = probe.parse_model_response(
+            '{"decision":"cut_after_1","frame_notes":{"frame_01":"a","frame_02":"b"},"primary_evidence":["bad"],"summary":"bad"}',
+            group_a_ids=["a_01"],
+            group_b_ids=["b_01"],
+            response_contract_id="grouped_v1",
+            json_validation_mode="strict",
+        )
+
+        self.assertEqual(parsed["response_status"], "invalid_response")
+        self.assertIn("cut_after_1", parsed["reason"])
+
     def test_parse_model_response_marks_invalid_decision(self):
         parsed = probe.parse_model_response(
-            '{"decision":"cut_after_2","frame_notes":{"frame_01":"a","frame_02":"b"},"primary_evidence":["bad"],"summary":"bad"}',
-            window_size=2,
+            '{"decision":"cut_after_2","frame_notes":[{"frame_id":"frame_01","group":"group_a","note":"a"},'
+            '{"frame_id":"frame_02","group":"group_b","note":"b"}],"primary_evidence":["bad"],"summary":"bad"}',
+            group_a_ids=["frame_01"],
+            group_b_ids=["frame_02"],
+            response_contract_id="grouped_v1",
         )
         self.assertEqual(parsed["decision"], "invalid_response")
         self.assertEqual(parsed["response_status"], "invalid_response")
@@ -1440,8 +1639,12 @@ models:
 
     def test_parse_model_response_rejects_missing_frame_note(self):
         parsed = probe.parse_model_response(
-            '{"decision":"no_cut","frame_notes":{"frame_01":"same"},"primary_evidence":["same performer"],"summary":"same segment"}',
-            window_size=2,
+            '{"decision":"same_segment","group_a_segment_type":"dance","group_b_segment_type":"dance",'
+            '"frame_notes":[{"frame_id":"frame_01","group":"group_a","note":"same"}],'
+            '"primary_evidence":["same performer"],"summary":"same segment"}',
+            group_a_ids=["frame_01"],
+            group_b_ids=["frame_02"],
+            response_contract_id="grouped_v1",
         )
         self.assertEqual(parsed["decision"], "invalid_response")
         self.assertIn("frame_notes", parsed["reason"])
@@ -1482,8 +1685,91 @@ models:
         self.assertNotIn("window_size", row)
         self.assertNotIn("overlap", row)
 
+    def test_build_result_row_keeps_semantic_fields_and_compat_projection(self) -> None:
+        row = probe.build_result_row(
+            generated_at="2026-04-21T10:00:00+02:00",
+            run_id="vlm-20260421100000",
+            config_hash="abc",
+            image_variant="preview",
+            batch_index=1,
+            start_row=10,
+            end_row=15,
+            rows=[
+                {
+                    "relative_path": "cam/a.jpg",
+                    "filename": "a.jpg",
+                    "image_path": "/tmp/a.jpg",
+                    "start_epoch_ms": "1000",
+                },
+                {
+                    "relative_path": "cam/b.jpg",
+                    "filename": "b.jpg",
+                    "image_path": "/tmp/b.jpg",
+                    "start_epoch_ms": "2000",
+                },
+            ],
+            window_radius=3,
+            raw_response='{"decision":"different_segments"}',
+            parsed_response={
+                "decision": "cut_after_1",
+                "semantic_decision": "different_segments",
+                "semantic_group_a_segment_type": "dance",
+                "semantic_group_b_segment_type": "ceremony",
+                "response_contract_id": "grouped_v1",
+                "reason": "Summary: mismatch",
+                "response_status": "ok",
+            },
+        )
+        self.assertEqual(row["decision"], "cut_after_1")
+        self.assertEqual(row["semantic_decision"], "different_segments")
+        self.assertEqual(row["semantic_group_a_segment_type"], "dance")
+        self.assertEqual(row["semantic_group_b_segment_type"], "ceremony")
+        self.assertEqual(row["response_contract_id"], "grouped_v1")
+
+    def test_build_result_row_uses_actual_candidate_gap_for_grouped_contract(self) -> None:
+        row = probe.build_result_row(
+            generated_at="2026-04-21T10:00:00+02:00",
+            run_id="vlm-20260421100000",
+            config_hash="abc",
+            image_variant="preview",
+            batch_index=7,
+            start_row=20,
+            end_row=40,
+            rows=[
+                {
+                    "relative_path": "cam/sample-left.jpg",
+                    "filename": "sample-left.jpg",
+                    "image_path": "/tmp/sample-left.jpg",
+                    "start_epoch_ms": "1000",
+                },
+                {
+                    "relative_path": "cam/sample-right.jpg",
+                    "filename": "sample-right.jpg",
+                    "image_path": "/tmp/sample-right.jpg",
+                    "start_epoch_ms": "2000",
+                },
+            ],
+            window_radius=3,
+            raw_response='{"decision":"different_segments"}',
+            parsed_response={
+                "decision": "cut_after_1",
+                "semantic_decision": "different_segments",
+                "semantic_group_a_segment_type": "dance",
+                "semantic_group_b_segment_type": "ceremony",
+                "response_contract_id": "grouped_v1",
+                "reason": "Summary: mismatch",
+                "response_status": "ok",
+            },
+            candidate_cut_relative_paths=("cam/actual-left.jpg", "cam/actual-right.jpg"),
+            candidate_cut_global_row=31,
+        )
+
+        self.assertEqual(row["cut_after_global_row"], "31")
+        self.assertEqual(row["cut_left_relative_path"], "cam/actual-left.jpg")
+        self.assertEqual(row["cut_right_relative_path"], "cam/actual-right.jpg")
+
     def test_build_vlm_request_maps_ollama_fields_to_transport_request(self):
-        schema = probe.build_response_schema(window_size=2)
+        schema = probe.build_response_schema(group_a_ids=["frame_01"], group_b_ids=["frame_02"])
         with tempfile.TemporaryDirectory() as tmp:
             image_path = Path(tmp) / "a.jpg"
             image_path.write_bytes(b"jpg")
@@ -1694,6 +1980,12 @@ models:
         self.assertNotIn("likely segment on the right side of the candidate gap", template)
         self.assertNotIn("likely cut at the main candidate gap", template)
 
+    def test_build_user_prompt_template_uses_segment_schema_wording(self):
+        template = probe.build_user_prompt_template(window_size=4, window_schema="time_quantile")
+        self.assertIn("You will receive 4 stage-event photos in chronological order", template)
+        self.assertIn("They do not have to be consecutive photos", template)
+        self.assertNotIn("You will receive 4 consecutive stage-event photos", template)
+
     def test_build_config_hash_is_stable(self):
         first = probe.build_config_hash(
             {
@@ -1751,21 +2043,70 @@ models:
                     "window_radius": 2,
                     "max_batches": 100,
                     "model": "qwen3.5:9b",
+                    "response_contract_id": "grouped_v1",
                     "response_schema_mode": "on",
                 },
                 system_prompt="system",
-                user_prompt_template="user-template",
+                rendered_user_prompt="user-template",
                 response_schema={"type": "object"},
+                response_contract_id="grouped_v1",
             )
             metadata_path = workspace_dir / "vlm_runs" / "vlm-20260414053012.json"
             self.assertEqual(metadata["run_id"], "vlm-20260414053012")
             self.assertEqual(metadata["config_hash"], "abc123")
             self.assertTrue(metadata_path.exists())
             stored = json.loads(metadata_path.read_text(encoding="utf-8"))
-            self.assertEqual(stored["user_prompt_template"], "user-template")
+            self.assertEqual(stored["rendered_user_prompt"], "user-template")
+            self.assertEqual(stored["response_contract_id"], "grouped_v1")
             self.assertEqual(stored["args"]["window_radius"], 2)
+            self.assertEqual(stored["args"]["response_contract_id"], "grouped_v1")
             self.assertEqual(stored["args"]["response_schema_mode"], "on")
             self.assertEqual(stored["response_schema"], {"type": "object"})
+
+    def test_write_run_metadata_stores_prompt_template_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = probe.write_run_metadata(
+                workspace_dir=Path(tmp),
+                run_id="vlm-20260421103000",
+                generated_at="2026-04-21T10:30:00+02:00",
+                config_hash="abc",
+                embedded_manifest_csv=Path(tmp) / "embedded.csv",
+                photo_manifest_csv=Path(tmp) / "manifest.csv",
+                output_csv=Path(tmp) / "out.csv",
+                args_payload={"prompt_template_id": "group_compare_long"},
+                system_prompt="system",
+                rendered_user_prompt="rendered prompt",
+                response_schema={"type": "object"},
+                response_contract_id="grouped_v1",
+            )
+
+        self.assertEqual(metadata["prompt_template_id"], "group_compare_long")
+        self.assertEqual(metadata["response_contract_id"], "grouped_v1")
+        self.assertEqual(metadata["rendered_user_prompt"], "rendered prompt")
+
+    def test_write_run_metadata_persists_default_prompt_template_id_when_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp)
+            metadata = probe.write_run_metadata(
+                workspace_dir=workspace_dir,
+                run_id="vlm-20260421103100",
+                generated_at="2026-04-21T10:31:00+02:00",
+                config_hash="abc",
+                embedded_manifest_csv=workspace_dir / "embedded.csv",
+                photo_manifest_csv=workspace_dir / "manifest.csv",
+                output_csv=workspace_dir / "out.csv",
+                args_payload={},
+                system_prompt="system",
+                rendered_user_prompt="rendered prompt",
+                response_schema={"type": "object"},
+                response_contract_id="grouped_v1",
+            )
+            stored = json.loads((workspace_dir / "vlm_runs" / "vlm-20260421103100.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(metadata["prompt_template_id"], probe.DEFAULT_PROMPT_TEMPLATE_ID)
+        self.assertEqual(metadata["args"]["prompt_template_id"], probe.DEFAULT_PROMPT_TEMPLATE_ID)
+        self.assertEqual(stored["prompt_template_id"], probe.DEFAULT_PROMPT_TEMPLATE_ID)
+        self.assertEqual(stored["args"]["prompt_template_id"], probe.DEFAULT_PROMPT_TEMPLATE_ID)
 
     def test_read_result_rows_rejects_pre_follow_up_headers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2876,6 +3217,160 @@ models:
             self.assertEqual(rows[0]["start_row"], "3")
             self.assertEqual(rows[0]["end_row"], "6")
 
+    def test_probe_vlm_photo_boundaries_persists_rendered_prompt_from_configured_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_dir = Path(tmp) / "_workspace"
+            workspace_dir.mkdir(parents=True)
+            template_path = Path(tmp) / "custom_prompt.txt"
+            template_path.write_text(
+                "\n".join(
+                    [
+                        "Custom prompt marker",
+                        "{{GROUP_MAPPING}}",
+                        "ML hints:",
+                        "{{ML_HINTS_BLOCK}}",
+                        "Frame notes example:",
+                        "{{FRAME_NOTES_JSON_EXAMPLE}}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            joined_rows = [
+                {
+                    "relative_path": "cam/a.hif",
+                    "filename": "a.hif",
+                    "image_path": str(Path(tmp) / "a.jpg"),
+                    "start_epoch_ms": "1000",
+                },
+                {
+                    "relative_path": "cam/b.hif",
+                    "filename": "b.hif",
+                    "image_path": str(Path(tmp) / "b.jpg"),
+                    "start_epoch_ms": "2000",
+                },
+            ]
+            response_text = (
+                '{"decision":"same_segment","group_a_segment_type":"dance","group_b_segment_type":"dance",'
+                '"frame_notes":[{"frame_id":"a_01","group":"group_a","note":"same dancer"},'
+                '{"frame_id":"b_01","group":"group_b","note":"same dancer"}],'
+                '"primary_evidence":["same costume"],"summary":"Same segment."}'
+            )
+            args_payload = {
+                "run_id": "",
+                "embedded_manifest_csv": str(workspace_dir / "photo_embedded_manifest.csv"),
+                "photo_manifest_csv": str(workspace_dir / "media_manifest.csv"),
+                "output_csv": str(workspace_dir / "vlm_boundary_results.csv"),
+                "image_variant": "thumb",
+                "window_radius": 1,
+                "window_schema": "consecutive",
+                "window_schema_seed": 42,
+                "boundary_gap_seconds": 10,
+                "max_batches": 1,
+                "model": "qwen3.5:9b",
+                "ollama_base_url": "http://127.0.0.1:11434",
+                "ollama_num_ctx": 16384,
+                "ollama_num_predict": None,
+                "ollama_keep_alive": "15m",
+                "timeout_seconds": 300.0,
+                "temperature": 0.0,
+                "ollama_think": "false",
+                "response_schema_mode": "off",
+                "json_validation_mode": "strict",
+                "prompt_template_id": "group_compare_short",
+                "prompt_template_file": str(template_path),
+                "response_contract_id": "grouped_v1",
+                "photo_pre_model_dir": "",
+                "effective_ml_model_run_id": "",
+                "effective_extra_instructions": "",
+            }
+
+            with mock.patch.object(
+                probe,
+                "read_joined_rows",
+                return_value=joined_rows,
+            ), mock.patch.object(
+                probe,
+                "read_boundary_scores_by_pair",
+                return_value={},
+            ), mock.patch.object(
+                probe,
+                "load_ml_hint_context",
+                return_value=None,
+            ), mock.patch.object(
+                probe,
+                "build_candidate_windows",
+                return_value=[{"cut_index": 1, "time_gap_seconds": 10}],
+            ), mock.patch.object(
+                probe,
+                "resolve_run_state",
+                return_value={"run_id": "", "completed_batches": 0},
+            ), mock.patch.object(
+                probe,
+                "build_run_id",
+                return_value="vlm-20260421113000",
+            ), mock.patch.object(
+                probe,
+                "build_window_rows_for_cut_index",
+                return_value=(joined_rows, 1),
+            ), mock.patch.object(
+                probe,
+                "build_ml_hint_lines_for_window_rows",
+                return_value=[
+                    "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
+                    "ML hint for the left side of the candidate gap: likely dance (confidence 0.76).",
+                    "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.74).",
+                ],
+            ), mock.patch.object(
+                probe,
+                "run_vlm_request",
+                return_value=mock.Mock(
+                    text=response_text,
+                    raw_response={"message": {"content": response_text}},
+                ),
+            ), mock.patch.object(
+                probe,
+                "append_result_rows",
+            ):
+                row_count = probe.probe_vlm_photo_boundaries(
+                    day_id="20260323",
+                    workspace_dir=workspace_dir,
+                    embedded_manifest_csv=workspace_dir / "photo_embedded_manifest.csv",
+                    photo_manifest_csv=workspace_dir / "media_manifest.csv",
+                    output_csv=workspace_dir / "vlm_boundary_results.csv",
+                    provider="ollama",
+                    image_variant="thumb",
+                    window_radius=1,
+                    boundary_gap_seconds=10,
+                    max_batches=1,
+                    model="qwen3.5:9b",
+                    ollama_base_url="http://127.0.0.1:11434",
+                    ollama_num_ctx=16384,
+                    ollama_num_predict=None,
+                    ollama_keep_alive="15m",
+                    timeout_seconds=300.0,
+                    temperature=0.0,
+                    ollama_think="false",
+                    extra_instructions="",
+                    dump_debug_dir=None,
+                    args_payload=args_payload,
+                    new_run=True,
+                    window_schema="consecutive",
+                    window_schema_seed=42,
+                    response_contract_id="grouped_v1",
+                )
+
+            metadata_path = workspace_dir / "vlm_runs" / "vlm-20260421113000.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(row_count, 1)
+        self.assertEqual(metadata["prompt_template_id"], "group_compare_short")
+        self.assertEqual(metadata["prompt_template_file"], str(template_path))
+        self.assertEqual(metadata["response_contract_id"], "grouped_v1")
+        self.assertIn("Custom prompt marker", metadata["rendered_user_prompt"])
+        self.assertIn("a_01 = attached image 1", metadata["rendered_user_prompt"])
+        self.assertIn("ML hint for the main candidate gap in this window: likely cut", metadata["rendered_user_prompt"])
+        self.assertNotIn("Reason about continuity from left to right", metadata["rendered_user_prompt"])
+
     def test_probe_vlm_photo_boundaries_runs_provider_neutral_transport_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             day_dir = Path(tmp) / "20260323"
@@ -2956,10 +3451,11 @@ models:
                 provider="vllm",
                 model="Qwen/Qwen2.5-VL-7B-Instruct",
                 text=(
-                    '{"boundary_after_frame":"frame_03","left_segment_type":"dance","right_segment_type":"ceremony",'
-                    '"frame_notes":{"frame_01":"same dancer","frame_02":"same dancer","frame_03":"same dancer",'
-                    '"frame_04":"host on stage"},'
-                    '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 3."}'
+                    '{"decision":"different_segments","group_a_segment_type":"dance","group_b_segment_type":"ceremony",'
+                    '"frame_notes":[{"frame_id":"a_01","group":"group_a","note":"same dancer"},'
+                    '{"frame_id":"a_02","group":"group_a","note":"same dancer"},'
+                    '{"frame_id":"b_01","group":"group_b","note":"host on stage"}],'
+                    '"primary_evidence":["segment type changes"],"summary":"Boundary after grouped left segment."}'
                 ),
                 json_payload=None,
                 finish_reason="stop",
@@ -2969,10 +3465,11 @@ models:
                         {
                             "message": {
                                 "content": (
-                                    '{"boundary_after_frame":"frame_03","left_segment_type":"dance","right_segment_type":"ceremony",'
-                                    '"frame_notes":{"frame_01":"same dancer","frame_02":"same dancer","frame_03":"same dancer",'
-                                    '"frame_04":"host on stage"},'
-                                    '"primary_evidence":["segment type changes"],"summary":"Boundary after frame 3."}'
+                                    '{"decision":"different_segments","group_a_segment_type":"dance","group_b_segment_type":"ceremony",'
+                                    '"frame_notes":[{"frame_id":"a_01","group":"group_a","note":"same dancer"},'
+                                    '{"frame_id":"a_02","group":"group_a","note":"same dancer"},'
+                                    '{"frame_id":"b_01","group":"group_b","note":"host on stage"}],'
+                                    '"primary_evidence":["segment type changes"],"summary":"Boundary after grouped left segment."}'
                                 )
                             },
                             "finish_reason": "stop",
@@ -2983,7 +3480,7 @@ models:
 
             with mock.patch.object(
                 probe,
-                "build_ml_hint_lines_for_candidate",
+                "build_ml_hint_lines_for_window_rows",
                 return_value=[
                     "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
                     "ML hint for the left side of the candidate gap: likely dance (confidence 0.76).",
@@ -3033,7 +3530,10 @@ models:
                     "type": "json_schema",
                     "json_schema": {
                         "name": "photo_boundary_probe",
-                        "schema": probe.build_response_schema(window_size=4),
+                        "schema": probe.build_response_schema(
+                            group_a_ids=["a_01", "a_02"],
+                            group_b_ids=["b_01"],
+                        ),
                     },
                 },
             )
@@ -3042,11 +3542,15 @@ models:
             self.assertNotIn("Optional pre-model per-image annotations", request.messages[1]["content"])
             rows = probe.read_result_rows(output_csv)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["decision"], "cut_after_3")
+            self.assertEqual(rows[0]["decision"], "cut_after_2")
 
     def test_dump_debug_artifacts_writes_prompt_request_and_response(self):
         with tempfile.TemporaryDirectory() as tmp:
             debug_dir = Path(tmp)
+            from PIL import Image
+
+            image_path = debug_dir / "sample.jpg"
+            Image.new("RGB", (40, 30), "red").save(image_path)
             probe.dump_debug_artifacts(
                 debug_dir=debug_dir,
                 run_id="20260414_031500",
@@ -3062,16 +3566,24 @@ models:
                     }
                 },
                 error_text=None,
+                photo_sheet_items=[{"label": "a_01 sample.jpg", "image_path": str(image_path)}],
             )
             prompt_path = debug_dir / "vlm_probe_20260414_031500_batch_003_prompt.txt"
             request_path = debug_dir / "vlm_probe_20260414_031500_batch_003_request.json"
             response_path = debug_dir / "vlm_probe_20260414_031500_batch_003_response.json"
+            photos_path = debug_dir / "vlm_probe_20260414_031500_batch_003_photos.jpg"
             self.assertTrue(prompt_path.exists())
             self.assertTrue(request_path.exists())
             self.assertTrue(response_path.exists())
+            self.assertTrue(photos_path.exists())
             self.assertEqual(prompt_path.read_text(encoding="utf-8"), "prompt body")
             self.assertEqual(json.loads(request_path.read_text(encoding="utf-8"))["model"], "qwen3.5:9b")
             self.assertIn('"decision":"no_cut"', json.loads(response_path.read_text(encoding="utf-8"))["message"]["content"])
+            from PIL import Image
+
+            exif = Image.open(photos_path).getexif()
+            self.assertEqual(exif.get(270), "a_01 sample.jpg")
+            self.assertEqual(exif.get(37510), b"a_01 sample.jpg")
 
     def test_dump_debug_artifacts_writes_error_without_response(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3090,6 +3602,239 @@ models:
             self.assertTrue(error_path.exists())
             self.assertFalse(response_path.exists())
             self.assertEqual(error_path.read_text(encoding="utf-8"), "timed out")
+
+    def test_run_vlm_window_analysis_writes_error_file_for_invalid_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_dir = Path(tmp)
+            image_path = debug_dir / "frame.jpg"
+            image_path.write_bytes(b"jpeg")
+
+            analysis = None
+            with mock.patch.object(
+                probe,
+                "run_vlm_request",
+                return_value=mock.Mock(
+                    text='{"decision":"bad","frame_notes":{"frame_01":"same"},"primary_evidence":["same performer"],"summary":"same act"}',
+                    raw_response={"message": {"content": "bad"}},
+                ),
+            ), mock.patch.object(
+                probe,
+                "build_provider_request_payload",
+                return_value={"payload": "ok"},
+            ):
+                analysis = probe.run_vlm_window_analysis(
+                    window_rows=[{"image_path": str(image_path)}],
+                    ml_hint_lines=["ML hints unavailable."],
+                    provider="ollama",
+                    base_url="http://127.0.0.1:11434",
+                    model="qwen3.5:9b",
+                    timeout_seconds=300.0,
+                    keep_alive="15m",
+                    temperature=0.0,
+                    context_tokens=16384,
+                    max_output_tokens=512,
+                    reasoning_level="false",
+                    extra_instructions="",
+                    response_schema_mode="off",
+                    json_validation_mode="strict",
+                    debug_dir=debug_dir,
+                    debug_run_id="20260414_031500",
+                    debug_batch_index=5,
+                )
+
+            assert analysis is not None
+            self.assertEqual(analysis["parsed_response"]["response_status"], "invalid_response")
+            error_path = debug_dir / "vlm_probe_20260414_031500_batch_005_error.txt"
+            response_path = debug_dir / "vlm_probe_20260414_031500_batch_005_response.json"
+            self.assertTrue(response_path.exists())
+            self.assertTrue(error_path.exists())
+            self.assertEqual(error_path.read_text(encoding="utf-8"), "Invalid decision value: bad")
+
+    def test_run_vlm_window_analysis_retries_once_for_structural_response_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_dir = Path(tmp)
+            image_a = debug_dir / "frame_a.jpg"
+            image_b = debug_dir / "frame_b.jpg"
+            image_a.write_bytes(b"jpeg")
+            image_b.write_bytes(b"jpeg")
+
+            requests: list[object] = []
+
+            def fake_run(request):
+                requests.append(request)
+                if len(requests) == 1:
+                    return mock.Mock(
+                        text=(
+                            '{"decision":"same_segment","group_a_segment_type":"dance","group_b_segment_type":"dance",'
+                            '"frame_notes":[{"frame_id":"a_01","group":"group_a","note":"same dancer"}],'
+                            '"primary_evidence":["same costume"],"summary":"Same segment."}'
+                        ),
+                        raw_response={"message": {"content": "first"}},
+                    )
+                return mock.Mock(
+                    text=(
+                        '{"decision":"same_segment","group_a_segment_type":"dance","group_b_segment_type":"dance",'
+                        '"frame_notes":[{"frame_id":"a_01","group":"group_a","note":"same dancer"},'
+                        '{"frame_id":"b_01","group":"group_b","note":"same dancer"}],'
+                        '"primary_evidence":["same costume"],"summary":"Same segment."}'
+                    ),
+                    raw_response={"message": {"content": "second"}},
+                )
+
+            with mock.patch.object(probe, "run_vlm_request", side_effect=fake_run):
+                analysis = probe.run_vlm_window_analysis(
+                    window_rows=[
+                        {"image_path": str(image_a)},
+                        {"image_path": str(image_b)},
+                    ],
+                    ml_hint_lines=["ML hints unavailable."],
+                    provider="ollama",
+                    base_url="http://127.0.0.1:11434",
+                    model="qwen3.5:9b",
+                    timeout_seconds=300.0,
+                    keep_alive="15m",
+                    temperature=0.0,
+                    context_tokens=16384,
+                    max_output_tokens=512,
+                    reasoning_level="false",
+                    extra_instructions="",
+                    response_schema_mode="off",
+                    json_validation_mode="strict",
+                )
+
+        self.assertEqual(len(requests), 2)
+        self.assertIn("Repair instruction", requests[1].messages[1]["content"])
+        self.assertEqual(analysis["parsed_response"]["decision"], "no_cut")
+        self.assertEqual(analysis["parsed_response"]["response_status"], "ok")
+
+    def test_run_vlm_window_analysis_renders_selected_prompt_template_with_group_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_dir = Path(tmp)
+            image_a = debug_dir / "frame_a.jpg"
+            image_b = debug_dir / "frame_b.jpg"
+            image_a.write_bytes(b"jpeg")
+            image_b.write_bytes(b"jpeg")
+
+            requests: list[object] = []
+
+            def fake_run(request):
+                requests.append(request)
+                return mock.Mock(
+                    text=(
+                        '{"decision":"same_segment","group_a_segment_type":"dance","group_b_segment_type":"dance",'
+                        '"frame_notes":[{"frame_id":"a_01","group":"group_a","note":"same dancer"},'
+                        '{"frame_id":"b_01","group":"group_b","note":"same dancer"}],'
+                        '"primary_evidence":["same costume"],"summary":"Same segment."}'
+                    ),
+                    raw_response={"message": {"content": "ok"}},
+                )
+
+            with mock.patch.object(probe, "run_vlm_request", side_effect=fake_run):
+                analysis = probe.run_vlm_window_analysis(
+                    window_rows=[
+                        {"image_path": str(image_a)},
+                        {"image_path": str(image_b)},
+                    ],
+                    group_a_count=1,
+                    ml_hint_lines=["overall hint: same_segment"],
+                    provider="ollama",
+                    base_url="http://127.0.0.1:11434",
+                    model="qwen3.5:9b",
+                    timeout_seconds=300.0,
+                    keep_alive="15m",
+                    temperature=0.0,
+                    context_tokens=16384,
+                    max_output_tokens=512,
+                    reasoning_level="false",
+                    extra_instructions="",
+                    response_schema_mode="off",
+                    json_validation_mode="strict",
+                    prompt_template_id="group_compare_short",
+                )
+
+        self.assertEqual(analysis["parsed_response"]["response_status"], "ok")
+        self.assertEqual(len(requests), 1)
+        self.assertIn("a_01 = attached image 1", requests[0].messages[1]["content"])
+        self.assertIn("b_01 = attached image 2", requests[0].messages[1]["content"])
+        self.assertIn("split into two groups", requests[0].messages[1]["content"])
+        self.assertNotIn("frame_01 = attached image 1", requests[0].messages[1]["content"])
+
+    def test_run_vlm_window_analysis_uses_configured_prompt_template_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_dir = Path(tmp)
+            image_a = debug_dir / "frame_a.jpg"
+            image_b = debug_dir / "frame_b.jpg"
+            image_a.write_bytes(b"jpeg")
+            image_b.write_bytes(b"jpeg")
+            template_path = debug_dir / "custom_prompt.txt"
+            template_path.write_text(
+                "\n".join(
+                    [
+                        "Configured template marker",
+                        "{{GROUP_MAPPING}}",
+                        "ML hints:",
+                        "{{ML_HINTS_BLOCK}}",
+                        "Frame notes example:",
+                        "{{FRAME_NOTES_JSON_EXAMPLE}}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            requests: list[object] = []
+
+            def fake_run(request):
+                requests.append(request)
+                return mock.Mock(
+                    text=(
+                        '{"decision":"same_segment","group_a_segment_type":"dance","group_b_segment_type":"dance",'
+                        '"frame_notes":[{"frame_id":"a_01","group":"group_a","note":"same dancer"},'
+                        '{"frame_id":"b_01","group":"group_b","note":"same dancer"}],'
+                        '"primary_evidence":["same costume"],"summary":"Same segment."}'
+                    ),
+                    raw_response={"message": {"content": "ok"}},
+                )
+
+            with mock.patch.object(probe, "run_vlm_request", side_effect=fake_run):
+                analysis = probe.run_vlm_window_analysis(
+                    window_rows=[
+                        {"image_path": str(image_a)},
+                        {"image_path": str(image_b)},
+                    ],
+                    group_a_count=1,
+                    ml_hint_lines=[
+                        "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
+                    ],
+                    provider="ollama",
+                    base_url="http://127.0.0.1:11434",
+                    model="qwen3.5:9b",
+                    timeout_seconds=300.0,
+                    keep_alive="15m",
+                    temperature=0.0,
+                    context_tokens=16384,
+                    max_output_tokens=512,
+                    reasoning_level="false",
+                    extra_instructions="",
+                    response_schema_mode="off",
+                    json_validation_mode="strict",
+                    prompt_template_id="group_compare_short",
+                    prompt_template_file=str(template_path),
+                )
+
+        self.assertEqual(analysis["parsed_response"]["response_status"], "ok")
+        self.assertEqual(len(requests), 1)
+        self.assertIn("Configured template marker", requests[0].messages[1]["content"])
+        self.assertIn("a_01 = attached image 1", requests[0].messages[1]["content"])
+        self.assertIn("b_01 = attached image 2", requests[0].messages[1]["content"])
+        self.assertIn("ML hint for the main candidate gap in this window: likely cut", requests[0].messages[1]["content"])
+        self.assertNotIn("split into two groups", requests[0].messages[1]["content"])
+        self.assertNotIn("Reason about continuity from left to right", requests[0].messages[1]["content"])
+
+    def test_should_retry_structural_response_error_matches_structural_contract_failures(self):
+        self.assertTrue(probe.should_retry_structural_response_error("Invalid group for frame_02: expected group_b, got group_a"))
+        self.assertTrue(probe.should_retry_structural_response_error("Missing frame_notes value for frame_02"))
+        self.assertFalse(probe.should_retry_structural_response_error("Missing summary value"))
+        self.assertFalse(probe.should_retry_structural_response_error("Invalid decision value: cut_after_1"))
 
     def test_build_gui_index_payload_builds_global_sets_from_unique_cuts(self):
         payload = probe.build_gui_index_payload(

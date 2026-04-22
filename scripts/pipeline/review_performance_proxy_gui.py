@@ -27,6 +27,10 @@ try:
 except ModuleNotFoundError:
     from scripts.pipeline.lib import manual_vlm_models
 try:
+    from lib import vlm_prompt_templates
+except ModuleNotFoundError:
+    from scripts.pipeline.lib import vlm_prompt_templates
+try:
     import probe_vlm_photo_boundaries as probe_vlm_boundary
 except ModuleNotFoundError:
     from scripts.pipeline import probe_vlm_photo_boundaries as probe_vlm_boundary
@@ -140,6 +144,7 @@ LEGACY_INDEX_FILENAMES = (
 )
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MANUAL_VLM_MODELS_PATH = Path("conf/vlm_models.yaml")
+MANUAL_VLM_PROMPT_TEMPLATES_PATH = Path("conf/vlm_prompt_templates.yaml")
 MANUAL_VLM_REQUEST_MAX_ATTEMPTS = 3
 MANUAL_VLM_REQUEST_RETRY_DELAY_SECONDS = 5.0
 
@@ -281,6 +286,93 @@ def refresh_manual_vlm_models_if_needed(window: "MainWindow", latest_md5: str) -
     return True
 
 
+def load_prompt_templates_for_gui(repo_root: Path) -> Tuple[List[Dict[str, Any]], Optional[str], Optional[str]]:
+    config_path = repo_root / MANUAL_VLM_PROMPT_TEMPLATES_PATH
+    try:
+        loaded = vlm_prompt_templates.load_prompt_templates_config(config_path)
+    except OSError as exc:
+        return [], None, f"Prompt template config error: {exc}"
+    except yaml.YAMLError as exc:
+        return [], None, f"Prompt template config error: {exc}"
+    except ValueError as exc:
+        return [], None, f"Prompt template config error: {exc}"
+    return [
+        {
+            "id": entry.id,
+            "label": entry.label,
+            "file": entry.file,
+            "description": entry.description,
+        }
+        for entry in loaded.templates
+        if str(entry.id or "").strip()
+    ], loaded.md5_hex, None
+
+
+def apply_reloaded_prompt_templates(
+    window: "MainWindow",
+    prompt_templates: List[Dict[str, Any]],
+    md5_hex: Optional[str],
+    message: Optional[str],
+    fallback_prompt_template_id: Optional[str] = None,
+) -> None:
+    previous_prompt_template_id = (
+        str(getattr(window, "manual_vlm_selected_prompt_template_id", "") or "").strip() or None
+    )
+    normalized_prompt_templates = [dict(prompt_template) for prompt_template in prompt_templates]
+    prompt_template_ids = [
+        str(prompt_template.get("id", "") or "").strip()
+        for prompt_template in normalized_prompt_templates
+        if str(prompt_template.get("id", "") or "").strip()
+    ]
+    window.manual_vlm_prompt_templates = normalized_prompt_templates
+    window.manual_vlm_prompt_templates_md5 = md5_hex
+    window.manual_vlm_prompt_templates_error = None
+    window.manual_vlm_status_message = (
+        message if prompt_template_ids else build_manual_vlm_prompt_templates_unavailable_message()
+    )
+    if previous_prompt_template_id in prompt_template_ids:
+        window.manual_vlm_selected_prompt_template_id = previous_prompt_template_id
+    elif fallback_prompt_template_id in prompt_template_ids:
+        window.manual_vlm_selected_prompt_template_id = fallback_prompt_template_id
+    elif prompt_template_ids:
+        window.manual_vlm_selected_prompt_template_id = prompt_template_ids[0]
+    else:
+        window.manual_vlm_selected_prompt_template_id = None
+
+
+def apply_prompt_templates_reload_error(
+    window: "MainWindow",
+    md5_hex: Optional[str],
+    error_text: str,
+) -> None:
+    window.manual_vlm_prompt_templates = []
+    window.manual_vlm_prompt_templates_md5 = md5_hex
+    window.manual_vlm_prompt_templates_error = error_text
+    window.manual_vlm_status_message = None
+    window.manual_vlm_selected_prompt_template_id = None
+
+
+def refresh_prompt_templates_if_needed(window: "MainWindow", latest_md5: str) -> bool:
+    current_md5 = getattr(window, "manual_vlm_prompt_templates_md5", None)
+    if current_md5 == latest_md5:
+        return False
+    reload_prompt_templates = getattr(window, "reload_prompt_templates", None)
+    if callable(reload_prompt_templates):
+        reload_prompt_templates(startup=False)
+        return True
+    prompt_templates, md5_hex, error_text = load_prompt_templates_for_gui(REPO_ROOT)
+    if error_text is not None:
+        apply_prompt_templates_reload_error(window, md5_hex, error_text)
+        return True
+    apply_reloaded_prompt_templates(
+        window,
+        prompt_templates=prompt_templates,
+        md5_hex=md5_hex,
+        message="Prompt templates reloaded from config.",
+    )
+    return True
+
+
 def resolve_selection_output_path(workspace_dir: Path, value: str) -> Path:
     candidate = Path(value.strip())
     if not candidate.is_absolute():
@@ -379,6 +471,41 @@ def resolve_manual_prediction_window_config(payload: Mapping[str, Any]) -> Dict[
     return {
         "window_radius": window_radius,
     }
+
+
+def resolve_manual_vlm_window_config(
+    *,
+    day_dir: Path,
+    payload: Mapping[str, Any],
+    selected_window_schema: Optional[str] = None,
+) -> Dict[str, Any]:
+    window_config: Dict[str, Any] = dict(resolve_manual_prediction_window_config(payload))
+    vocatio_config = load_manual_prediction_vocatio_config(day_dir)
+    configured_schema = (
+        str(selected_window_schema or "").strip()
+        or str(vocatio_config.get("VLM_WINDOW_SCHEMA", "") or "").strip()
+        or str(payload.get("window_schema", "") or "").strip()
+    )
+    configured_seed = (
+        str(vocatio_config.get("VLM_WINDOW_SCHEMA_SEED", "") or "").strip()
+        or str(payload.get("window_schema_seed", "") or "").strip()
+    )
+    window_config["window_schema"] = probe_vlm_boundary.window_schema_lib.parse_window_schema(configured_schema)
+    window_config["window_schema_seed"] = probe_vlm_boundary.window_schema_lib.parse_window_schema_seed(configured_seed)
+    return window_config
+
+
+def resolve_manual_vlm_boundary_gap_seconds(
+    *,
+    day_dir: Path,
+    payload: Mapping[str, Any],
+) -> int:
+    configured_value = (
+        str(payload.get("boundary_gap_seconds", "") or "").strip()
+        or str(load_manual_prediction_vocatio_config(day_dir).get("VLM_BOUNDARY_GAP_SECONDS", "") or "").strip()
+        or str(probe_vlm_boundary.DEFAULT_BOUNDARY_GAP_SECONDS)
+    )
+    return probe_vlm_boundary.positive_int_arg(configured_value)
 
 
 def resolve_manual_prediction_anchor_pair(
@@ -544,7 +671,9 @@ def resolve_manual_vlm_runtime_args(
     day_dir: Path,
     workspace_dir: Path,
     payload: Mapping[str, Any],
+    window_config: Optional[Mapping[str, Any]] = None,
     manual_vlm_model: Mapping[str, Any],
+    selected_prompt_template_id: Optional[str] = None,
 ) -> argparse.Namespace:
     args = probe_vlm_boundary.parse_args([str(day_dir), "--workspace-dir", str(workspace_dir)])
     args.provider = str(manual_vlm_model.get("VLM_PROVIDER", "") or "").strip()
@@ -568,7 +697,20 @@ def resolve_manual_vlm_runtime_args(
         args.ollama_think = ""
     args.response_schema_mode = str(manual_vlm_model.get("VLM_RESPONSE_SCHEMA_MODE", "") or "").strip()
     args.json_validation_mode = str(manual_vlm_model.get("VLM_JSON_VALIDATION_MODE", "") or "").strip()
-    args.window_radius = resolve_manual_prediction_window_config(payload)["window_radius"]
+    resolved_window_config = (
+        dict(window_config)
+        if isinstance(window_config, Mapping)
+        else resolve_manual_vlm_window_config(day_dir=day_dir, payload=payload)
+    )
+    args.window_radius = probe_vlm_boundary.positive_window_radius_arg(
+        str(resolved_window_config.get("window_radius", "") or "").strip()
+    )
+    args.window_schema = probe_vlm_boundary.window_schema_lib.parse_window_schema(
+        resolved_window_config.get("window_schema", "")
+    )
+    args.window_schema_seed = probe_vlm_boundary.window_schema_lib.parse_window_schema_seed(
+        resolved_window_config.get("window_schema_seed", "")
+    )
     image_variant = str(payload.get("vlm_image_variant", "") or "").strip()
     if image_variant:
         args.image_variant = image_variant
@@ -578,6 +720,16 @@ def resolve_manual_vlm_runtime_args(
     photo_pre_model_dir = str(payload.get("photo_pre_model_dir", "") or "").strip()
     if photo_pre_model_dir:
         args.photo_pre_model_dir = photo_pre_model_dir
+    prompt_template_id = str(selected_prompt_template_id or "").strip() or str(
+        getattr(args, "prompt_template_id", "") or getattr(probe_vlm_boundary, "DEFAULT_PROMPT_TEMPLATE_ID", "")
+    ).strip()
+    if selected_prompt_template_id is not None:
+        prompt_template_id = str(selected_prompt_template_id).strip()
+    args.prompt_template_id = prompt_template_id
+    args.prompt_template_file = ""
+    args.response_contract_id = str(
+        getattr(args, "response_contract_id", "") or getattr(probe_vlm_boundary, "DEFAULT_RESPONSE_CONTRACT_ID", "")
+    ).strip()
     return args
 
 
@@ -587,11 +739,17 @@ def resolve_manual_vlm_analyze_state(
     workspace_dir: Path,
     payload: Mapping[str, Any],
     selected_photos: Sequence[Mapping[str, Any]],
+    selected_window_schema: Optional[str],
     manual_vlm_model: Mapping[str, Any],
+    selected_prompt_template_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     next_state = build_idle_manual_vlm_analyze_state(selected_photos)
     try:
-        next_state["window_config"] = resolve_manual_prediction_window_config(payload)
+        next_state["window_config"] = resolve_manual_vlm_window_config(
+            day_dir=day_dir,
+            payload=payload,
+            selected_window_schema=selected_window_schema,
+        )
         next_state["anchor_pair"] = resolve_manual_prediction_anchor_pair(
             selected_photos,
             load_manual_prediction_joined_rows(workspace_dir, payload),
@@ -600,13 +758,21 @@ def resolve_manual_vlm_analyze_state(
             day_dir=day_dir,
             workspace_dir=workspace_dir,
             payload=payload,
+            window_config=next_state["window_config"],
             manual_vlm_model=manual_vlm_model,
+            selected_prompt_template_id=selected_prompt_template_id,
         )
         next_state["runtime_config"] = {
             "provider": str(runtime_args.provider),
             "model": str(runtime_args.model),
             "image_variant": str(runtime_args.image_variant),
+            "window_schema": str(getattr(runtime_args, "window_schema", "") or ""),
+            "prompt_template_id": str(getattr(runtime_args, "prompt_template_id", "") or ""),
+            "response_contract_id": str(getattr(runtime_args, "response_contract_id", "") or ""),
         }
+        next_state["prompt_template_id"] = str(getattr(runtime_args, "prompt_template_id", "") or "").strip()
+        next_state["prompt_template_file"] = str(getattr(runtime_args, "prompt_template_file", "") or "").strip()
+        next_state["response_contract_id"] = str(getattr(runtime_args, "response_contract_id", "") or "").strip()
     except Exception as exc:
         next_state["status"] = "error"
         next_state["error"] = str(exc)
@@ -705,6 +871,66 @@ def build_manual_prediction_joined_rows(
     return reduced_rows, left_row_index
 
 
+def build_manual_vlm_window_rows(
+    joined_rows: Sequence[Mapping[str, Any]],
+    *,
+    anchor_pair: Mapping[str, Any],
+    window_radius: int,
+    window_schema: str,
+    window_schema_seed: int,
+    boundary_gap_seconds: int,
+) -> tuple[List[Mapping[str, Any]], int]:
+    left_row_index = int(anchor_pair.get("left_row_index", -1))
+    right_row_index = int(anchor_pair.get("right_row_index", -1))
+    if left_row_index < 0 or right_row_index < 0:
+        raise ValueError("manual VLM anchor rows are unavailable")
+    if left_row_index >= right_row_index:
+        raise ValueError("manual VLM anchors must be ordered by joined rows")
+    if right_row_index >= len(joined_rows):
+        raise ValueError("manual VLM anchor rows are outside the joined manifest")
+
+    left_segment_start = 0
+    for index in range(left_row_index - 1, -1, -1):
+        left_epoch_ms = int(str(joined_rows[index].get("start_epoch_ms", "") or "").strip())
+        right_epoch_ms = int(str(joined_rows[index + 1].get("start_epoch_ms", "") or "").strip())
+        if probe_vlm_boundary.rounded_seconds(right_epoch_ms - left_epoch_ms) >= boundary_gap_seconds:
+            left_segment_start = index + 1
+            break
+
+    right_segment_end = len(joined_rows)
+    for index in range(right_row_index, len(joined_rows) - 1):
+        left_epoch_ms = int(str(joined_rows[index].get("start_epoch_ms", "") or "").strip())
+        right_epoch_ms = int(str(joined_rows[index + 1].get("start_epoch_ms", "") or "").strip())
+        if probe_vlm_boundary.rounded_seconds(right_epoch_ms - left_epoch_ms) >= boundary_gap_seconds:
+            right_segment_end = index + 1
+            break
+
+    context_count = max(int(window_radius) - 1, 0)
+    left_context_rows = probe_vlm_boundary.window_schema_lib.select_segment_rows(
+        joined_rows[left_segment_start:left_row_index],
+        radius=context_count,
+        schema=window_schema,
+        gap_side="left",
+        schema_seed=window_schema_seed,
+    )
+    right_context_rows = probe_vlm_boundary.window_schema_lib.select_segment_rows(
+        joined_rows[right_row_index + 1 : right_segment_end],
+        radius=context_count,
+        schema=window_schema,
+        gap_side="right",
+        schema_seed=window_schema_seed,
+    )
+    return (
+        [
+            *left_context_rows,
+            dict(joined_rows[left_row_index]),
+            dict(joined_rows[right_row_index]),
+            *right_context_rows,
+        ],
+        len(left_context_rows) + 1,
+    )
+
+
 def normalize_ml_candidate_rows(candidate_rows: Sequence[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
     return [
         dict(
@@ -793,8 +1019,7 @@ def _manual_vlm_hint_lines_subprocess_entry(
     result_queue: Any,
     workspace_dir_str: str,
     payload: Mapping[str, Any],
-    reduced_rows: Sequence[Mapping[str, Any]],
-    cut_index: int,
+    window_rows: Sequence[Mapping[str, Any]],
     runtime_window_radius: int,
     runtime_args_payload: Mapping[str, Any],
 ) -> None:
@@ -814,10 +1039,9 @@ def _manual_vlm_hint_lines_subprocess_entry(
         ).strip()
         photo_pre_model_dir = probe_vlm_boundary.resolve_path(workspace_dir, photo_pre_model_dir_value)
         day_id = str(payload.get("day", "") or "").strip() or workspace_dir.parent.name
-        result = probe_vlm_boundary.build_ml_hint_lines_for_candidate(
+        result = probe_vlm_boundary.build_ml_hint_lines_for_window_rows(
             day_id=day_id,
-            joined_rows=[dict(row) for row in reduced_rows],
-            cut_index=cut_index,
+            window_rows=[dict(row) for row in window_rows],
             boundary_rows_by_pair=probe_vlm_boundary.read_boundary_scores_by_pair(
                 workspace_dir / PHOTO_BOUNDARY_SCORES_FILENAME
             ),
@@ -959,8 +1183,7 @@ def load_manual_vlm_hint_lines(
     *,
     workspace_dir: Path,
     payload: Mapping[str, Any],
-    reduced_rows: Sequence[Mapping[str, Any]],
-    cut_index: int,
+    window_rows: Sequence[Mapping[str, Any]],
     runtime_window_radius: int,
     runtime_args: argparse.Namespace,
 ) -> List[str]:
@@ -970,8 +1193,7 @@ def load_manual_vlm_hint_lines(
                 _manual_vlm_hint_lines_subprocess_entry,
                 str(workspace_dir),
                 dict(payload),
-                [dict(row) for row in reduced_rows],
-                int(cut_index),
+                [dict(row) for row in window_rows],
                 int(runtime_window_radius),
                 {
                     "ml_model_run_id": str(getattr(runtime_args, "ml_model_run_id", "") or "").strip(),
@@ -994,6 +1216,7 @@ def compute_manual_vlm_analyze_result(
     anchor_pair: Mapping[str, Any],
     window_config: Mapping[str, Any],
     manual_vlm_model: Mapping[str, Any],
+    selected_prompt_template_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     if not window_config:
         raise ValueError("manual VLM window config is unavailable")
@@ -1004,42 +1227,62 @@ def compute_manual_vlm_analyze_result(
         day_dir=day_dir,
         workspace_dir=workspace_dir,
         payload=payload,
+        window_config=window_config,
         manual_vlm_model=manual_vlm_model,
+        selected_prompt_template_id=selected_prompt_template_id,
     )
     runtime_window_radius = probe_vlm_boundary.positive_window_radius_arg(
         str(window_config.get("window_radius", "") or "").strip()
     )
-    runtime_args.window_radius = runtime_window_radius
-    reduced_rows, cut_index = build_manual_prediction_joined_rows(joined_rows, anchor_pair)
-    candidate_rows = probe_vlm_boundary._build_ml_candidate_window_rows(
-        joined_rows=reduced_rows,
-        cut_index=cut_index,
-        window_radius=runtime_window_radius,
+    runtime_window_schema = probe_vlm_boundary.window_schema_lib.parse_window_schema(
+        window_config.get("window_schema", "")
     )
-    if candidate_rows is None:
-        raise ValueError("manual VLM analyze needs enough surrounding context for inference")
+    runtime_window_schema_seed = probe_vlm_boundary.window_schema_lib.parse_window_schema_seed(
+        window_config.get("window_schema_seed", "")
+    )
+    runtime_args.window_radius = runtime_window_radius
+    runtime_args.window_schema = runtime_window_schema
+    runtime_args.window_schema_seed = runtime_window_schema_seed
+    candidate_rows, group_a_count = build_manual_vlm_window_rows(
+        joined_rows=joined_rows,
+        anchor_pair=anchor_pair,
+        window_radius=runtime_window_radius,
+        window_schema=runtime_window_schema,
+        window_schema_seed=runtime_window_schema_seed,
+        boundary_gap_seconds=resolve_manual_vlm_boundary_gap_seconds(day_dir=day_dir, payload=payload),
+    )
+    group_b_count = max(0, len(candidate_rows) - group_a_count)
+    group_a_ids, group_b_ids = probe_vlm_boundary.build_runtime_group_ids(group_a_count, group_b_count)
     extra_instructions = probe_vlm_boundary.load_extra_instructions(
         str(getattr(runtime_args, "extra_instructions", "") or ""),
         getattr(runtime_args, "extra_instructions_file", None),
     )
     response_schema_mode = str(getattr(runtime_args, "response_schema_mode", "off") or "off")
+    prompt_template_id = str(
+        getattr(runtime_args, "prompt_template_id", "") or getattr(probe_vlm_boundary, "DEFAULT_PROMPT_TEMPLATE_ID", "")
+    ).strip()
+    response_contract_id = str(
+        getattr(runtime_args, "response_contract_id", "") or getattr(probe_vlm_boundary, "DEFAULT_RESPONSE_CONTRACT_ID", "")
+    ).strip()
+    ml_hint_lines = load_manual_vlm_hint_lines(
+        workspace_dir=workspace_dir,
+        payload=payload,
+        window_rows=candidate_rows,
+        runtime_window_radius=runtime_window_radius,
+        runtime_args=runtime_args,
+    )
+    prompt, prompt_template_path = probe_vlm_boundary.render_runtime_user_prompt(
+        prompt_template_id=prompt_template_id,
+        prompt_template_file=str(getattr(runtime_args, "prompt_template_file", "") or "").strip(),
+        group_a_ids=group_a_ids,
+        group_b_ids=group_b_ids,
+        ml_hint_lines=ml_hint_lines,
+        extra_instructions=extra_instructions,
+    )
     response_schema = (
-        probe_vlm_boundary.build_response_schema(len(candidate_rows))
+        probe_vlm_boundary.build_response_schema(group_a_ids=group_a_ids, group_b_ids=group_b_ids)
         if response_schema_mode == "on"
         else None
-    )
-    prompt = probe_vlm_boundary.build_user_prompt(
-        window_size=len(candidate_rows),
-        ml_hint_lines=load_manual_vlm_hint_lines(
-            workspace_dir=workspace_dir,
-            payload=payload,
-            reduced_rows=reduced_rows,
-            cut_index=cut_index,
-            runtime_window_radius=runtime_window_radius,
-            runtime_args=runtime_args,
-        ),
-        extra_instructions=extra_instructions,
-        response_schema_mode=response_schema_mode,
     )
     request = probe_vlm_boundary.build_vlm_request(
         provider=str(runtime_args.provider),
@@ -1056,6 +1299,13 @@ def compute_manual_vlm_analyze_result(
         reasoning_level=str(runtime_args.ollama_think),
         response_schema=response_schema,
     )
+    photo_sheet_items = [
+        {
+            "label": f"{frame_id} {Path(str(row.get('relative_path', '') or '')).name}",
+            "image_path": str(row.get("image_path", "") or "").strip(),
+        }
+        for frame_id, row in zip([*group_a_ids, *group_b_ids], candidate_rows)
+    ]
     request_payload = probe_vlm_boundary.build_provider_request_payload(request)
     run_id = probe_vlm_boundary.build_run_id()
     debug_dir = resolve_manual_vlm_debug_dir(workspace_dir, runtime_args, run_id)
@@ -1083,6 +1333,7 @@ def compute_manual_vlm_analyze_result(
                 request_payload=request_payload,
                 response_payload=None,
                 error_text=str(exc),
+                photo_sheet_items=photo_sheet_items,
             )
             raise ManualVlmAnalyzeError(
                 str(exc),
@@ -1093,7 +1344,9 @@ def compute_manual_vlm_analyze_result(
         response_payload = response.raw_response if isinstance(response.raw_response, Mapping) else None
         parsed_response = probe_vlm_boundary.parse_model_response(
             raw_response,
-            window_size=len(candidate_rows),
+            group_a_ids=group_a_ids,
+            group_b_ids=group_b_ids,
+            response_contract_id=response_contract_id,
             json_validation_mode=str(getattr(runtime_args, "json_validation_mode", "strict")),
         )
         if str(parsed_response.get("response_status", "") or "") != "ok":
@@ -1111,6 +1364,7 @@ def compute_manual_vlm_analyze_result(
                 request_payload=request_payload,
                 response_payload=response_payload,
                 error_text=str(parsed_response.get("reason", "") or "invalid VLM response"),
+                photo_sheet_items=photo_sheet_items,
             )
             raise ManualVlmAnalyzeError(
                 str(parsed_response.get("reason", "") or "invalid VLM response"),
@@ -1124,6 +1378,7 @@ def compute_manual_vlm_analyze_result(
             request_payload=request_payload,
             response_payload=response_payload,
             error_text=None,
+            photo_sheet_items=photo_sheet_items,
         )
         return raw_response, response_payload, parsed_response
 
@@ -1134,25 +1389,63 @@ def compute_manual_vlm_analyze_result(
             setattr(exc, "preset_name", preset_name)
         if model_config:
             setattr(exc, "model_config", dict(model_config))
+        if prompt_template_id:
+            setattr(exc, "prompt_template_id", prompt_template_id)
+        prompt_template_file = str(prompt_template_path)
+        if prompt_template_file:
+            setattr(exc, "prompt_template_file", prompt_template_file)
+        if response_contract_id:
+            setattr(exc, "response_contract_id", response_contract_id)
         if attempt_count > 0:
             setattr(exc, "attempt_count", attempt_count)
         raise
     response_json = extract_manual_vlm_response_payload(raw_response)
+    compatibility_decision = str(parsed_response.get("decision", "") or "").strip()
+    semantic_decision = str(
+        parsed_response.get("semantic_decision", "")
+        or response_json.get("decision", "")
+        or ""
+    ).strip()
+    if semantic_decision not in {"same_segment", "different_segments"}:
+        semantic_decision = ""
+    display_decision = semantic_decision or compatibility_decision
     result = {
         "provider": str(runtime_args.provider),
         "model": str(runtime_args.model),
         "preset_name": preset_name,
         "model_config": dict(model_config),
+        "window_config": dict(window_config),
+        "prompt_template_id": prompt_template_id,
+        "prompt_template_file": str(prompt_template_path),
+        "response_contract_id": response_contract_id,
         "attempt_count": attempt_count,
         "run_id": run_id,
-        "decision": str(parsed_response.get("decision", "") or "").strip(),
+        "decision": display_decision,
+        "semantic_decision": semantic_decision,
+        "compatibility_decision": compatibility_decision,
         "reason": str(parsed_response.get("reason", "") or "").strip(),
         "response_status": str(parsed_response.get("response_status", "") or "").strip(),
         "summary": str(response_json.get("summary", "") or "").strip(),
-        "left_segment_type": str(response_json.get("left_segment_type", "") or "").strip(),
-        "right_segment_type": str(response_json.get("right_segment_type", "") or "").strip(),
+        "left_segment_type": str(
+            parsed_response.get("semantic_group_a_segment_type", "")
+            or response_json.get("group_a_segment_type", "")
+            or response_json.get("left_segment_type", "")
+            or ""
+        ).strip(),
+        "right_segment_type": str(
+            parsed_response.get("semantic_group_b_segment_type", "")
+            or response_json.get("group_b_segment_type", "")
+            or response_json.get("right_segment_type", "")
+            or ""
+        ).strip(),
         "left_anchor": str(anchor_pair.get("left_relative_path", "") or "").strip(),
         "right_anchor": str(anchor_pair.get("right_relative_path", "") or "").strip(),
+        "group_a_relative_paths": [
+            str(row.get("relative_path", "") or "").strip() for row in candidate_rows[:group_a_count] if str(row.get("relative_path", "") or "").strip()
+        ],
+        "group_b_relative_paths": [
+            str(row.get("relative_path", "") or "").strip() for row in candidate_rows[group_a_count:] if str(row.get("relative_path", "") or "").strip()
+        ],
         "raw_response": raw_response,
         "debug_file_paths": build_manual_vlm_debug_file_paths(
             debug_dir,
@@ -1602,6 +1895,45 @@ def build_manual_vlm_model_lines(result: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def build_manual_vlm_window_lines(result: Mapping[str, Any]) -> List[str]:
+    window_config = result.get("window_config")
+    if not isinstance(window_config, Mapping):
+        return []
+    ordered_keys = (
+        ("VLM_WINDOW_RADIUS", "window_radius"),
+        ("VLM_WINDOW_SCHEMA", "window_schema"),
+        ("VLM_WINDOW_SCHEMA_SEED", "window_schema_seed"),
+    )
+    items = [
+        (label, format_manual_vlm_metadata_value(window_config.get(key)))
+        for label, key in ordered_keys
+        if key in window_config
+    ]
+    if not items:
+        return []
+    lines = ["Window config:"]
+    lines.extend([f"  {label}: {value}" for label, value in items])
+    return lines
+
+
+def build_manual_vlm_prompt_lines(result: Mapping[str, Any]) -> List[str]:
+    items: List[tuple[str, str]] = []
+    prompt_template_id = format_manual_vlm_metadata_value(result.get("prompt_template_id"))
+    if prompt_template_id != "-":
+        items.append(("VLM_PROMPT_TEMPLATE_ID", prompt_template_id))
+    prompt_template_file = format_manual_vlm_metadata_value(result.get("prompt_template_file"))
+    if prompt_template_file != "-":
+        items.append(("VLM_PROMPT_TEMPLATE_FILE", prompt_template_file))
+    response_contract_id = format_manual_vlm_metadata_value(result.get("response_contract_id"))
+    if response_contract_id != "-":
+        items.append(("response_contract_id", response_contract_id))
+    if not items:
+        return []
+    lines = ["Prompt config:"]
+    lines.extend([f"  {label}: {value}" for label, value in items])
+    return lines
+
+
 def build_manual_vlm_retry_lines(result: Mapping[str, Any]) -> List[str]:
     attempt_count = parse_manual_vlm_attempt_count(result.get("attempt_count"))
     succeeded_on_attempt = parse_manual_vlm_attempt_count(result.get("succeeded_on_attempt"))
@@ -1648,8 +1980,9 @@ def format_manual_vlm_reason_lines(reason: str, summary: str) -> List[str]:
 
 
 def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
+    decision = str(result.get("decision", "") or "").strip()
     semantic_lines = [
-        f"Decision: {format_value(result.get('decision'))}",
+        f"Decision: {format_value(decision)}",
     ]
     left_segment_type = str(result.get("left_segment_type", "") or "").strip()
     right_segment_type = str(result.get("right_segment_type", "") or "").strip()
@@ -1666,17 +1999,99 @@ def format_manual_vlm_analyze_result_text(result: Mapping[str, Any]) -> str:
         semantic_lines.extend(format_manual_vlm_reason_lines(reason, summary))
     left_anchor = str(result.get("left_anchor", "") or "").strip()
     right_anchor = str(result.get("right_anchor", "") or "").strip()
+    group_a_relative_paths = [
+        str(value).strip() for value in list(result.get("group_a_relative_paths", []) or []) if str(value).strip()
+    ]
+    group_b_relative_paths = [
+        str(value).strip() for value in list(result.get("group_b_relative_paths", []) or []) if str(value).strip()
+    ]
     anchor_lines: List[str] = []
     if left_anchor or right_anchor:
         anchor_lines.append("Anchors:")
         anchor_lines.append(f"  {format_value(left_anchor)} -> {format_value(right_anchor)}")
+    if group_a_relative_paths:
+        anchor_lines.append("Group A segment photos:")
+        anchor_lines.extend([f"  {value}" for value in group_a_relative_paths])
+    if group_b_relative_paths:
+        anchor_lines.append("Group B segment photos:")
+        anchor_lines.extend([f"  {value}" for value in group_b_relative_paths])
     metadata_lines: List[str] = []
     metadata_lines.extend(build_manual_vlm_model_lines(result))
+    metadata_lines.extend(build_manual_vlm_window_lines(result))
+    metadata_lines.extend(build_manual_vlm_prompt_lines(result))
     metadata_lines.extend(build_manual_vlm_retry_lines(result))
     lines = list(semantic_lines)
     append_info_block(lines, anchor_lines)
     append_info_block(lines, metadata_lines)
     return join_info_section_lines(lines)
+
+
+def resolve_manual_vlm_selected_window_schema(window: object) -> str:
+    configured_value = str(getattr(window, "manual_vlm_selected_window_schema", "") or "").strip()
+    if configured_value:
+        return probe_vlm_boundary.window_schema_lib.parse_window_schema(configured_value)
+    day_dir_resolver = getattr(window, "manual_prediction_day_dir", None)
+    if callable(day_dir_resolver):
+        try:
+            vocatio_config = load_manual_prediction_vocatio_config(day_dir_resolver())
+        except Exception:
+            vocatio_config = {}
+        configured_value = str(vocatio_config.get("VLM_WINDOW_SCHEMA", "") or "").strip()
+        if configured_value:
+            return probe_vlm_boundary.window_schema_lib.parse_window_schema(configured_value)
+    payload = getattr(window, "payload", {})
+    if isinstance(payload, Mapping):
+        configured_value = str(payload.get("window_schema", "") or "").strip()
+        if configured_value:
+            return probe_vlm_boundary.window_schema_lib.parse_window_schema(configured_value)
+    return probe_vlm_boundary.DEFAULT_WINDOW_SCHEMA
+
+
+def resolve_manual_vlm_selected_prompt_template_id(window: object) -> str:
+    prompt_template_ids = [
+        str(prompt_template.get("id", "") or "").strip()
+        for prompt_template in getattr(window, "manual_vlm_prompt_templates", [])
+        if isinstance(prompt_template, Mapping) and str(prompt_template.get("id", "") or "").strip()
+    ]
+    configured_value = str(getattr(window, "manual_vlm_selected_prompt_template_id", "") or "").strip()
+    if configured_value and configured_value in prompt_template_ids:
+        return configured_value
+    day_dir_resolver = getattr(window, "manual_prediction_day_dir", None)
+    vocatio_configured_value = ""
+    if callable(day_dir_resolver):
+        try:
+            vocatio_config = load_manual_prediction_vocatio_config(day_dir_resolver())
+        except Exception:
+            vocatio_config = {}
+        vocatio_configured_value = str(vocatio_config.get("VLM_PROMPT_TEMPLATE_ID", "") or "").strip()
+        if vocatio_configured_value and vocatio_configured_value in prompt_template_ids:
+            return vocatio_configured_value
+    if prompt_template_ids:
+        return prompt_template_ids[0]
+    if (
+        getattr(window, "manual_vlm_prompt_templates_md5", None) is not None
+        or str(getattr(window, "manual_vlm_prompt_templates_error", "") or "").strip()
+    ):
+        return ""
+    return configured_value or vocatio_configured_value
+
+
+def resolve_manual_vlm_prompt_template_file(
+    prompt_templates: Sequence[Mapping[str, Any]],
+    selected_prompt_template_id: Optional[str],
+) -> str:
+    normalized_selected_prompt_template_id = str(selected_prompt_template_id or "").strip()
+    if not normalized_selected_prompt_template_id:
+        return ""
+    for prompt_template in prompt_templates:
+        if str(prompt_template.get("id", "") or "").strip() != normalized_selected_prompt_template_id:
+            continue
+        return str(prompt_template.get("file", "") or "").strip()
+    return ""
+
+
+def build_manual_vlm_prompt_templates_unavailable_message() -> str:
+    return "Prompt templates unavailable: conf/vlm_prompt_templates.yaml has no entries."
 
 
 def build_manual_vlm_analyze_section_config(window: object) -> Dict[str, Any]:
@@ -1689,19 +2104,60 @@ def build_manual_vlm_analyze_section_config(window: object) -> Dict[str, Any]:
         preset_names.append(preset_name)
         preset_description = str(model.get("VLM_DESCRIPTION", "") or "").strip()
         choice_tooltips[preset_name] = preset_description or preset_name
+    prompt_template_ids = []
+    prompt_template_tooltips: Dict[str, str] = {}
+    for prompt_template in getattr(window, "manual_vlm_prompt_templates", []):
+        if not isinstance(prompt_template, Mapping):
+            continue
+        prompt_template_id = str(prompt_template.get("id", "") or "").strip()
+        if not prompt_template_id:
+            continue
+        prompt_template_ids.append(prompt_template_id)
+        prompt_template_label = str(prompt_template.get("label", "") or "").strip() or prompt_template_id
+        prompt_template_description = str(prompt_template.get("description", "") or "").strip()
+        prompt_template_tooltips[prompt_template_id] = (
+            f"{prompt_template_label}: {prompt_template_description}"
+            if prompt_template_description
+            else prompt_template_label
+        )
     configured_name = str(getattr(window, "manual_vlm_selected_name", "") or "").strip()
     selected_name = configured_name if configured_name in preset_names else (preset_names[0] if preset_names else None)
+    prompt_templates_error = str(getattr(window, "manual_vlm_prompt_templates_error", "") or "").strip()
+    selected_prompt_template_id = resolve_manual_vlm_selected_prompt_template_id(window)
+    if prompt_template_ids and selected_prompt_template_id not in prompt_template_ids:
+        selected_prompt_template_id = prompt_template_ids[0]
+    if prompt_templates_error or not prompt_template_ids:
+        selected_prompt_template_id = None
+    prompt_templates_unavailable = not prompt_templates_error and not prompt_template_ids
     description = (
         str(getattr(window, "manual_vlm_models_error", "") or "").strip()
+        or prompt_templates_error
+        or (build_manual_vlm_prompt_templates_unavailable_message() if prompt_templates_unavailable else "")
         or str(getattr(window, "manual_vlm_status_message", "") or "").strip()
         or "Ephemeral runtime state for manual VLM boundary analysis."
     )
+    selected_window_schema = resolve_manual_vlm_selected_window_schema(window)
     return {
         "preset_names": preset_names,
         "selected_name": selected_name,
+        "window_schema_names": list(probe_vlm_boundary.window_schema_lib.WINDOW_SCHEMA_VALUES),
+        "selected_window_schema": selected_window_schema,
+        "prompt_template_ids": prompt_template_ids,
+        "selected_prompt_template_id": selected_prompt_template_id,
         "choice_tooltips": choice_tooltips,
+        "prompt_template_tooltips": prompt_template_tooltips,
         "description": description,
         "on_choice_changed": lambda value: setattr(window, "manual_vlm_selected_name", str(value).strip() or None),
+        "on_window_schema_changed": (
+            lambda value: setattr(
+                window,
+                "manual_vlm_selected_window_schema",
+                probe_vlm_boundary.window_schema_lib.parse_window_schema(value),
+            )
+        ),
+        "on_prompt_template_changed": (
+            lambda value: setattr(window, "manual_vlm_selected_prompt_template_id", str(value).strip() or None)
+        ),
     }
 
 
@@ -1710,9 +2166,16 @@ def build_manual_vlm_analyze_section(
     *,
     preset_names: Optional[Sequence[str]] = None,
     selected_name: Optional[str] = None,
+    window_schema_names: Optional[Sequence[str]] = None,
+    selected_window_schema: Optional[str] = None,
+    prompt_template_ids: Optional[Sequence[str]] = None,
+    selected_prompt_template_id: Optional[str] = None,
     preset_descriptions: Optional[Mapping[str, Any]] = None,
+    prompt_template_descriptions: Optional[Mapping[str, Any]] = None,
     description: str = "Ephemeral runtime state for manual VLM boundary analysis.",
     on_choice_changed: Optional[Callable[[str], None]] = None,
+    on_window_schema_changed: Optional[Callable[[str], None]] = None,
+    on_prompt_template_changed: Optional[Callable[[str], None]] = None,
     action_locked: bool = False,
     show_spinner: bool = False,
 ) -> Dict[str, Any]:
@@ -1735,6 +2198,8 @@ def build_manual_vlm_analyze_section(
         lines.append(f"Error: {format_value(error_text or resolution_error)}")
         metadata_lines: List[str] = []
         metadata_lines.extend(build_manual_vlm_model_lines(state))
+        metadata_lines.extend(build_manual_vlm_window_lines(state))
+        metadata_lines.extend(build_manual_vlm_prompt_lines(state))
         metadata_lines.extend(build_manual_vlm_retry_lines(state))
         append_info_block(lines, metadata_lines)
     elif status == "result":
@@ -1747,9 +2212,31 @@ def build_manual_vlm_analyze_section(
     normalized_selected_name = str(selected_name or "").strip() or None
     if normalized_selected_name not in normalized_preset_names:
         normalized_selected_name = normalized_preset_names[0] if normalized_preset_names else None
+    normalized_window_schema_names = [
+        probe_vlm_boundary.window_schema_lib.parse_window_schema(name)
+        for name in (window_schema_names or [])
+        if str(name).strip()
+    ]
+    normalized_selected_window_schema = probe_vlm_boundary.window_schema_lib.parse_window_schema(selected_window_schema or "")
+    if normalized_selected_window_schema not in normalized_window_schema_names:
+        normalized_selected_window_schema = (
+            normalized_window_schema_names[0]
+            if normalized_window_schema_names
+            else probe_vlm_boundary.DEFAULT_WINDOW_SCHEMA
+        )
+    normalized_prompt_template_ids = [str(prompt_template_id).strip() for prompt_template_id in (prompt_template_ids or []) if str(prompt_template_id).strip()]
+    normalized_selected_prompt_template_id = str(selected_prompt_template_id or "").strip() or None
+    if normalized_prompt_template_ids and normalized_selected_prompt_template_id not in normalized_prompt_template_ids:
+        normalized_selected_prompt_template_id = normalized_prompt_template_ids[0]
     normalized_choice_tooltips = {
         preset_name: str((preset_descriptions or {}).get(preset_name, "") or "").strip() or preset_name
         for preset_name in normalized_preset_names
+    }
+    normalized_prompt_template_tooltips = {
+        prompt_template_id: (
+            str((prompt_template_descriptions or {}).get(prompt_template_id, "") or "").strip() or prompt_template_id
+        )
+        for prompt_template_id in normalized_prompt_template_ids
     }
     active_action_locked = status == "running" or action_locked
     section = build_info_section(
@@ -1763,9 +2250,23 @@ def build_manual_vlm_analyze_section(
     section["choice_tooltips"] = normalized_choice_tooltips
     section["choice_enabled"] = bool(normalized_preset_names) and not active_action_locked
     section["on_choice_changed"] = on_choice_changed
+    section["secondary_choice_items"] = normalized_window_schema_names
+    section["secondary_choice_value"] = normalized_selected_window_schema
+    section["secondary_choice_enabled"] = bool(normalized_window_schema_names) and not active_action_locked
+    section["on_secondary_choice_changed"] = on_window_schema_changed
+    section["tertiary_choice_items"] = normalized_prompt_template_ids
+    section["tertiary_choice_value"] = normalized_selected_prompt_template_id
+    section["tertiary_choice_tooltips"] = normalized_prompt_template_tooltips
+    section["tertiary_choice_enabled"] = bool(normalized_prompt_template_ids) and not active_action_locked
+    section["on_tertiary_choice_changed"] = on_prompt_template_changed
     section["action_key"] = "run_manual_vlm_analyze"
     section["action_text"] = "Analyze"
-    section["action_enabled"] = bool(normalized_preset_names) and normalized_selected_name is not None and not active_action_locked
+    section["action_enabled"] = (
+        bool(normalized_preset_names)
+        and normalized_selected_name is not None
+        and normalized_selected_prompt_template_id is not None
+        and not active_action_locked
+    )
     section["action_show_spinner"] = show_spinner or status == "running"
     return section
 
@@ -1996,10 +2497,17 @@ def append_manual_runtime_sections(
                 manual_vlm_analyze_state,
                 preset_names=manual_vlm_section_config.get("preset_names"),
                 selected_name=manual_vlm_section_config.get("selected_name"),
+                window_schema_names=manual_vlm_section_config.get("window_schema_names"),
+                selected_window_schema=manual_vlm_section_config.get("selected_window_schema"),
+                prompt_template_ids=manual_vlm_section_config.get("prompt_template_ids"),
+                selected_prompt_template_id=manual_vlm_section_config.get("selected_prompt_template_id"),
                 preset_descriptions=manual_vlm_section_config.get("choice_tooltips"),
+                prompt_template_descriptions=manual_vlm_section_config.get("prompt_template_tooltips"),
                 description=str(manual_vlm_section_config.get("description", "") or "")
                 or "Ephemeral runtime state for manual VLM boundary analysis.",
                 on_choice_changed=manual_vlm_section_config.get("on_choice_changed"),
+                on_window_schema_changed=manual_vlm_section_config.get("on_window_schema_changed"),
+                on_prompt_template_changed=manual_vlm_section_config.get("on_prompt_template_changed"),
                 action_locked=bool(normalized_active_action_key)
                 and normalized_active_action_key != "run_manual_vlm_analyze",
                 show_spinner=normalized_active_action_key == "run_manual_vlm_analyze",
@@ -2575,9 +3083,15 @@ class MainWindow(QMainWindow):
         self.manual_vlm_models: List[Dict[str, Any]] = []
         self.manual_vlm_models_md5: Optional[str] = None
         self.manual_vlm_models_error: Optional[str] = None
+        self.manual_vlm_prompt_templates: List[Dict[str, Any]] = []
+        self.manual_vlm_prompt_templates_md5: Optional[str] = None
+        self.manual_vlm_prompt_templates_error: Optional[str] = None
         self.manual_vlm_status_message: Optional[str] = None
         self.manual_vlm_selected_name: Optional[str] = None
+        self.manual_vlm_selected_window_schema: Optional[str] = None
+        self.manual_vlm_selected_prompt_template_id: Optional[str] = None
         self.reload_manual_vlm_models(startup=True)
+        self.reload_prompt_templates(startup=True)
         self.thread_pool = QThreadPool.globalInstance()
         self.manual_action_running_key: Optional[str] = None
         self.manual_action_workers: Dict[str, QRunnable] = {}
@@ -3773,6 +4287,8 @@ class MainWindow(QMainWindow):
         payload = dict(self.payload)
         selected_snapshot = [dict(photo) for photo in selected_photos]
         selected_manual_vlm_model = dict(manual_vlm_model)
+        selected_window_schema = str(getattr(self, "manual_vlm_selected_window_schema", "") or "").strip() or None
+        selected_prompt_template_id = resolve_manual_vlm_selected_prompt_template_id(self)
 
         def work_fn() -> Mapping[str, Any]:
             try:
@@ -3784,6 +4300,8 @@ class MainWindow(QMainWindow):
                 workspace_dir=workspace_dir,
                 payload=payload,
                 selected_photos=selected_snapshot,
+                selected_window_schema=selected_window_schema,
+                selected_prompt_template_id=selected_prompt_template_id,
                 manual_vlm_model=selected_manual_vlm_model,
             )
             resolution_error = str(resolution_state.get("resolution_error", "") or "").strip()
@@ -3797,6 +4315,7 @@ class MainWindow(QMainWindow):
                 anchor_pair=dict(resolution_state.get("anchor_pair", {}) or {}),
                 window_config=dict(resolution_state.get("window_config", {}) or {}),
                 manual_vlm_model=selected_manual_vlm_model,
+                selected_prompt_template_id=selected_prompt_template_id,
             )
             result_state = dict(resolution_state)
             result_state["status"] = "result"
@@ -3831,6 +4350,15 @@ class MainWindow(QMainWindow):
             model_config = build_manual_vlm_model_config(getattr(error, "model_config", None))
             if model_config:
                 current_state["model_config"] = model_config
+            prompt_template_id = str(getattr(error, "prompt_template_id", "") or "").strip()
+            if prompt_template_id:
+                current_state["prompt_template_id"] = prompt_template_id
+            prompt_template_file = str(getattr(error, "prompt_template_file", "") or "").strip()
+            if prompt_template_file:
+                current_state["prompt_template_file"] = prompt_template_file
+            response_contract_id = str(getattr(error, "response_contract_id", "") or "").strip()
+            if response_contract_id:
+                current_state["response_contract_id"] = response_contract_id
             attempt_count = parse_manual_vlm_attempt_count(getattr(error, "attempt_count", None))
             if attempt_count is not None:
                 current_state["attempt_count"] = attempt_count
@@ -4032,8 +4560,48 @@ class MainWindow(QMainWindow):
             self.refresh_current_info_dock()
             return
         if reloaded:
+            self.set_manual_action_state(
+                "run_manual_vlm_analyze",
+                build_idle_manual_vlm_analyze_state(selected_photos),
+            )
             self.refresh_current_info_dock()
             return
+        if hasattr(self, "manual_vlm_prompt_templates"):
+            prompt_templates, latest_prompt_templates_md5, prompt_templates_error = load_prompt_templates_for_gui(REPO_ROOT)
+            if prompt_templates_error is not None:
+                apply_prompt_templates_reload_error(self, latest_prompt_templates_md5, prompt_templates_error)
+                self.set_manual_action_state(
+                    "run_manual_vlm_analyze",
+                    {"status": "error", "error": self.manual_vlm_prompt_templates_error},
+                )
+                self.refresh_current_info_dock()
+                return
+            prompt_templates_reloaded = refresh_prompt_templates_if_needed(
+                self,
+                latest_prompt_templates_md5 or "",
+            )
+            if getattr(self, "manual_vlm_prompt_templates_error", None):
+                self.set_manual_action_state(
+                    "run_manual_vlm_analyze",
+                    {"status": "error", "error": self.manual_vlm_prompt_templates_error},
+                )
+                self.refresh_current_info_dock()
+                return
+            if prompt_templates_reloaded:
+                self.set_manual_action_state(
+                    "run_manual_vlm_analyze",
+                    build_idle_manual_vlm_analyze_state(selected_photos),
+                )
+                self.refresh_current_info_dock()
+                return
+            if not getattr(self, "manual_vlm_prompt_templates", []):
+                self.manual_vlm_status_message = build_manual_vlm_prompt_templates_unavailable_message()
+                self.set_manual_action_state(
+                    "run_manual_vlm_analyze",
+                    build_idle_manual_vlm_analyze_state(selected_photos),
+                )
+                self.refresh_current_info_dock()
+                return
         try:
             selected_manual_vlm_model = resolve_selected_manual_vlm_model(
                 getattr(self, "manual_vlm_models", []),
@@ -4046,6 +4614,7 @@ class MainWindow(QMainWindow):
             )
             self.refresh_current_info_dock()
             return
+        selected_prompt_template_id = resolve_manual_vlm_selected_prompt_template_id(self)
         next_state = build_idle_manual_vlm_analyze_state(selected_photos)
         next_state["status"] = "running"
         next_state["started_at"] = datetime.now(timezone.utc).astimezone().replace(microsecond=0).isoformat()
@@ -4055,6 +4624,17 @@ class MainWindow(QMainWindow):
         model_config = build_manual_vlm_model_config(selected_manual_vlm_model)
         if model_config:
             next_state["model_config"] = model_config
+        if selected_prompt_template_id:
+            next_state["prompt_template_id"] = selected_prompt_template_id
+            prompt_template_file = resolve_manual_vlm_prompt_template_file(
+                getattr(self, "manual_vlm_prompt_templates", []),
+                selected_prompt_template_id,
+            )
+            if prompt_template_file:
+                next_state["prompt_template_file"] = prompt_template_file
+        response_contract_id = str(getattr(probe_vlm_boundary, "DEFAULT_RESPONSE_CONTRACT_ID", "") or "").strip()
+        if response_contract_id:
+            next_state["response_contract_id"] = response_contract_id
         next_state.pop("error", None)
         next_state.pop("result_text", None)
         next_state.pop("resolution_error", None)
@@ -4138,6 +4718,20 @@ class MainWindow(QMainWindow):
             message=None if startup else "Models reloaded from config.",
         )
 
+    def reload_prompt_templates(self, startup: bool = False) -> None:
+        prompt_templates, md5_hex, error_text = load_prompt_templates_for_gui(REPO_ROOT)
+        if error_text is not None:
+            apply_prompt_templates_reload_error(self, md5_hex, error_text)
+            return
+        fallback_prompt_template_id = resolve_manual_vlm_selected_prompt_template_id(self) if startup else None
+        apply_reloaded_prompt_templates(
+            self,
+            prompt_templates=prompt_templates,
+            md5_hex=md5_hex,
+            message=None if startup else "Prompt templates reloaded from config.",
+            fallback_prompt_template_id=fallback_prompt_template_id,
+        )
+
     def set_view_mode(self, mode: int) -> None:
         if self.view_mode == mode:
             return
@@ -4209,6 +4803,76 @@ class MainWindow(QMainWindow):
             if callable(on_choice_changed):
                 combo.currentTextChanged.connect(on_choice_changed)
             controls_layout.addWidget(combo)
+        secondary_choice_items_value = section.get("secondary_choice_items")
+        normalized_secondary_choice_items = None
+        if secondary_choice_items_value is not None:
+            normalized_secondary_choice_items = [str(item) for item in secondary_choice_items_value]
+        if normalized_secondary_choice_items is not None:
+            secondary_combo = QComboBox(controls_widget)
+            secondary_combo.setObjectName("infoSectionSecondaryChoiceCombo")
+            secondary_combo.addItems(normalized_secondary_choice_items)
+            secondary_choice_tooltips = section.get("secondary_choice_tooltips")
+            normalized_secondary_choice_tooltips = (
+                {str(key): str(value) for key, value in secondary_choice_tooltips.items()}
+                if isinstance(secondary_choice_tooltips, Mapping)
+                else {}
+            )
+            for index, item_text in enumerate(normalized_secondary_choice_items):
+                secondary_combo.setItemData(
+                    index,
+                    normalized_secondary_choice_tooltips.get(item_text, item_text),
+                    Qt.ToolTipRole,
+                )
+            secondary_choice_value = str(section.get("secondary_choice_value", "") or "").strip()
+            if secondary_choice_value in normalized_secondary_choice_items:
+                secondary_combo.setCurrentText(secondary_choice_value)
+            secondary_combo.setToolTip(
+                secondary_combo.currentData(Qt.ToolTipRole) or secondary_combo.currentText()
+            )
+            secondary_combo.currentTextChanged.connect(
+                lambda _value, current_combo=secondary_combo: current_combo.setToolTip(
+                    current_combo.currentData(Qt.ToolTipRole) or current_combo.currentText()
+                )
+            )
+            secondary_combo.setEnabled(bool(section.get("secondary_choice_enabled", True)))
+            on_secondary_choice_changed = section.get("on_secondary_choice_changed")
+            if callable(on_secondary_choice_changed):
+                secondary_combo.currentTextChanged.connect(on_secondary_choice_changed)
+            controls_layout.addWidget(secondary_combo)
+        tertiary_choice_items_value = section.get("tertiary_choice_items")
+        normalized_tertiary_choice_items = None
+        if tertiary_choice_items_value is not None:
+            normalized_tertiary_choice_items = [str(item) for item in tertiary_choice_items_value]
+        if normalized_tertiary_choice_items is not None:
+            tertiary_combo = QComboBox(controls_widget)
+            tertiary_combo.setObjectName("infoSectionTertiaryChoiceCombo")
+            tertiary_combo.addItems(normalized_tertiary_choice_items)
+            tertiary_choice_tooltips = section.get("tertiary_choice_tooltips")
+            normalized_tertiary_choice_tooltips = (
+                {str(key): str(value) for key, value in tertiary_choice_tooltips.items()}
+                if isinstance(tertiary_choice_tooltips, Mapping)
+                else {}
+            )
+            for index, item_text in enumerate(normalized_tertiary_choice_items):
+                tertiary_combo.setItemData(
+                    index,
+                    normalized_tertiary_choice_tooltips.get(item_text, item_text),
+                    Qt.ToolTipRole,
+                )
+            tertiary_choice_value = str(section.get("tertiary_choice_value", "") or "").strip()
+            if tertiary_choice_value in normalized_tertiary_choice_items:
+                tertiary_combo.setCurrentText(tertiary_choice_value)
+            tertiary_combo.setToolTip(tertiary_combo.currentData(Qt.ToolTipRole) or tertiary_combo.currentText())
+            tertiary_combo.currentTextChanged.connect(
+                lambda _value, current_combo=tertiary_combo: current_combo.setToolTip(
+                    current_combo.currentData(Qt.ToolTipRole) or current_combo.currentText()
+                )
+            )
+            tertiary_combo.setEnabled(bool(section.get("tertiary_choice_enabled", True)))
+            on_tertiary_choice_changed = section.get("on_tertiary_choice_changed")
+            if callable(on_tertiary_choice_changed):
+                tertiary_combo.currentTextChanged.connect(on_tertiary_choice_changed)
+            controls_layout.addWidget(tertiary_combo)
         if action_handler is not None:
             if bool(section.get("action_show_spinner", False)):
                 spinner_label = QLabel("⏳")

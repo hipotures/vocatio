@@ -25,6 +25,8 @@ from rich.progress import (
 )
 
 from lib import manual_vlm_models
+from lib import vlm_prompt_templates
+from lib import window_schema as window_schema_lib
 from lib.image_pipeline_contracts import SOURCE_MODE_IMAGE_ONLY_V1
 from lib.ml_boundary_dataset import normalize_timestamp
 from lib.ml_boundary_features import build_candidate_feature_row
@@ -60,6 +62,7 @@ from train_ml_boundary_verifier import (
 
 console = Console()
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 PHOTO_EMBEDDED_MANIFEST_FILENAME = "photo_embedded_manifest.csv"
 PHOTO_MANIFEST_FILENAME = "media_manifest.csv"
 PHOTO_BOUNDARY_SCORES_FILENAME = "photo_boundary_scores.csv"
@@ -76,19 +79,28 @@ DEFAULT_TEMPERATURE = 0.0
 DEFAULT_OLLAMA_THINK = "inherit"
 DEFAULT_RESPONSE_SCHEMA_MODE = "off"
 DEFAULT_JSON_VALIDATION_MODE = "strict"
+DEFAULT_PROMPT_TEMPLATE_ID = "group_compare_long"
+DEFAULT_RESPONSE_CONTRACT_ID = "grouped_v1"
 DEFAULT_PHOTO_PRE_MODEL_DIR = DEFAULT_PHOTO_PRE_MODEL_DIRNAME
 DEFAULT_PROVIDER = "ollama"
 DEFAULT_ML_MODEL_RUN_ID = ""
-VLM_MODELS_CONFIG_PATH = Path(__file__).resolve().parents[2] / "conf" / "vlm_models.yaml"
+DEFAULT_WINDOW_SCHEMA = window_schema_lib.DEFAULT_WINDOW_SCHEMA
+DEFAULT_WINDOW_SCHEMA_SEED = window_schema_lib.DEFAULT_WINDOW_SCHEMA_SEED
+VLM_MODELS_CONFIG_PATH = REPO_ROOT / "conf" / "vlm_models.yaml"
+PROMPT_TEMPLATES_CONFIG_PATH = REPO_ROOT / "conf" / "vlm_prompt_templates.yaml"
 VLM_WORKFLOW_CONFIG_KEYS = frozenset(
     {
         "VLM_EMBEDDED_MANIFEST_CSV",
         "VLM_PHOTO_MANIFEST_CSV",
         "VLM_IMAGE_VARIANT",
         "VLM_WINDOW_RADIUS",
+        "VLM_WINDOW_SCHEMA",
+        "VLM_WINDOW_SCHEMA_SEED",
         "VLM_BOUNDARY_GAP_SECONDS",
         "VLM_MAX_BATCHES",
         "VLM_PHOTO_PRE_MODEL_DIR",
+        "VLM_PROMPT_TEMPLATE_ID",
+        "VLM_PROMPT_TEMPLATE_FILE",
         "VLM_ML_MODEL_RUN_ID",
         "VLM_DUMP_DEBUG_DIR",
     }
@@ -150,6 +162,10 @@ OUTPUT_HEADERS = [
     "delta_from_first_seconds_json",
     "delta_from_previous_seconds_json",
     "decision",
+    "semantic_decision",
+    "semantic_group_a_segment_type",
+    "semantic_group_b_segment_type",
+    "response_contract_id",
     "cut_after_local_index",
     "cut_after_global_row",
     "cut_left_relative_path",
@@ -164,6 +180,8 @@ RESUME_CONFIG_KEYS = (
     "provider",
     "image_variant",
     "window_radius",
+    "window_schema",
+    "window_schema_seed",
     "boundary_gap_seconds",
     "model",
     "ollama_base_url",
@@ -175,6 +193,9 @@ RESUME_CONFIG_KEYS = (
     "ollama_think",
     "response_schema_mode",
     "json_validation_mode",
+    "prompt_template_id",
+    "prompt_template_file",
+    "response_contract_id",
     "photo_pre_model_dir",
     "effective_ml_model_run_id",
     "effective_extra_instructions",
@@ -260,19 +281,13 @@ def _validate_ml_hint_feature_columns_contract(
 
 SYSTEM_PROMPT = (
     "You analyze consecutive stage performance photos. "
-    "Choose at most one boundary between consecutive frames. "
-    "Return only valid JSON with keys decision, frame_notes, primary_evidence, and summary."
+    "Decide whether the candidate gap between group_a and group_b is a real segment boundary. "
+    "Return only valid JSON with keys decision, group_a_segment_type, group_b_segment_type, "
+    "frame_notes, primary_evidence, and summary."
 )
 
 
 def build_system_prompt(response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE) -> str:
-    if response_schema_mode == "on":
-        return (
-            "You analyze consecutive stage performance photos. "
-            "Choose at most one boundary between consecutive frames. "
-            "Return only valid JSON with keys boundary_after_frame, left_segment_type, right_segment_type, "
-            "frame_notes, primary_evidence, and summary."
-        )
     return SYSTEM_PROMPT
 
 
@@ -304,6 +319,13 @@ def non_negative_float_arg(value: str) -> float:
     if parsed < 0.0:
         raise argparse.ArgumentTypeError("must be a non-negative number")
     return parsed
+
+
+def map_ml_segment_label_to_prompt_label(value: str) -> str:
+    normalized = str(value or "").strip()
+    if normalized == "":
+        return "other"
+    return ML_SEGMENT_TYPE_TO_PROMPT_LABEL.get(normalized, normalized)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -349,6 +371,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "Number of photos to include on each side of the main candidate cut. "
             f"Internal window size is 2 * radius. Default: {DEFAULT_WINDOW_RADIUS}"
         ),
+    )
+    parser.add_argument(
+        "--window-schema",
+        choices=window_schema_lib.WINDOW_SCHEMA_VALUES,
+        default=DEFAULT_WINDOW_SCHEMA,
+        help=f"Photo selection schema inside each segment. Default: {DEFAULT_WINDOW_SCHEMA}",
+    )
+    parser.add_argument(
+        "--window-schema-seed",
+        type=int,
+        default=DEFAULT_WINDOW_SCHEMA_SEED,
+        help=f"Deterministic seed for schema-based selection. Default: {DEFAULT_WINDOW_SCHEMA_SEED}",
     )
     parser.add_argument(
         "--boundary-gap-seconds",
@@ -428,6 +462,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         choices=("strict", "relaxed"),
         default=DEFAULT_JSON_VALIDATION_MODE,
         help=f"Parser validation strictness for JSON responses. Default: {DEFAULT_JSON_VALIDATION_MODE}",
+    )
+    parser.add_argument(
+        "--prompt-template-id",
+        default=DEFAULT_PROMPT_TEMPLATE_ID,
+        help=f"Prompt template identifier reserved for grouped prompt variants. Default: {DEFAULT_PROMPT_TEMPLATE_ID}",
+    )
+    parser.add_argument(
+        "--prompt-template-file",
+        default="",
+        help="Optional prompt template file override reserved for grouped prompt variants.",
     )
     parser.add_argument(
         "--photo-pre-model-dir",
@@ -617,6 +661,12 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
             if configured:
                 setattr(args, attr, parser(configured))
 
+    def apply_window_schema(attr: str, default_value: str, config_key: str) -> None:
+        if _arg_is_inheritable(args, cli_provided, attr, default_value):
+            configured = str(config.get(config_key, "") or "").strip()
+            if configured:
+                setattr(args, attr, window_schema_lib.parse_window_schema(configured))
+
     if _needs_vlm_preset_resolution(args, config):
         preset_config = _resolve_vlm_preset_config(config)
         apply_preset_string("provider", DEFAULT_PROVIDER, preset_config["VLM_PROVIDER"])
@@ -644,6 +694,8 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
     apply_string("photo_manifest_csv", PHOTO_MANIFEST_FILENAME, "VLM_PHOTO_MANIFEST_CSV")
     apply_string("image_variant", DEFAULT_IMAGE_VARIANT, "VLM_IMAGE_VARIANT")
     apply_int("window_radius", DEFAULT_WINDOW_RADIUS, "VLM_WINDOW_RADIUS", positive_window_radius_arg)
+    apply_window_schema("window_schema", DEFAULT_WINDOW_SCHEMA, "VLM_WINDOW_SCHEMA")
+    apply_int("window_schema_seed", DEFAULT_WINDOW_SCHEMA_SEED, "VLM_WINDOW_SCHEMA_SEED", int)
     apply_int(
         "boundary_gap_seconds",
         DEFAULT_BOUNDARY_GAP_SECONDS,
@@ -651,6 +703,8 @@ def apply_vocatio_defaults(args: argparse.Namespace, day_dir: Path) -> argparse.
         non_negative_int_arg,
     )
     apply_int("max_batches", DEFAULT_MAX_BATCHES, "VLM_MAX_BATCHES", max_batches_arg)
+    apply_string("prompt_template_id", DEFAULT_PROMPT_TEMPLATE_ID, "VLM_PROMPT_TEMPLATE_ID")
+    apply_string("prompt_template_file", "", "VLM_PROMPT_TEMPLATE_FILE")
     apply_string("photo_pre_model_dir", DEFAULT_PHOTO_PRE_MODEL_DIR, "VLM_PHOTO_PRE_MODEL_DIR")
     apply_string("ml_model_run_id", DEFAULT_ML_MODEL_RUN_ID, "VLM_ML_MODEL_RUN_ID")
     if args.dump_debug_dir is None:
@@ -710,6 +764,32 @@ def read_joined_rows(
         raise ValueError(f"{embedded_manifest_csv.name} contains no rows")
     return joined_rows
 
+
+def segment_bounds_for_cut_index(
+    rows: Sequence[Mapping[str, str]],
+    *,
+    cut_index: int,
+    boundary_gap_seconds: int,
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    if cut_index < 0 or cut_index >= len(rows) - 1:
+        raise ValueError("cut_index must reference a boundary between consecutive rows")
+    left_start = 0
+    for index in range(cut_index - 1, -1, -1):
+        left_epoch_ms = int(str(rows[index]["start_epoch_ms"]))
+        right_epoch_ms = int(str(rows[index + 1]["start_epoch_ms"]))
+        if rounded_seconds(right_epoch_ms - left_epoch_ms) >= boundary_gap_seconds:
+            left_start = index + 1
+            break
+    right_end = len(rows)
+    for index in range(cut_index + 1, len(rows) - 1):
+        left_epoch_ms = int(str(rows[index]["start_epoch_ms"]))
+        right_epoch_ms = int(str(rows[index + 1]["start_epoch_ms"]))
+        if rounded_seconds(right_epoch_ms - left_epoch_ms) >= boundary_gap_seconds:
+            right_end = index + 1
+            break
+    return (left_start, cut_index + 1), (cut_index + 1, right_end)
+
+
 def build_candidate_windows(
     rows: Sequence[Mapping[str, str]],
     window_radius: int,
@@ -751,6 +831,37 @@ def build_candidate_window_start_indexes(
             boundary_gap_seconds=boundary_gap_seconds,
         )
     ]
+
+
+def build_window_rows_for_cut_index(
+    *,
+    joined_rows: Sequence[Mapping[str, str]],
+    cut_index: int,
+    window_radius: int,
+    window_schema: str,
+    window_schema_seed: int,
+    boundary_gap_seconds: int,
+) -> tuple[list[Mapping[str, str]], int]:
+    left_bounds, right_bounds = segment_bounds_for_cut_index(
+        joined_rows,
+        cut_index=cut_index,
+        boundary_gap_seconds=boundary_gap_seconds,
+    )
+    left_rows = window_schema_lib.select_segment_rows(
+        joined_rows[left_bounds[0] : left_bounds[1]],
+        radius=window_radius,
+        schema=window_schema,
+        gap_side="left",
+        schema_seed=window_schema_seed,
+    )
+    right_rows = window_schema_lib.select_segment_rows(
+        joined_rows[right_bounds[0] : right_bounds[1]],
+        radius=window_radius,
+        schema=window_schema,
+        gap_side="right",
+        schema_seed=window_schema_seed,
+    )
+    return [*left_rows, *right_rows], len(left_rows)
 
 
 def build_manual_vlm_window_rows(
@@ -1213,14 +1324,8 @@ def build_ml_hint_lines(
     if prediction is None:
         return ["ML hints are unavailable for this window."]
     boundary_label = "cut" if prediction.boundary_prediction else "no cut"
-    left_segment_label = ML_SEGMENT_TYPE_TO_PROMPT_LABEL.get(
-        prediction.left_segment_type_prediction,
-        prediction.left_segment_type_prediction,
-    )
-    right_segment_label = ML_SEGMENT_TYPE_TO_PROMPT_LABEL.get(
-        prediction.right_segment_type_prediction,
-        prediction.right_segment_type_prediction,
-    )
+    left_segment_label = map_ml_segment_label_to_prompt_label(prediction.left_segment_type_prediction)
+    right_segment_label = map_ml_segment_label_to_prompt_label(prediction.right_segment_type_prediction)
     return [
         f"ML hint for the main candidate gap in this window: likely {boundary_label} (confidence {prediction.boundary_confidence:.2f}).",
         f"ML hint for the left side of the candidate gap: likely {left_segment_label} (confidence {prediction.left_segment_type_confidence:.2f}).",
@@ -1300,33 +1405,59 @@ def build_valid_decisions(window_size: int) -> tuple[str, ...]:
     return tuple(["no_cut"] + [f"cut_after_{index}" for index in range(1, window_size)])
 
 
-def build_boundary_after_frame_values(window_size: int) -> List[Optional[str]]:
-    return [None] + [f"frame_{index:02d}" for index in range(1, window_size)]
+def build_group_frame_ids(window_size: int, group_a_count: Optional[int] = None) -> tuple[List[str], List[str]]:
+    if window_size < 1:
+        raise ValueError("window_size must be at least 1")
+    frame_ids = [f"frame_{index:02d}" for index in range(1, window_size + 1)]
+    resolved_group_a_count = max(1, window_size // 2) if group_a_count is None else int(group_a_count)
+    if resolved_group_a_count < 1 or resolved_group_a_count > window_size:
+        raise ValueError("group_a_count must be between 1 and window_size")
+    return frame_ids[:resolved_group_a_count], frame_ids[resolved_group_a_count:]
 
 
-def build_response_schema(window_size: int) -> Dict[str, Any]:
-    frame_properties = {f"frame_{index:02d}": {"type": "string"} for index in range(1, window_size + 1)}
+def build_response_schema(*, group_a_ids: Sequence[str], group_b_ids: Sequence[str]) -> Dict[str, Any]:
+    frame_note_variants = [
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "frame_id": {"type": "string", "enum": [frame_id]},
+                "group": {"type": "string", "enum": [group_name]},
+                "note": {"type": "string"},
+            },
+            "required": ["frame_id", "group", "note"],
+        }
+        for frame_id, group_name in (
+            [(frame_id, "group_a") for frame_id in group_a_ids]
+            + [(frame_id, "group_b") for frame_id in group_b_ids]
+        )
+    ]
     return {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "boundary_after_frame": {
-                "type": ["string", "null"],
-                "enum": build_boundary_after_frame_values(window_size),
-            },
-            "left_segment_type": {
+            "decision": {"type": "string", "enum": ["same_segment", "different_segments"]},
+            "group_a_segment_type": {
                 "type": "string",
                 "enum": list(SEGMENT_TYPES),
             },
-            "right_segment_type": {
+            "group_b_segment_type": {
                 "type": "string",
                 "enum": list(SEGMENT_TYPES),
             },
             "frame_notes": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": frame_properties,
-                "required": list(frame_properties.keys()),
+                "type": "array",
+                "items": {"oneOf": frame_note_variants},
+                "minItems": len(group_a_ids) + len(group_b_ids),
+                "maxItems": len(group_a_ids) + len(group_b_ids),
+                "allOf": [
+                    {
+                        "contains": frame_note_variant,
+                        "minContains": 1,
+                        "maxContains": 1,
+                    }
+                    for frame_note_variant in frame_note_variants
+                ],
             },
             "primary_evidence": {
                 "type": "array",
@@ -1337,9 +1468,9 @@ def build_response_schema(window_size: int) -> Dict[str, Any]:
             "summary": {"type": "string"},
         },
         "required": [
-            "boundary_after_frame",
-            "left_segment_type",
-            "right_segment_type",
+            "decision",
+            "group_a_segment_type",
+            "group_b_segment_type",
             "frame_notes",
             "primary_evidence",
             "summary",
@@ -1352,27 +1483,55 @@ def build_user_prompt(
     ml_hint_lines: Sequence[str],
     extra_instructions: str = "",
     response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
+    window_schema: str = DEFAULT_WINDOW_SCHEMA,
+    group_a_count: Optional[int] = None,
 ) -> str:
-    frames_block = "\n".join([f"frame_{index:02d} = attached image {index}" for index in range(1, window_size + 1)])
+    group_a_ids, group_b_ids = build_group_frame_ids(window_size, group_a_count=group_a_count)
+    ordered_frame_ids = [*group_a_ids, *group_b_ids]
+    frames_block = "\n".join(
+        [f"{frame_id} = attached image {index}" for index, frame_id in enumerate(ordered_frame_ids, start=1)]
+    )
     hints_block = "\n".join(ml_hint_lines) if ml_hint_lines else "ML hints are unavailable for this window."
-    if response_schema_mode == "on":
-        decisions_block = "\n".join([f'- {value!r}' if value is not None else "- null" for value in build_boundary_after_frame_values(window_size)])
-        response_header = "Allowed boundary_after_frame values:\n"
-        response_rules = (
-            '- Use null if there is no boundary in the window.\n'
-            '- Use "frame_NN" only if the boundary is between frame_NN and the next frame.\n'
+    normalized_window_schema = window_schema_lib.parse_window_schema(window_schema)
+    if normalized_window_schema == "consecutive":
+        window_selection_block = (
+            f"You will receive {window_size} consecutive stage-event photos.\n\n"
+            "Important:\n"
+            "The frames are consecutive photos from one chronological sequence.\n"
+            "They are not random examples.\n"
         )
-        response_schema_hint = f'<one of: {", ".join(["null"] + [f"frame_{index:02d}" for index in range(1, window_size)])}>'
+    else:
+        window_selection_block = (
+            f"You will receive {window_size} stage-event photos in chronological order.\n\n"
+            "Important:\n"
+            "The frames are shown in chronological order from left to right.\n"
+            "The frames come from the left and right segments around one candidate gap.\n"
+            "They do not have to be consecutive photos.\n"
+        )
+    if response_schema_mode == "on":
+        decisions_block = '\n'.join(['- "same_segment"', '- "different_segments"'])
+        response_header = "Allowed decision values:\n"
+        response_rules = (
+            '- Use "same_segment" if group_a and group_b most likely belong to the same segment.\n'
+            '- Use "different_segments" only if group_a and group_b most likely belong to different segments.\n'
+        )
         response_object = (
             '{\n'
-            f'  "boundary_after_frame": "{response_schema_hint}",\n'
-            f'  "left_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
-            f'  "right_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
-            '  "frame_notes": {\n'
+            '  "decision": "<one of: same_segment, different_segments>",\n'
+            f'  "group_a_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
+            f'  "group_b_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
+            '  "frame_notes": [\n'
             + ",\n".join(
-                [f'    "frame_{index:02d}": "<short note>"' for index in range(1, window_size + 1)]
+                [
+                    f'    {{"frame_id":"{frame_id}","group":"group_a","note":"<short note>"}}'
+                    for frame_id in group_a_ids
+                ]
+                + [
+                    f'    {{"frame_id":"{frame_id}","group":"group_b","note":"<short note>"}}'
+                    for frame_id in group_b_ids
+                ]
             )
-            + '\n  },\n'
+            + '\n  ],\n'
             '  "primary_evidence": [\n'
             '    "<short evidence item>",\n'
             '    "<short evidence item>"\n'
@@ -1381,21 +1540,30 @@ def build_user_prompt(
             '}'
         )
     else:
-        decisions_block = "\n".join([f'- "{decision}"' for decision in build_valid_decisions(window_size)])
+        decisions_block = '\n'.join(['- "same_segment"', '- "different_segments"'])
         response_header = "Allowed decisions:\n"
         response_rules = (
-            f'- Choose "no_cut" if all {window_size} frames most likely belong to the same segment.\n'
-            '- If there is no clear evidence for a boundary, choose "no_cut".\n'
-            f'- Choose "cut_after_N" only if frames 1..N and frames N+1..{window_size} most likely belong to different segments.\n'
+            '- Choose "same_segment" if group_a and group_b most likely belong to the same segment.\n'
+            '- If there is no clear evidence for a boundary, choose "same_segment".\n'
+            '- Choose "different_segments" only if the left group and right group most likely belong to different segments.\n'
         )
         response_object = (
             '{\n'
-            f'  "decision": "<one of: {", ".join(build_valid_decisions(window_size))}>",\n'
-            '  "frame_notes": {\n'
+            '  "decision": "<one of: same_segment, different_segments>",\n'
+            f'  "group_a_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
+            f'  "group_b_segment_type": "<one of: {"|".join(SEGMENT_TYPES)}>",\n'
+            '  "frame_notes": [\n'
             + ",\n".join(
-                [f'    "frame_{index:02d}": "<short note>"' for index in range(1, window_size + 1)]
+                [
+                    f'    {{"frame_id":"{frame_id}","group":"group_a","note":"<short note>"}}'
+                    for frame_id in group_a_ids
+                ]
+                + [
+                    f'    {{"frame_id":"{frame_id}","group":"group_b","note":"<short note>"}}'
+                    for frame_id in group_b_ids
+                ]
             )
-            + '\n  },\n'
+            + '\n  ],\n'
             '  "primary_evidence": [\n'
             '    "<short evidence item>",\n'
             '    "<short evidence item>"\n'
@@ -1404,12 +1572,9 @@ def build_user_prompt(
             '}'
         )
     prompt = (
-        f"You will receive {window_size} consecutive stage-event photos.\n\n"
+        f"{window_selection_block}"
         "Order:\n"
         f"{frames_block}\n\n"
-        "Important:\n"
-        "The frames are consecutive photos from one chronological sequence.\n"
-        "They are not random examples.\n"
         "Reason about continuity from left to right:\n"
         f"frame_01 -> frame_02 -> ... -> frame_{window_size:02d}\n\n"
         "Task:\n"
@@ -1426,8 +1591,8 @@ def build_user_prompt(
         "- audience = viewers, crowd, or audience-facing non-performance shots\n"
         "- rehearsal = floor test, stage test, or non-performance rehearsal\n"
         "- other = does not clearly fit the categories above\n\n"
-        "Create a boundary only if at least one positive boundary condition below is clearly true.\n"
-        "If none of the positive boundary conditions is clearly true, return null.\n\n"
+        'Return "different_segments" only if at least one positive boundary condition below is clearly true.\n'
+        'If none of the positive boundary conditions is clearly true, return "same_segment".\n\n'
         "Positive boundary conditions:\n"
         "- the person on the left and the person on the right are not the same dancer\n"
         "- the dancers on the left and the dancers on the right do not belong to the same group\n"
@@ -1457,7 +1622,7 @@ def build_user_prompt(
         "- Single dancer -> wider group view can still be the same segment.\n"
         "- If costume identity and act identity still match, do not create a boundary only because fewer or more dancers are visible.\n"
         "- Ignore background differences if they can be explained by camera direction, framing, crop, zoom, or a different shooting angle on the same stage.\n\n"
-        "If the change is only a new pose, new movement phrase, or another choreography moment within the same act, you must return null.\n\n"
+        'If the change is only a new pose, new movement phrase, or another choreography moment within the same act, you must return "same_segment".\n\n'
         "Decision priority:\n"
         "1. images\n"
         "2. ML hints\n\n"
@@ -1468,12 +1633,13 @@ def build_user_prompt(
         f"{decisions_block}\n\n"
         "Rules:\n"
         f"{response_rules}"
-        f"- If more than one real boundary appears inside the {window_size}-frame window, choose the single strongest and clearest boundary.\n"
-        f"- Always assign left_segment_type and right_segment_type using only these values: {'|'.join(SEGMENT_TYPES)}.\n"
+        "- Always assign group_a_segment_type and group_b_segment_type using only these values: "
+        f"{'|'.join(SEGMENT_TYPES)}.\n"
         "- Background change and lighting change, whether alone or together, never justify a boundary.\n"
         "- Background change and lighting change, whether alone or together, never justify a segment-type change.\n"
+        "- Include every frame_id exactly once in frame_notes.\n"
         "- Keep frame notes short and concrete.\n"
-        '- If there is no boundary, primary_evidence should describe continuity evidence.\n'
+        '- If the answer is "same_segment", primary_evidence should describe continuity evidence.\n'
         "- Output only valid JSON.\n"
         "- Do not output markdown.\n"
         "- Do not output any text before or after JSON.\n\n"
@@ -1576,13 +1742,13 @@ def extract_segment_types(raw_response: str) -> tuple[str, str]:
         payload = json.loads(extract_json_object_text(raw_response))
     except Exception:
         return "", ""
-    left_segment_type = str(payload.get("left_segment_type", "") or "").strip()
-    right_segment_type = str(payload.get("right_segment_type", "") or "").strip()
-    if left_segment_type not in SEGMENT_TYPES:
-        left_segment_type = ""
-    if right_segment_type not in SEGMENT_TYPES:
-        right_segment_type = ""
-    return left_segment_type, right_segment_type
+    group_a_segment_type = str(payload.get("group_a_segment_type", "") or "").strip()
+    group_b_segment_type = str(payload.get("group_b_segment_type", "") or "").strip()
+    if group_a_segment_type not in SEGMENT_TYPES:
+        group_a_segment_type = ""
+    if group_b_segment_type not in SEGMENT_TYPES:
+        group_b_segment_type = ""
+    return group_a_segment_type, group_b_segment_type
 
 
 def choose_segment_type(candidates: Sequence[str]) -> str:
@@ -1602,101 +1768,97 @@ def segment_type_to_code(segment_type: str) -> str:
     return GUI_TYPE_CODE_BY_SEGMENT_TYPE.get(segment_type.strip().lower(), "?")
 
 
+def invalid_response(reason: str) -> Dict[str, str]:
+    return {
+        "decision": "invalid_response",
+        "reason": reason,
+        "response_status": "invalid_response",
+    }
+
+
 def parse_model_response(
     raw_response: str,
     *,
-    window_size: int,
+    group_a_ids: Sequence[str],
+    group_b_ids: Sequence[str],
+    response_contract_id: str,
     json_validation_mode: str = DEFAULT_JSON_VALIDATION_MODE,
 ) -> Dict[str, str]:
-    valid_decisions = build_valid_decisions(window_size)
+    if response_contract_id != DEFAULT_RESPONSE_CONTRACT_ID:
+        raise ValueError(f"unsupported response_contract_id: {response_contract_id}")
     try:
         payload = json.loads(extract_json_object_text(raw_response))
     except Exception as error:
-        return {
-            "decision": "invalid_response",
-            "reason": f"JSON parse error: {error}",
-            "response_status": "invalid_response",
-        }
-    boundary_after_frame = payload.get("boundary_after_frame", "__missing__")
-    if boundary_after_frame != "__missing__":
-        if boundary_after_frame is None:
-            decision = "no_cut"
-        else:
-            boundary_text = str(boundary_after_frame).strip()
-            if boundary_text.lower() == "null":
-                boundary_text = ""
-            valid_frames = {f"frame_{index:02d}": f"cut_after_{index}" for index in range(1, window_size)}
-            decision = "no_cut" if not boundary_text else valid_frames.get(boundary_text, "")
-    else:
-        decision = str(payload.get("decision", "") or "").strip()
-    if decision not in valid_decisions:
-        return {
-            "decision": "invalid_response",
-            "reason": f"Invalid decision value: {decision}",
-            "response_status": "invalid_response",
-        }
-    left_segment_type = str(payload.get("left_segment_type", "") or "").strip()
-    right_segment_type = str(payload.get("right_segment_type", "") or "").strip()
-    if boundary_after_frame != "__missing__":
-        if json_validation_mode == "strict" and (
-            left_segment_type not in SEGMENT_TYPES or right_segment_type not in SEGMENT_TYPES
-        ):
-            return {
-                "decision": "invalid_response",
-                "reason": "Missing or invalid segment type value",
-                "response_status": "invalid_response",
-            }
+        return invalid_response(f"JSON parse error: {error}")
+    decision = str(payload.get("decision", "") or "").strip()
+    if decision not in {"same_segment", "different_segments"}:
+        return invalid_response(f"Invalid decision value: {decision}")
+    group_a_segment_type = str(payload.get("group_a_segment_type", "") or "").strip()
+    group_b_segment_type = str(payload.get("group_b_segment_type", "") or "").strip()
+    if json_validation_mode == "strict" and (
+        group_a_segment_type not in SEGMENT_TYPES or group_b_segment_type not in SEGMENT_TYPES
+    ):
+        return invalid_response("Missing or invalid group segment type value")
+    if group_a_segment_type not in SEGMENT_TYPES:
+        group_a_segment_type = ""
+    if group_b_segment_type not in SEGMENT_TYPES:
+        group_b_segment_type = ""
     frame_notes = payload.get("frame_notes")
-    if not isinstance(frame_notes, Mapping):
-        return {
-            "decision": "invalid_response",
-            "reason": "Missing frame_notes object",
-            "response_status": "invalid_response",
-        }
-    expected_keys = [f"frame_{index:02d}" for index in range(1, window_size + 1)]
+    if not isinstance(frame_notes, list):
+        return invalid_response("Missing frame_notes array")
+    expected_frame_groups = {frame_id: "group_a" for frame_id in group_a_ids}
+    expected_frame_groups.update({frame_id: "group_b" for frame_id in group_b_ids})
+    ordered_frame_ids = [*group_a_ids, *group_b_ids]
+    seen_frame_ids: set[str] = set()
     normalized_frame_notes: List[str] = []
-    for key in expected_keys:
-        value = str(frame_notes.get(key, "") or "").strip()
-        if not value:
-            return {
-                "decision": "invalid_response",
-                "reason": f"Missing frame_notes value for {key}",
-                "response_status": "invalid_response",
-            }
-        normalized_frame_notes.append(f"{key}={value}")
+    for note_item in frame_notes:
+        if not isinstance(note_item, Mapping):
+            return invalid_response("Invalid frame_notes item")
+        frame_id = str(note_item.get("frame_id", "") or "").strip()
+        if not frame_id:
+            return invalid_response("Missing frame_id value in frame_notes")
+        if frame_id not in expected_frame_groups:
+            return invalid_response(f"Invalid frame_id value: {frame_id}")
+        if frame_id in seen_frame_ids:
+            return invalid_response(f"duplicate frame_id: {frame_id}")
+        group = str(note_item.get("group", "") or "").strip()
+        expected_group = expected_frame_groups[frame_id]
+        if group != expected_group:
+            return invalid_response(f"Invalid group for {frame_id}: expected {expected_group}, got {group}")
+        note = str(note_item.get("note", "") or "").strip()
+        if not note:
+            return invalid_response(f"Missing frame_notes value for {frame_id}")
+        seen_frame_ids.add(frame_id)
+        normalized_frame_notes.append(f"{frame_id}({group})={note}")
+    for frame_id in ordered_frame_ids:
+        if frame_id not in seen_frame_ids:
+            return invalid_response(f"Missing frame_notes value for {frame_id}")
     primary_evidence = payload.get("primary_evidence")
     if not isinstance(primary_evidence, list):
-        return {
-            "decision": "invalid_response",
-            "reason": "Missing primary_evidence list",
-            "response_status": "invalid_response",
-        }
+        return invalid_response("Missing primary_evidence list")
     normalized_evidence = [str(item).strip() for item in primary_evidence if str(item).strip()]
     if not normalized_evidence:
-        return {
-            "decision": "invalid_response",
-            "reason": "Missing primary_evidence values",
-            "response_status": "invalid_response",
-        }
+        return invalid_response("Missing primary_evidence values")
     summary = str(payload.get("summary", "") or "").strip()
     if not summary:
-        return {
-            "decision": "invalid_response",
-            "reason": "Missing summary value",
-            "response_status": "invalid_response",
-        }
-    segment_type_reason = ""
-    if boundary_after_frame != "__missing__" and left_segment_type in SEGMENT_TYPES and right_segment_type in SEGMENT_TYPES:
-        segment_type_reason = (
-            f"Left segment type: {left_segment_type} | Right segment type: {right_segment_type} | "
-        )
+        return invalid_response("Missing summary value")
     reason = (
-        f"{segment_type_reason}"
+        f"Group A segment type: {group_a_segment_type or '?'} | "
+        f"Group B segment type: {group_b_segment_type or '?'} | "
         f"Frame notes: {'; '.join(normalized_frame_notes)} | "
         f"Primary evidence: {'; '.join(normalized_evidence)} | "
         f"Summary: {summary}"
     )
-    return {"decision": decision, "reason": reason, "response_status": "ok"}
+    compatibility_decision = "no_cut" if decision == "same_segment" else f"cut_after_{len(group_a_ids)}"
+    return {
+        "decision": compatibility_decision,
+        "semantic_decision": decision,
+        "semantic_group_a_segment_type": group_a_segment_type,
+        "semantic_group_b_segment_type": group_b_segment_type,
+        "response_contract_id": response_contract_id,
+        "reason": reason,
+        "response_status": "ok",
+    }
 
 
 def build_result_row(
@@ -1714,18 +1876,30 @@ def build_result_row(
     parsed_response: Mapping[str, str],
     model: str = DEFAULT_MODEL_NAME,
     temperature: float = DEFAULT_TEMPERATURE,
+    global_row_numbers: Optional[Sequence[int]] = None,
+    candidate_cut_relative_paths: Optional[tuple[str, str]] = None,
+    candidate_cut_global_row: Optional[int] = None,
 ) -> Dict[str, str]:
     decision = str(parsed_response["decision"])
     cut_after_local_index = ""
     cut_after_global_row = ""
     cut_left_relative_path = ""
     cut_right_relative_path = ""
+    resolved_global_row_numbers = list(global_row_numbers) if global_row_numbers is not None else list(
+        range(start_row, start_row + len(rows))
+    )
     if decision.startswith("cut_after_"):
         cut_after_local_index = decision.removeprefix("cut_after_")
         local_index = int(cut_after_local_index)
-        cut_after_global_row = str(start_row + local_index - 1)
-        cut_left_relative_path = str(rows[local_index - 1]["relative_path"])
-        cut_right_relative_path = str(rows[local_index]["relative_path"])
+        response_contract_id = str(parsed_response.get("response_contract_id", "") or "").strip()
+        if response_contract_id == DEFAULT_RESPONSE_CONTRACT_ID and candidate_cut_relative_paths is not None:
+            cut_after_global_row = str(candidate_cut_global_row or "")
+            cut_left_relative_path = str(candidate_cut_relative_paths[0])
+            cut_right_relative_path = str(candidate_cut_relative_paths[1])
+        else:
+            cut_after_global_row = str(resolved_global_row_numbers[local_index - 1])
+            cut_left_relative_path = str(rows[local_index - 1]["relative_path"])
+            cut_right_relative_path = str(rows[local_index]["relative_path"])
     first_epoch_ms = int(str(rows[0]["start_epoch_ms"]))
     previous_epoch_ms = first_epoch_ms
     delta_from_first_seconds: List[int] = []
@@ -1752,6 +1926,10 @@ def build_result_row(
         "delta_from_first_seconds_json": json.dumps(delta_from_first_seconds, ensure_ascii=True),
         "delta_from_previous_seconds_json": json.dumps(delta_from_previous_seconds, ensure_ascii=True),
         "decision": decision,
+        "semantic_decision": str(parsed_response.get("semantic_decision", "")),
+        "semantic_group_a_segment_type": str(parsed_response.get("semantic_group_a_segment_type", "")),
+        "semantic_group_b_segment_type": str(parsed_response.get("semantic_group_b_segment_type", "")),
+        "response_contract_id": str(parsed_response.get("response_contract_id", DEFAULT_RESPONSE_CONTRACT_ID)),
         "cut_after_local_index": cut_after_local_index,
         "cut_after_global_row": cut_after_global_row,
         "cut_left_relative_path": cut_left_relative_path,
@@ -1795,21 +1973,77 @@ def build_config_hash(args_payload: Mapping[str, Any]) -> str:
     return hashlib.md5(encoded.encode("utf-8")).hexdigest()
 
 
-def build_user_prompt_template(
-    window_size: int,
-    extra_instructions: str = "",
-    response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
-) -> str:
-    ml_hint_lines = [
+def build_example_ml_hint_lines() -> list[str]:
+    return [
         "ML hint for the main candidate gap in this window: likely cut (confidence 0.82).",
         "ML hint for the left side of the candidate gap: likely dance (confidence 0.74).",
         "ML hint for the right side of the candidate gap: likely ceremony (confidence 0.73).",
     ]
+
+
+def build_runtime_group_ids(group_a_count: int, group_b_count: int) -> tuple[list[str], list[str]]:
+    return (
+        [f"a_{index:02d}" for index in range(1, group_a_count + 1)],
+        [f"b_{index:02d}" for index in range(1, group_b_count + 1)],
+    )
+
+
+def resolve_prompt_template_path(
+    prompt_template_id: str = DEFAULT_PROMPT_TEMPLATE_ID,
+    prompt_template_file: str = "",
+) -> Path:
+    normalized_template_file = str(prompt_template_file or "").strip()
+    if normalized_template_file:
+        template_path = Path(normalized_template_file).expanduser()
+        return template_path if template_path.is_absolute() else (REPO_ROOT / template_path).resolve()
+    normalized_template_id = str(prompt_template_id or "").strip() or DEFAULT_PROMPT_TEMPLATE_ID
+    templates_config = vlm_prompt_templates.load_prompt_templates_config(PROMPT_TEMPLATES_CONFIG_PATH)
+    for template_entry in templates_config.templates:
+        if template_entry.id == normalized_template_id:
+            return (REPO_ROOT / template_entry.file).resolve()
+    raise ValueError(f"Unknown prompt_template_id: {normalized_template_id}")
+
+
+def render_runtime_user_prompt(
+    *,
+    prompt_template_id: str = DEFAULT_PROMPT_TEMPLATE_ID,
+    prompt_template_file: str = "",
+    group_a_ids: Sequence[str],
+    group_b_ids: Sequence[str],
+    ml_hint_lines: Sequence[str],
+    extra_instructions: str = "",
+) -> tuple[str, Path]:
+    template_path = resolve_prompt_template_path(
+        prompt_template_id=prompt_template_id,
+        prompt_template_file=prompt_template_file,
+    )
+    prompt = vlm_prompt_templates.render_prompt_template(
+        template_text=template_path.read_text(encoding="utf-8"),
+        group_a_ids=list(group_a_ids),
+        group_b_ids=list(group_b_ids),
+        ml_hint_lines=list(ml_hint_lines),
+    )
+    normalized_extra_instructions = str(extra_instructions or "").strip()
+    if normalized_extra_instructions:
+        prompt = f"{prompt}\n\nAdditional instructions:\n{normalized_extra_instructions}"
+    return prompt, template_path
+
+
+def build_user_prompt_template(
+    window_size: int,
+    extra_instructions: str = "",
+    response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
+    window_schema: str = DEFAULT_WINDOW_SCHEMA,
+    group_a_count: Optional[int] = None,
+) -> str:
+    ml_hint_lines = build_example_ml_hint_lines()
     return build_user_prompt(
         window_size=window_size,
         ml_hint_lines=ml_hint_lines,
         extra_instructions=extra_instructions,
         response_schema_mode=response_schema_mode,
+        window_schema=window_schema,
+        group_a_count=group_a_count,
     )
 
 
@@ -1824,12 +2058,17 @@ def write_run_metadata(
     output_csv: Path,
     args_payload: Mapping[str, Any],
     system_prompt: str,
-    user_prompt_template: str,
+    rendered_user_prompt: str,
     response_schema: Optional[Mapping[str, Any]],
+    response_contract_id: str,
+    prompt_template_file: Optional[str] = None,
 ) -> Dict[str, Any]:
     runs_dir = workspace_dir / RUN_METADATA_DIRNAME
     runs_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = runs_dir / f"{run_id}.json"
+    prompt_template_id = str(args_payload.get("prompt_template_id", "") or "").strip() or DEFAULT_PROMPT_TEMPLATE_ID
+    resolved_args_payload = dict(args_payload)
+    resolved_args_payload["prompt_template_id"] = prompt_template_id
     metadata = {
         "run_id": run_id,
         "generated_at": generated_at,
@@ -1838,9 +2077,16 @@ def write_run_metadata(
         "photo_manifest_csv": str(photo_manifest_csv),
         "output_csv": str(output_csv),
         "system_prompt": system_prompt,
-        "user_prompt_template": user_prompt_template,
+        "prompt_template_id": prompt_template_id,
+        "prompt_template_file": (
+            str(prompt_template_file).strip()
+            if prompt_template_file is not None
+            else str(args_payload.get("prompt_template_file", "") or "").strip()
+        ),
+        "rendered_user_prompt": rendered_user_prompt,
         "response_schema": dict(response_schema) if response_schema is not None else None,
-        "args": dict(args_payload),
+        "response_contract_id": response_contract_id,
+        "args": resolved_args_payload,
     }
     atomic_write_json(metadata_path, metadata)
     return metadata
@@ -1873,7 +2119,14 @@ def dump_debug_artifacts(
     request_payload: Mapping[str, Any],
     response_payload: Optional[Mapping[str, Any]],
     error_text: Optional[str],
+    photo_sheet_items: Optional[Sequence[Mapping[str, str]]] = None,
 ) -> None:
+    try:
+        from PIL import Image, ImageDraw, ImageOps
+    except Exception:
+        Image = None
+        ImageDraw = None
+        ImageOps = None
     debug_dir.mkdir(parents=True, exist_ok=True)
     stem = f"vlm_probe_{run_id}_batch_{batch_index:03d}"
     (debug_dir / f"{stem}_prompt.txt").write_text(prompt, encoding="utf-8")
@@ -1888,6 +2141,51 @@ def dump_debug_artifacts(
         )
     if error_text is not None:
         (debug_dir / f"{stem}_error.txt").write_text(error_text, encoding="utf-8")
+    if photo_sheet_items and Image is not None and ImageDraw is not None and ImageOps is not None:
+        thumb_width = 320
+        thumb_height = 240
+        margin = 20
+        label_height = 40
+        columns = 3
+        rows = (len(photo_sheet_items) + columns - 1) // columns
+        sheet_width = columns * thumb_width + (columns + 1) * margin
+        sheet_height = rows * (thumb_height + label_height) + (rows + 1) * margin
+        sheet = Image.new("RGB", (sheet_width, sheet_height), "white")
+        draw = ImageDraw.Draw(sheet)
+        for item_index, item in enumerate(photo_sheet_items):
+            label = str(item.get("label", "") or "").strip()
+            image_path_value = str(item.get("image_path", "") or "").strip()
+            if not image_path_value:
+                continue
+            image_path = Path(image_path_value)
+            if not image_path.exists():
+                continue
+            try:
+                source_image = Image.open(image_path).convert("RGB")
+            except Exception:
+                continue
+            thumbnail = ImageOps.contain(source_image, (thumb_width, thumb_height))
+            tile = Image.new("RGB", (thumb_width, thumb_height), "#dddddd")
+            tile.paste(
+                thumbnail,
+                ((thumb_width - thumbnail.width) // 2, (thumb_height - thumbnail.height) // 2),
+            )
+            column_index = item_index % columns
+            row_index = item_index // columns
+            x = margin + column_index * (thumb_width + margin)
+            y = margin + row_index * (thumb_height + label_height + margin)
+            sheet.paste(tile, (x, y))
+            draw.text((x, y + thumb_height + 8), label, fill="black")
+        mapping_lines = [
+            str(item.get("label", "") or "").strip()
+            for item in photo_sheet_items
+            if str(item.get("label", "") or "").strip()
+        ]
+        mapping_text = "\n".join(mapping_lines)
+        exif = Image.Exif()
+        exif[270] = mapping_text
+        exif[37510] = mapping_text.encode("utf-8")
+        sheet.save(debug_dir / f"{stem}_photos.jpg", quality=90, exif=exif)
 
 
 def build_gui_index_payload(
@@ -2153,10 +2451,69 @@ def build_batch_result_message(
     )
 
 
+def build_run_prompt_snapshot(
+    *,
+    day_id: str,
+    joined_rows: Sequence[Mapping[str, str]],
+    candidate: Mapping[str, Any],
+    window_radius: int,
+    window_schema: str,
+    window_schema_seed: int,
+    boundary_gap_seconds: int,
+    boundary_rows_by_pair: Mapping[tuple[str, str], Mapping[str, str]],
+    photo_pre_model_dir: Optional[Path],
+    ml_hint_context: Optional[MlHintContext],
+    prompt_template_id: str,
+    prompt_template_file: str,
+    extra_instructions: str,
+    response_schema_mode: str,
+) -> tuple[str, Path, Optional[Dict[str, Any]]]:
+    cut_index = int(candidate["cut_index"])
+    window_rows, group_a_count = build_window_rows_for_cut_index(
+        joined_rows=joined_rows,
+        cut_index=cut_index,
+        window_radius=window_radius,
+        window_schema=window_schema,
+        window_schema_seed=window_schema_seed,
+        boundary_gap_seconds=boundary_gap_seconds,
+    )
+    if not window_rows:
+        raise ValueError(f"candidate window at cut_index={cut_index} produced no rows")
+    ml_hint_lines = build_ml_hint_lines_for_window_rows(
+        day_id=day_id,
+        window_rows=window_rows,
+        boundary_rows_by_pair=boundary_rows_by_pair,
+        photo_pre_model_dir=photo_pre_model_dir,
+        ml_hint_context=ml_hint_context,
+        runtime_window_radius=window_radius,
+    )
+    group_a_ids, group_b_ids = build_runtime_group_ids(
+        group_a_count,
+        max(0, len(window_rows) - group_a_count),
+    )
+    rendered_user_prompt, prompt_template_path = render_runtime_user_prompt(
+        prompt_template_id=prompt_template_id,
+        prompt_template_file=prompt_template_file,
+        group_a_ids=group_a_ids,
+        group_b_ids=group_b_ids,
+        ml_hint_lines=ml_hint_lines,
+        extra_instructions=extra_instructions,
+    )
+    response_schema = (
+        build_response_schema(group_a_ids=group_a_ids, group_b_ids=group_b_ids)
+        if response_schema_mode == "on"
+        else None
+    )
+    return rendered_user_prompt, prompt_template_path, response_schema
+
+
 def run_vlm_window_analysis(
     *,
     window_rows: Sequence[Mapping[str, str]],
+    group_a_count: Optional[int] = None,
     ml_hint_lines: Sequence[str],
+    window_schema: str = DEFAULT_WINDOW_SCHEMA,
+    response_contract_id: str = DEFAULT_RESPONSE_CONTRACT_ID,
     provider: str,
     base_url: str,
     model: str,
@@ -2169,17 +2526,30 @@ def run_vlm_window_analysis(
     extra_instructions: str,
     response_schema_mode: str = DEFAULT_RESPONSE_SCHEMA_MODE,
     json_validation_mode: str = DEFAULT_JSON_VALIDATION_MODE,
+    prompt_template_id: str = DEFAULT_PROMPT_TEMPLATE_ID,
+    prompt_template_file: str = "",
     debug_dir: Optional[Path] = None,
     debug_run_id: str = "",
     debug_batch_index: int = 1,
 ) -> Dict[str, Any]:
     window_size = len(window_rows)
-    response_schema = build_response_schema(window_size) if response_schema_mode == "on" else None
-    prompt = build_user_prompt(
-        window_size=window_size,
+    resolved_group_a_count = group_a_count if group_a_count is not None else max(1, window_size // 2)
+    group_a_ids, group_b_ids = build_runtime_group_ids(
+        resolved_group_a_count,
+        max(0, window_size - resolved_group_a_count),
+    )
+    response_schema = (
+        build_response_schema(group_a_ids=group_a_ids, group_b_ids=group_b_ids)
+        if response_schema_mode == "on"
+        else None
+    )
+    prompt, _ = render_runtime_user_prompt(
+        prompt_template_id=prompt_template_id,
+        prompt_template_file=prompt_template_file,
+        group_a_ids=group_a_ids,
+        group_b_ids=group_b_ids,
         ml_hint_lines=ml_hint_lines,
         extra_instructions=extra_instructions,
-        response_schema_mode=response_schema_mode,
     )
     request = build_vlm_request(
         provider=provider,
@@ -2196,6 +2566,13 @@ def run_vlm_window_analysis(
         reasoning_level=reasoning_level,
         response_schema=response_schema,
     )
+    photo_sheet_items = [
+        {
+            "label": f"{frame_id} {Path(str(row.get('relative_path', '') or '')).name}",
+            "image_path": str(row.get("image_path", "") or "").strip(),
+        }
+        for frame_id, row in zip([*group_a_ids, *group_b_ids], window_rows)
+    ]
     request_payload = build_provider_request_payload(request) if debug_dir is not None else None
     try:
         response = run_vlm_request(request)
@@ -2209,6 +2586,7 @@ def run_vlm_window_analysis(
                 request_payload=request_payload or {},
                 response_payload=None,
                 error_text=str(error),
+                photo_sheet_items=photo_sheet_items,
             )
         raise
     if debug_dir is not None:
@@ -2220,19 +2598,83 @@ def run_vlm_window_analysis(
             request_payload=request_payload or {},
             response_payload=response.raw_response,
             error_text=None,
+            photo_sheet_items=photo_sheet_items,
         )
     raw_response = response.text
     parsed_response = parse_model_response(
         raw_response,
-        window_size=window_size,
+        group_a_ids=group_a_ids,
+        group_b_ids=group_b_ids,
+        response_contract_id=response_contract_id,
         json_validation_mode=json_validation_mode,
     )
+    if parsed_response["response_status"] == "invalid_response" and should_retry_structural_response_error(
+        parsed_response["reason"]
+    ):
+        repair_prompt = (
+            prompt
+            + "\n\nRepair instruction:\n"
+            + "Your previous answer violated the JSON structure. Return the same analysis again, but include every frame_id exactly once."
+        )
+        repair_request = build_vlm_request(
+            provider=provider,
+            base_url=base_url,
+            response_schema_mode=response_schema_mode,
+            prompt=repair_prompt,
+            image_paths=[Path(str(row["image_path"])) for row in window_rows],
+            model=model,
+            timeout_seconds=timeout_seconds,
+            keep_alive=keep_alive,
+            temperature=temperature,
+            context_tokens=context_tokens,
+            max_output_tokens=max_output_tokens,
+            reasoning_level=reasoning_level,
+            response_schema=response_schema,
+        )
+        request = repair_request
+        prompt = repair_prompt
+        request_payload = build_provider_request_payload(request) if debug_dir is not None else None
+        response = run_vlm_request(repair_request)
+        raw_response = response.text
+        parsed_response = parse_model_response(
+            raw_response,
+            group_a_ids=group_a_ids,
+            group_b_ids=group_b_ids,
+            response_contract_id=response_contract_id,
+            json_validation_mode=json_validation_mode,
+        )
+    if debug_dir is not None and str(parsed_response.get("response_status", "") or "") != "ok":
+        dump_debug_artifacts(
+            debug_dir=debug_dir,
+            run_id=debug_run_id,
+            batch_index=debug_batch_index,
+            prompt=prompt,
+            request_payload=request_payload or {},
+            response_payload=response.raw_response,
+            error_text=str(parsed_response.get("reason", "") or "invalid VLM response"),
+            photo_sheet_items=photo_sheet_items,
+        )
     return {
         "prompt": prompt,
         "request": request,
         "raw_response": raw_response,
         "parsed_response": parsed_response,
     }
+
+
+def should_retry_structural_response_error(reason: str) -> bool:
+    return any(
+        reason.startswith(prefix)
+        for prefix in (
+            "Missing frame_notes array",
+            "Invalid frame_notes item",
+            "Missing frame_id value in frame_notes",
+            "Invalid frame_id value:",
+            "duplicate frame_id:",
+            "Invalid group for ",
+            "Missing frame_notes value for ",
+        )
+    )
 
 
 def build_manual_vlm_debug_run_id(anchor_pair: Mapping[str, Any]) -> str:
@@ -2285,7 +2727,9 @@ def run_manual_vlm_anchor_analysis(
     )
     analysis = run_vlm_window_analysis(
         window_rows=window_rows,
+        group_a_count=window_radius,
         ml_hint_lines=ml_hint_lines,
+        window_schema=DEFAULT_WINDOW_SCHEMA,
         provider=provider,
         base_url=base_url,
         model=model,
@@ -2338,8 +2782,10 @@ def probe_vlm_photo_boundaries(
     json_validation_mode: str = DEFAULT_JSON_VALIDATION_MODE,
     args_payload: Mapping[str, Any],
     new_run: bool,
+    window_schema: str = DEFAULT_WINDOW_SCHEMA,
+    window_schema_seed: int = DEFAULT_WINDOW_SCHEMA_SEED,
+    response_contract_id: str = DEFAULT_RESPONSE_CONTRACT_ID,
 ) -> int:
-    window_size = window_radius_to_window_size(window_radius)
     config_hash = build_config_hash(args_payload)
     joined_rows = read_joined_rows(
         workspace_dir=workspace_dir,
@@ -2389,7 +2835,22 @@ def probe_vlm_photo_boundaries(
     run_id = str(run_state["run_id"] or "")
     if not run_id:
         run_id = build_run_id(generated_at)
-        response_schema = build_response_schema(window_size) if str(args_payload.get("response_schema_mode", "off")) == "on" else None
+        rendered_user_prompt, prompt_template_path, response_schema = build_run_prompt_snapshot(
+            day_id=day_id,
+            joined_rows=joined_rows,
+            candidate=candidate_windows[0],
+            window_radius=window_radius,
+            window_schema=window_schema,
+            window_schema_seed=window_schema_seed,
+            boundary_gap_seconds=boundary_gap_seconds,
+            boundary_rows_by_pair=boundary_rows_by_pair,
+            photo_pre_model_dir=photo_pre_model_dir,
+            ml_hint_context=ml_hint_context,
+            prompt_template_id=str(args_payload.get("prompt_template_id", DEFAULT_PROMPT_TEMPLATE_ID)),
+            prompt_template_file=str(args_payload.get("prompt_template_file", "") or ""),
+            extra_instructions=extra_instructions,
+            response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
+        )
         write_run_metadata(
             workspace_dir=workspace_dir,
             run_id=run_id,
@@ -2400,12 +2861,10 @@ def probe_vlm_photo_boundaries(
             output_csv=output_csv,
             args_payload=args_payload,
             system_prompt=build_system_prompt(str(args_payload.get("response_schema_mode", "off"))),
-            user_prompt_template=build_user_prompt_template(
-                window_size=window_size,
-                extra_instructions=extra_instructions,
-                response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
-            ),
+            rendered_user_prompt=rendered_user_prompt,
             response_schema=response_schema,
+            response_contract_id=response_contract_id,
+            prompt_template_file=str(prompt_template_path),
         )
         console.print(
             build_run_start_message(
@@ -2434,25 +2893,42 @@ def probe_vlm_photo_boundaries(
         console=console,
     ) as progress:
         task = progress.add_task("Probe VLM candidate gaps".ljust(25), total=len(candidate_windows))
+        global_row_by_relative_path = {
+            str(row.get("relative_path", "") or "").strip(): index
+            for index, row in enumerate(joined_rows, start=1)
+        }
         for batch_offset, candidate in enumerate(candidate_windows, start=1):
             batch_index = completed_batches + batch_offset
-            start_index = int(candidate["start_index"])
             cut_index = int(candidate["cut_index"])
             time_gap_seconds = int(candidate["time_gap_seconds"])
-            end_index = start_index + window_size
-            window_rows = joined_rows[start_index:end_index]
-            ml_hint_lines = build_ml_hint_lines_for_candidate(
-                day_id=day_id,
+            window_rows, group_a_count = build_window_rows_for_cut_index(
                 joined_rows=joined_rows,
                 cut_index=cut_index,
+                window_radius=window_radius,
+                window_schema=window_schema,
+                window_schema_seed=window_schema_seed,
+                boundary_gap_seconds=boundary_gap_seconds,
+            )
+            if not window_rows:
+                raise ValueError(f"candidate window at cut_index={cut_index} produced no rows")
+            global_row_numbers = [
+                global_row_by_relative_path[str(row.get("relative_path", "") or "").strip()]
+                for row in window_rows
+            ]
+            ml_hint_lines = build_ml_hint_lines_for_window_rows(
+                day_id=day_id,
+                window_rows=window_rows,
                 boundary_rows_by_pair=boundary_rows_by_pair,
                 photo_pre_model_dir=photo_pre_model_dir,
                 ml_hint_context=ml_hint_context,
                 runtime_window_radius=window_radius,
             )
+            window_size = len(window_rows)
             analysis = run_vlm_window_analysis(
                 window_rows=window_rows,
+                group_a_count=group_a_count,
                 ml_hint_lines=ml_hint_lines,
+                window_schema=window_schema,
                 provider=provider,
                 base_url=ollama_base_url,
                 model=model,
@@ -2465,26 +2941,40 @@ def probe_vlm_photo_boundaries(
                 extra_instructions=extra_instructions,
                 response_schema_mode=str(args_payload.get("response_schema_mode", "off")),
                 json_validation_mode=json_validation_mode,
+                response_contract_id=response_contract_id,
+                prompt_template_id=str(args_payload.get("prompt_template_id", DEFAULT_PROMPT_TEMPLATE_ID)),
+                prompt_template_file=str(args_payload.get("prompt_template_file", "") or ""),
                 debug_dir=dump_debug_dir,
                 debug_run_id=run_id,
                 debug_batch_index=batch_index,
             )
             raw_response = str(analysis["raw_response"])
             parsed_response = analysis["parsed_response"]
+            candidate_cut_relative_paths = None
+            candidate_cut_global_row = None
+            if 0 <= cut_index < len(joined_rows) - 1:
+                candidate_cut_relative_paths = (
+                    str(joined_rows[cut_index]["relative_path"]),
+                    str(joined_rows[cut_index + 1]["relative_path"]),
+                )
+                candidate_cut_global_row = cut_index + 1
             result_row = build_result_row(
                 generated_at=generated_at,
                 run_id=run_id,
                 config_hash=config_hash,
                 image_variant=image_variant,
                 batch_index=batch_index,
-                start_row=start_index + 1,
-                end_row=end_index,
+                start_row=min(global_row_numbers),
+                end_row=max(global_row_numbers),
                 rows=window_rows,
                 window_radius=window_radius,
                 raw_response=raw_response,
                 parsed_response=parsed_response,
                 model=model,
                 temperature=temperature,
+                global_row_numbers=global_row_numbers,
+                candidate_cut_relative_paths=candidate_cut_relative_paths,
+                candidate_cut_global_row=candidate_cut_global_row,
             )
             append_result_rows(output_csv, [result_row])
             if str(result_row["decision"]).startswith("cut_after_"):
@@ -2493,16 +2983,16 @@ def probe_vlm_photo_boundaries(
                 no_cut_count += 1
             else:
                 invalid_count += 1
-            progress.console.print(
-                build_batch_result_message(
-                    batch_index=batch_index,
-                    total_batches=len(all_candidates),
-                    time_gap_seconds=time_gap_seconds,
-                    start_row=start_index + 1,
-                    end_row=end_index,
-                    decision=str(result_row["decision"]),
-                    cuts=cut_count,
-                    no_cut=no_cut_count,
+                progress.console.print(
+                    build_batch_result_message(
+                        batch_index=batch_index,
+                        total_batches=len(all_candidates),
+                        time_gap_seconds=time_gap_seconds,
+                        start_row=min(global_row_numbers),
+                        end_row=max(global_row_numbers),
+                        decision=str(result_row["decision"]),
+                        cuts=cut_count,
+                        no_cut=no_cut_count,
                     invalid=invalid_count,
                 )
             )
@@ -2540,6 +3030,8 @@ def main() -> int:
         "output_csv": str(output_csv),
         "image_variant": args.image_variant,
         "window_radius": args.window_radius,
+        "window_schema": args.window_schema,
+        "window_schema_seed": args.window_schema_seed,
         "boundary_gap_seconds": args.boundary_gap_seconds,
         "max_batches": args.max_batches,
         "model": args.model,
@@ -2552,6 +3044,9 @@ def main() -> int:
         "ollama_think": args.ollama_think,
         "response_schema_mode": args.response_schema_mode,
         "json_validation_mode": args.json_validation_mode,
+        "prompt_template_id": args.prompt_template_id,
+        "prompt_template_file": args.prompt_template_file,
+        "response_contract_id": DEFAULT_RESPONSE_CONTRACT_ID,
         "photo_pre_model_dir": str(resolve_path(workspace_dir, args.photo_pre_model_dir)),
         "requested_ml_model_run_id": args.ml_model_run_id,
         "effective_ml_model_run_id": effective_ml_model_run_id,
@@ -2570,6 +3065,8 @@ def main() -> int:
         provider=args.provider,
         image_variant=args.image_variant,
         window_radius=args.window_radius,
+        window_schema=args.window_schema,
+        window_schema_seed=args.window_schema_seed,
         boundary_gap_seconds=args.boundary_gap_seconds,
         max_batches=args.max_batches,
         model=args.model,
@@ -2592,6 +3089,7 @@ def main() -> int:
         json_validation_mode=args.json_validation_mode,
         args_payload=args_payload,
         new_run=bool(args.new_run),
+        response_contract_id=str(args_payload["response_contract_id"]),
     )
     console.print(f"Wrote {row_count} VLM probe rows to {output_csv}")
     return 0

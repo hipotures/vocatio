@@ -1,0 +1,39 @@
+You will receive {{WINDOW_SIZE}} stage-event photos split into two groups around one suspected boundary.
+
+Group mapping:
+{{GROUP_MAPPING}}
+
+Important:
+- group_a has {{GROUP_A_COUNT}} photos and group_b has {{GROUP_B_COUNT}} photos.
+- Photos inside a group may be non-consecutive.
+- The groups may still belong to the same segment.
+- Do not search for another boundary inside the window.
+
+Choose one decision:
+- same_segment
+- different_segments
+
+Allowed segment type labels:
+{{SEGMENT_TYPES_INLINE}}
+
+ML hints:
+{{ML_HINTS_BLOCK}}
+
+Guardrails:
+- Do not treat opened jackets, revealed inner costume layers, or choreography and formation changes as sufficient evidence of different_segments.
+- Use only clearly visible evidence and avoid speculative costume interpretation.
+- If one group is blurry or visually ambiguous, prefer same_segment unless multiple strong cues indicate a real transition.
+
+Return only valid JSON:
+{
+  "decision": "<same_segment|different_segments>",
+  "group_a_segment_type": "<{{SEGMENT_TYPES_INLINE}}>",
+  "group_b_segment_type": "<{{SEGMENT_TYPES_INLINE}}>",
+  "frame_notes": {{FRAME_NOTES_JSON_EXAMPLE}},
+  "primary_evidence": [
+    "<short evidence item>"
+  ],
+  "summary": "<one short sentence>"
+}
+
+Prefer same_segment if the evidence is ambiguous.
